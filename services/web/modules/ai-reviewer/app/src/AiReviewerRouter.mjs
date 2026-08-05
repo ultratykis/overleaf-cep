@@ -16,6 +16,7 @@
  *   createConnection: (...args: any[]) => unknown,
  *   updateConnection: (...args: any[]) => unknown,
  *   deleteConnection: (...args: any[]) => unknown,
+ *   resetCircuit: (...args: any[]) => unknown,
  *   listSkills: (...args: any[]) => unknown,
  *   uploadSkill: (...args: any[]) => unknown,
  *   previewSkillGitImport: (...args: any[]) => unknown,
@@ -43,6 +44,7 @@ export function createAiReviewerRouter({
   createConnection,
   updateConnection,
   deleteConnection,
+  resetCircuit,
   listSkills,
   uploadSkill,
   previewSkillGitImport,
@@ -245,6 +247,12 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/skills/:skill_id",
         ...commonMiddleware,
         deleteSkill,
+      );
+
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/connections/:connection_id/circuit-reset",
+        ...commonMiddleware,
+        resetCircuit,
       );
     },
   };

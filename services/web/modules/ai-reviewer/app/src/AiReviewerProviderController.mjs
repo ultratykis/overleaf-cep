@@ -80,6 +80,20 @@ const ERRORS = Object.freeze({
       "AI Reviewer could not save the provider configuration on this server. Ask the server administrator to check AI Reviewer storage and permissions, then try again.",
     retryable: false,
   }),
+  circuitOpen: Object.freeze({
+    code: "AI_PROVIDER_CIRCUIT_OPEN",
+    category: "configuration",
+    message:
+      "This AI provider connection was stopped after repeated failures. Check and save its settings before trying again.",
+    retryable: false,
+  }),
+  cooldown: Object.freeze({
+    code: "AI_PROVIDER_COOLDOWN",
+    category: "rate-limit",
+    message:
+      "This AI provider connection is cooling down after a failure. Wait a few seconds before trying again.",
+    retryable: true,
+  }),
   timeout: Object.freeze({
     code: "AI_REQUEST_TIMEOUT",
     category: "timeout",
@@ -183,6 +197,18 @@ function providerFailureKind(error) {
 function modelFailureKind(error) {
   if (
     error instanceof AgentGatewayError &&
+    error.code === ERRORS.circuitOpen.code
+  ) {
+    return /** @type {const} */ ("circuitOpen");
+  }
+  if (
+    error instanceof AgentGatewayError &&
+    error.code === ERRORS.cooldown.code
+  ) {
+    return /** @type {const} */ ("cooldown");
+  }
+  if (
+    error instanceof AgentGatewayError &&
     error.code === ERRORS.plaintextCredential.code
   ) {
     return /** @type {const} */ ("plaintextCredential");
@@ -220,6 +246,7 @@ export function createAiReviewerProviderController(dependencies) {
     configStore,
     providerService,
     workspaceStore,
+    circuitBreakerStore = null,
     failureRecorder = () => {},
     elapsedNow = () => performance.now(),
   } = dependencies;
@@ -330,6 +357,19 @@ export function createAiReviewerProviderController(dependencies) {
             config,
             expectedRevision,
           );
+      if (!create) {
+        try {
+          await circuitBreakerStore?.reset(saved.id);
+        } catch (error) {
+          // Saving already committed the new revision. Circuit cleanup is
+          // recoverable through the explicit reset route and must not make the
+          // client retain the previous revision.
+          logger.warn(
+            { err: error },
+            "AI reviewer saved connection circuit reset failed",
+          );
+        }
+      }
       return response.json(publicAiReviewerProviderConnection(saved));
     } catch (error) {
       if (error instanceof AiReviewerConnectionNotFoundError) {
@@ -378,14 +418,25 @@ export function createAiReviewerProviderController(dependencies) {
     const startedAt = readElapsedNow(elapsedNow);
     try {
       const authenticatedUserId = userId(request);
+      const connections = await configStore.remove(
+        authenticatedUserId,
+        connectionId,
+        expectedRevision,
+      );
+      try {
+        await circuitBreakerStore?.reset(connectionId);
+      } catch (error) {
+        // The connection is already gone and its server-issued id is never
+        // reused, so stale guard cleanup must not turn deletion into a retry.
+        logger.warn(
+          { err: error },
+          "AI reviewer deleted connection circuit cleanup failed",
+        );
+      }
       return await sendConnections(
         response,
         authenticatedUserId,
-        await configStore.remove(
-          authenticatedUserId,
-          connectionId,
-          expectedRevision,
-        ),
+        connections,
       );
     } catch (error) {
       if (error instanceof AiReviewerConnectionNotFoundError) {
@@ -494,6 +545,7 @@ export function createAiReviewerProviderController(dependencies) {
             if (connection.credentialLoadFailed === true) {
               return { connection, credentialLoadFailed: true };
             }
+            await circuitBreakerStore?.assertRequestAllowed(connection.id);
             const cacheKey = aiReviewerModelCacheKey(
               authenticatedUserId,
               connection.id,
@@ -621,6 +673,7 @@ export function createAiReviewerProviderController(dependencies) {
       if (timeout.aborted) {
         throw timeout.reason;
       }
+      await circuitBreakerStore?.assertRequestAllowed(connection.id);
       return response.json(
         await providerService.testConnection(connection, { signal }),
       );
@@ -638,15 +691,43 @@ export function createAiReviewerProviderController(dependencies) {
       const kind = modelFailureKind(error);
       return sendError(
         response,
-        kind === "unsupported"
-          ? 501
-          : kind === "plaintextCredential"
-            ? 409
-            : 502,
+        kind === "circuitOpen"
+          ? 409
+          : kind === "cooldown"
+            ? 429
+            : kind === "unsupported"
+              ? 501
+              : kind === "plaintextCredential"
+                ? 409
+                : 502,
         kind,
       );
     } finally {
       request.removeListener?.("aborted", onAborted);
+    }
+  }
+
+  /**
+   * Explicit recovery is authenticated and ownership-checked exactly like a
+   * connection test. It never contacts the provider.
+   *
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function resetCircuit(request, response) {
+    const connection = await loadSelectedConnection(request, response);
+    if (connection == null) {
+      return response;
+    }
+    try {
+      await circuitBreakerStore?.reset(connection.id);
+      return response.json({ ok: true });
+    } catch (error) {
+      logger.error(
+        { err: error },
+        "AI reviewer connection circuit reset failed",
+      );
+      return sendError(response, 500, "persistence");
     }
   }
 
@@ -660,5 +741,6 @@ export function createAiReviewerProviderController(dependencies) {
     updateConnection: (request, response) =>
       writeConnection(request, response, false),
     deleteConnection,
+    resetCircuit,
   };
 }

@@ -944,4 +944,90 @@ describe("AI reviewer panel width", function () {
       assertNarrowLayoutContract(width, discussionLayoutSelectors);
     });
   }
+
+  it("shows the stopped-connection recovery path in the panel", async function () {
+    const streamRequest = async () => {
+      throw new AgentStreamError({
+        code: "AI_PROVIDER_CIRCUIT_OPEN",
+        category: "configuration",
+        message: "Bounded circuit-breaker wording.",
+        retryable: false,
+      });
+    };
+    const resetConnections: string[] = [];
+    const ProviderSettings = () => <p>Circuit settings opened</p>;
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        captureSelectionSession={async ({ requestId }) => ({
+          status: "ready",
+          session: {
+            request: {
+              requestId,
+              projectId,
+              action: "review",
+              instruction: "Review the selected phrase.",
+              skill: "referee-review" as const,
+              connectionId: "layout-connection",
+              model: "layout-model",
+              scope: {
+                kind: "selection",
+                documentId: "panel-circuit-document",
+                path: "main.tex",
+                baseRevision: 1,
+                baseTextHash,
+                range: { from: 0, to: 4 },
+                text: "Body",
+              },
+            },
+            binding: {
+              currentDocument: {
+                doc_id: "panel-circuit-document",
+                joined: true,
+                getSnapshot: () => "Body",
+                hasBufferedOps: () => false,
+                getTrackingChanges: () => false,
+              },
+              shareDocument: {
+                connection: { state: "ready" },
+                getVersion: () => 1,
+              },
+              trackChanges: false,
+              connectionEpoch: 0,
+            },
+          },
+        })}
+        selectionPreview={{
+          filename: "main.tex",
+          fromLine: 1,
+          toLine: 1,
+          wordCount: 1,
+        }}
+        streamRequest={streamRequest}
+        resetProviderCircuit={async (_project, connection) => {
+          resetConnections.push(connection);
+          return { ok: true as const };
+        }}
+        providerSettingsComponent={ProviderSettings}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+
+    expect(
+      await screen.findByText(
+        "This connection was stopped after repeated provider failures. Check and save the connection settings to enable it again.",
+      ),
+    ).to.exist;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Enable connection" }),
+    );
+    await waitFor(() =>
+      expect(resetConnections).to.deep.equal(["layout-connection"]),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open connection settings" }),
+    );
+    expect(await screen.findByText("Circuit settings opened")).to.exist;
+  });
 });

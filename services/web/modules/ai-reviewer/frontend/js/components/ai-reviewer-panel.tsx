@@ -125,6 +125,7 @@ import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
 import {
   getAiProviderConnections,
   getAiProviderModels,
+  resetAiProviderConnectionCircuit,
   type AiProviderConnection,
   type AiProviderModel,
   type AiProviderModelFailure,
@@ -474,6 +475,10 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_connection_not_found");
     case "configuration:AI_PROVIDER_MODEL_NOT_SELECTED":
       return t("ai_reviewer_error_guidance_model_not_selected");
+    case "configuration:AI_PROVIDER_CIRCUIT_OPEN":
+      return t("ai_reviewer_error_guidance_circuit_open");
+    case "rate-limit:AI_PROVIDER_COOLDOWN":
+      return t("ai_reviewer_error_guidance_cooldown");
     case "configuration:AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED":
       return t("ai_reviewer_provider_plaintext_credential_blocked");
     case "network:AI_PROVIDER_NETWORK_ERROR":
@@ -1357,6 +1362,7 @@ export function AiReviewerPanelView({
   modeInstructionPersistence,
   loadProviderConnections,
   loadProviderModels,
+  resetProviderCircuit = resetAiProviderConnectionCircuit,
   providerSettingsComponent: ProviderSettings = AiIntegrationDetails,
 }: {
   projectId: string;
@@ -1379,6 +1385,7 @@ export function AiReviewerPanelView({
   modeInstructionPersistence?: AiReviewerModeInstructionPersistence;
   loadProviderConnections?: typeof getAiProviderConnections;
   loadProviderModels?: typeof getAiProviderModels;
+  resetProviderCircuit?: typeof resetAiProviderConnectionCircuit;
   providerSettingsComponent?: ComponentType<{
     onHide: (connectionsChanged: boolean) => void;
   }>;
@@ -1425,6 +1432,14 @@ export function AiReviewerPanelView({
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
     [],
   );
+  const [circuitResetPending, setCircuitResetPending] = useState<string | null>(
+    null,
+  );
+  const [circuitResetError, setCircuitResetError] = useState<string | null>(
+    null,
+  );
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const activeCircuitReset = useRef<AbortController | null>(null);
   const modelCatalogProjectId = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
@@ -1451,6 +1466,46 @@ export function AiReviewerPanelView({
     setModelCatalogError(false);
     refreshProviderCatalog();
   }, [refreshProviderCatalog]);
+  const resetStoppedConnection = useCallback(
+    (connectionId: string) => {
+      if (activeCircuitReset.current != null) {
+        return;
+      }
+      const controller = new AbortController();
+      activeCircuitReset.current = controller;
+      setCircuitResetPending(connectionId);
+      setCircuitResetError(null);
+      void resetProviderCircuit(projectId, connectionId, controller.signal).then(
+        () => {
+          if (
+            !controller.signal.aborted &&
+            activeCircuitReset.current === controller
+          ) {
+            activeCircuitReset.current = null;
+            setCircuitResetPending(null);
+            setActionNotice(t("ai_reviewer_provider_circuit_reset"));
+            refreshProviderCatalog();
+          }
+        },
+        () => {
+          if (
+            !controller.signal.aborted &&
+            activeCircuitReset.current === controller
+          ) {
+            activeCircuitReset.current = null;
+            setCircuitResetPending(null);
+            setCircuitResetError(connectionId);
+          }
+        },
+      );
+    },
+    [
+      projectId,
+      refreshProviderCatalog,
+      resetProviderCircuit,
+      t,
+    ],
+  );
   const recoverMissingProviderConnection = useCallback(() => {
     setSelectedModel(null);
     refreshProviderCatalog();
@@ -1485,7 +1540,6 @@ export function AiReviewerPanelView({
   const [persistenceNotice, setPersistenceNotice] = useState<string | null>(
     null,
   );
-  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
   const [persistenceMutationPending, setPersistenceMutationPending] =
     useState(false);
@@ -2129,6 +2183,10 @@ export function AiReviewerPanelView({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      activeCircuitReset.current?.abort(
+        cancellationReason("The AI reviewer panel was closed."),
+      );
+      activeCircuitReset.current = null;
       persistenceGeneration.current += 1;
       activePersistenceOperation.current?.controller.abort(
         cancellationReason("The AI reviewer panel was closed."),
@@ -4683,18 +4741,42 @@ export function AiReviewerPanelView({
       </ul>
     );
 
-  const renderModelContextSettingsAction = (errorCode: string | null) =>
+  const renderConnectionSettingsAction = (
+    errorCode: string | null,
+    connectionId: string | null = null,
+  ) =>
     errorCode === "AI_MODEL_CONTEXT_TOO_SMALL" ||
-    errorCode === "AI_MODEL_CONTEXT_UNKNOWN" ? (
-      <OLButton
-        type="button"
-        variant="link"
-        size="sm"
-        className="btn-inline-link ai-reviewer-context-settings-link"
-        onClick={() => setShowProviderSettings(true)}
-      >
-        {t("ai_reviewer_open_connection_settings")}
-      </OLButton>
+    errorCode === "AI_MODEL_CONTEXT_UNKNOWN" ||
+    errorCode === "AI_PROVIDER_CIRCUIT_OPEN" ? (
+      <div className="ai-reviewer-panel-actions">
+        {errorCode === "AI_PROVIDER_CIRCUIT_OPEN" && connectionId != null && (
+          <OLButton
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={circuitResetPending != null}
+            onClick={() => resetStoppedConnection(connectionId)}
+          >
+            {circuitResetPending === connectionId
+              ? t("ai_reviewer_provider_circuit_resetting")
+              : t("ai_reviewer_provider_circuit_reset_action")}
+          </OLButton>
+        )}
+        <OLButton
+          type="button"
+          variant="link"
+          size="sm"
+          className="btn-inline-link ai-reviewer-context-settings-link"
+          onClick={() => setShowProviderSettings(true)}
+        >
+          {t("ai_reviewer_open_connection_settings")}
+        </OLButton>
+        {connectionId != null && circuitResetError === connectionId && (
+          <p className="mb-0" role="alert">
+            {t("ai_reviewer_provider_circuit_reset_failed")}
+          </p>
+        )}
+      </div>
     ) : null;
 
   /**
@@ -4850,7 +4932,10 @@ export function AiReviewerPanelView({
           role="alert"
         >
           {runState.error}
-          {renderModelContextSettingsAction(runState.errorCode)}
+          {renderConnectionSettingsAction(
+            runState.errorCode,
+            runState.request?.connectionId ?? null,
+          )}
         </div>
       )}
     </article>
@@ -5140,7 +5225,12 @@ export function AiReviewerPanelView({
             role="alert"
           >
             {discussion.error}
-            {renderModelContextSettingsAction(discussion.errorCode)}
+            {renderConnectionSettingsAction(
+              discussion.errorCode,
+              discussion.subject?.sourceRequest.connectionId ??
+                runModel?.connectionId ??
+                null,
+            )}
           </div>
         )}
       </article>
@@ -5252,6 +5342,12 @@ export function AiReviewerPanelView({
     connectionsLoaded &&
     !connectionCatalogError &&
     connections.length === 0;
+  const stoppedModelFailures = modelFailures.filter(
+    (failure) => failure.code === "AI_PROVIDER_CIRCUIT_OPEN",
+  );
+  const otherModelFailures = modelFailures.filter(
+    (failure) => failure.code !== "AI_PROVIDER_CIRCUIT_OPEN",
+  );
   return (
     <section
       aria-label={t("ai_reviewer_title")}
@@ -5499,17 +5595,40 @@ export function AiReviewerPanelView({
             className="ai-reviewer-panel-footer"
             data-testid="ai-reviewer-bottom-controls"
           >
-            {modelFailures.length > 0 && (
-              <p
-                className="ai-reviewer-panel-model-failures form-text mb-0"
-                data-testid="ai-reviewer-model-failures"
+            {stoppedModelFailures.length > 0 && (
+              <div
+                className="alert alert-danger ai-reviewer-panel-notice"
+                role="alert"
+                data-testid="ai-reviewer-stopped-connections"
               >
-                {t("ai_reviewer_provider_models_unavailable_for", {
-                  connections: modelFailures
-                    .map((failure) => failure.connectionLabel)
-                    .join(", "),
-                })}
-              </p>
+                {t("ai_reviewer_error_guidance_circuit_open")}
+                {renderConnectionSettingsAction(
+                  "AI_PROVIDER_CIRCUIT_OPEN",
+                  stoppedModelFailures[0].connectionId,
+                )}
+              </div>
+            )}
+            {otherModelFailures.length > 0 && (
+              <div className="ai-reviewer-panel-model-failures form-text mb-0">
+                <p className="mb-0" data-testid="ai-reviewer-model-failures">
+                  {t("ai_reviewer_provider_models_unavailable_for", {
+                    connections: otherModelFailures
+                      .map((failure) => failure.connectionLabel)
+                      .join(", "),
+                  })}
+                </p>
+                {!modelCatalogError && (
+                  <OLButton
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="btn-inline-link"
+                    onClick={retryProviderCatalog}
+                  >
+                    {t("ai_reviewer_provider_models_retry")}
+                  </OLButton>
+                )}
+              </div>
             )}
             {connectionCatalogError && (
               <div className="ai-reviewer-panel-model-failures form-text mb-0">

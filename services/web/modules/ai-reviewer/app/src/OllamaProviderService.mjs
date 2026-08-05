@@ -1,5 +1,6 @@
 // @ts-check
 
+import { createAiReviewerCircuitBreakerFetch } from "../models/AiReviewerProviderCircuitBreaker.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import {
   parseAiReviewerConnection,
@@ -427,22 +428,23 @@ export function createAiReviewerProviderService(dependencies = {}) {
     dependencies.openAiCompatibleTransportFactory ??
     dependencies.transportFactory ??
     ((
-      /** @type {{ baseUrl: string, credential?: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options,
+      /** @type {{ baseUrl: string, credential?: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
     ) => new OllamaOpenAiTransport(options));
   const geminiTransportFactory =
     dependencies.geminiTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options) =>
+    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options) =>
       new GeminiAiSdkTransport(options));
   const claudeTransportFactory =
     dependencies.claudeTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options) =>
+    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options) =>
       new ClaudeAiSdkTransport(options));
   const azureTransportFactory =
     dependencies.azureTransportFactory ??
     ((
-      /** @type {{ baseUrl: string, requestStyle: "v1" | "deployment", apiVersion?: string, credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options,
+      /** @type {{ baseUrl: string, requestStyle: "v1" | "deployment", apiVersion?: string, credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
     ) => new AzureAiSdkTransport(options));
   const modelFetchImpl = dependencies.modelFetchImpl ?? globalThis.fetch;
+  const circuitBreakerStore = dependencies.circuitBreakerStore ?? null;
   const modelCacheTtlMilliseconds =
     dependencies.modelCacheTtlMilliseconds ?? MODEL_CACHE_TTL_MILLISECONDS;
   const contextLengthCacheTtlMilliseconds =
@@ -541,8 +543,23 @@ export function createAiReviewerProviderService(dependencies = {}) {
     return null;
   }
 
-  /** @param {ReturnType<typeof parseAiReviewerProviderConfig>} config */
-  function createTransport(config) {
+  /** @param {string | null | undefined} connectionId */
+  function providerFetch(connectionId) {
+    return circuitBreakerStore == null || connectionId == null
+      ? modelFetchImpl
+      : createAiReviewerCircuitBreakerFetch({
+          circuitBreakerStore,
+          connectionId,
+          fetchImpl: modelFetchImpl,
+        });
+  }
+
+  /**
+   * @param {ReturnType<typeof parseAiReviewerProviderConfig>} config
+   * @param {string | null | undefined} connectionId
+   */
+  function createTransport(config, connectionId) {
+    const fetchImpl = providerFetch(connectionId);
     switch (config.provider) {
       case "openai-compatible":
         return openAiCompatibleTransportFactory({
@@ -552,6 +569,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
           ...(config.reasoningModelCompatibility
             ? { reasoningModelCompatibility: true }
             : {}),
+          ...(circuitBreakerStore == null ? {} : { fetchImpl }),
         });
       case "gemini":
         return geminiTransportFactory({
@@ -560,6 +578,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
           ...(config.reasoningModelCompatibility
             ? { reasoningModelCompatibility: true }
             : {}),
+          ...(circuitBreakerStore == null ? {} : { fetchImpl }),
         });
       case "claude":
         return claudeTransportFactory({
@@ -568,6 +587,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
           ...(config.reasoningModelCompatibility
             ? { reasoningModelCompatibility: true }
             : {}),
+          ...(circuitBreakerStore == null ? {} : { fetchImpl }),
         });
       case "azure":
         return azureTransportFactory({
@@ -579,6 +599,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
           ...(config.reasoningModelCompatibility
             ? { reasoningModelCompatibility: true }
             : {}),
+          ...(circuitBreakerStore == null ? {} : { fetchImpl }),
         });
     }
   }
@@ -637,6 +658,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
     const guardedFetch = createGuardedOpenAiCompatibleFetch({
       baseUrl,
       allowedRequestUrl: endpoint,
+      // Model listing is capability discovery. Unsupported endpoints are a
+      // valid configuration when the user supplied model ids, so discovery
+      // must not change the provider execution circuit.
       fetchImpl: modelFetchImpl,
     });
     const response = await guardedFetch(endpoint, {
@@ -660,6 +684,8 @@ export function createAiReviewerProviderService(dependencies = {}) {
             createGuardedOpenAiCompatibleFetch({
               baseUrl: nativeBaseUrl,
               allowedRequestUrl: `${nativeBaseUrl}/api/tags`,
+              // A 404 here means the compatible endpoint is not Ollama; it is
+              // not a provider execution failure.
               fetchImpl: modelFetchImpl,
             }),
             signal,
@@ -750,6 +776,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
                   : AbortSignal.any([signal, timeoutSignal]);
             return await contextLengthDetector({
               ...candidate,
+              // Runtime metadata probes are best-effort capability discovery,
+              // including /api/ps, /slots, and /props.
+              fetchImpl: modelFetchImpl,
               ...(signal == null ? {} : { signal }),
               ...(probeSignal == null ? {} : { probeSignal }),
             });
@@ -797,6 +826,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
           ...(config.reasoningModelCompatibility
             ? { reasoningModelCompatibility: true }
             : {}),
+          ...(circuitBreakerStore == null
+            ? {}
+            : { fetchImpl: providerFetch(config.id) }),
         }).generateChat(
           // A reasoning model spends its output budget thinking before it
           // writes anything, so a budget of one token makes the provider
@@ -837,6 +869,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
      *   projectContext?: unknown,
      *   searchZotero?: Function,
      *   validateEvidence?: Function,
+     *   connectionId?: string,
      * }} options
      */
     createAgentGateway(
@@ -848,13 +881,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
         projectContext,
         searchZotero,
         validateEvidence,
+        connectionId,
       },
     ) {
       const config = parseAiReviewerProviderConfig(input);
       if (typeof readProjectFile !== "function") {
         throw new TypeError("readProjectFile must be a function.");
       }
-      return createTransport(config).createAgentGateway({
+      return createTransport(config, connectionId).createAgentGateway({
         contextLength: config.contextLength,
         contextLengthSource: config.contextLengthSource,
         ...(skills === undefined ? {} : { skills }),

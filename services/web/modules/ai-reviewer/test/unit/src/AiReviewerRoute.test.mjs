@@ -376,6 +376,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     const createConnection = vi.fn();
     const updateConnection = vi.fn();
     const deleteConnection = vi.fn();
+    const resetCircuit = vi.fn();
     const listSkills = vi.fn();
     const uploadSkill = vi.fn();
     const previewSkillGitImport = vi.fn();
@@ -416,6 +417,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       createConnection,
       updateConnection,
       deleteConnection,
+      resetCircuit,
       listSkills,
       uploadSkill,
       previewSkillGitImport,
@@ -680,9 +682,18 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       deleteSkill,
     );
+    expect(post).toHaveBeenNthCalledWith(
+      11,
+      "/project/:project_id/ai-reviewer/connections/:connection_id/circuit-reset",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      resetCircuit,
+    );
     expect(anotherRouter.get).toHaveBeenCalledTimes(8);
     expect(anotherRouter.put).toHaveBeenCalledTimes(5);
-    expect(anotherRouter.post).toHaveBeenCalledTimes(10);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(11);
     expect(anotherRouter.delete).toHaveBeenCalledTimes(7);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);

@@ -131,6 +131,8 @@ const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
   "AI_PROVIDER_CONNECTION_CONFLICT",
   "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
   "AI_PROVIDER_CONNECTION_NOT_FOUND",
+  "AI_PROVIDER_CIRCUIT_OPEN",
+  "AI_PROVIDER_COOLDOWN",
   "AI_PROVIDER_NETWORK_FAILED",
   "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
   "AI_PROVIDER_NOT_CONFIGURED",
@@ -148,6 +150,8 @@ export type AiProviderConfigurationClientErrorCode =
   | "AI_PROVIDER_CONNECTION_CONFLICT"
   | "AI_PROVIDER_CONNECTION_LIMIT_REACHED"
   | "AI_PROVIDER_CONNECTION_NOT_FOUND"
+  | "AI_PROVIDER_CIRCUIT_OPEN"
+  | "AI_PROVIDER_COOLDOWN"
   | "AI_PROVIDER_NETWORK_FAILED"
   | "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED"
   | "AI_PROVIDER_NOT_CONFIGURED"
@@ -398,6 +402,22 @@ export function testAiProviderConnection(
       `/project/${projectId}/ai-reviewer/connection-test`,
       {
         ...(connectionId == null ? {} : { body: { connectionId } }),
+        signal,
+        swallowAbortError: false,
+      },
+    ),
+  );
+}
+
+export function resetAiProviderConnectionCircuit(
+  projectId: string,
+  connectionId: string,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    postJSON<{ ok: true }>(
+      `${connectionsPath(projectId)}/${connectionId}/circuit-reset`,
+      {
         signal,
         swallowAbortError: false,
       },

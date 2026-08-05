@@ -4,6 +4,7 @@ import { expressify } from "@overleaf/promise-utils";
 
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
+import { createAiReviewerProviderCircuitBreakerStore } from "../models/AiReviewerProviderCircuitBreaker.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { createAiReviewerCommentProvenanceController } from "./AiReviewerCommentProvenanceController.mjs";
 import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProvenanceStore.mjs";
@@ -305,6 +306,7 @@ export function createConfiguredAiReviewerController({
   eventId,
   elapsedNow,
   failureRecorder,
+  circuitBreakerStore = null,
 }) {
   return createAiReviewerController({
     async gatewayFactory(context) {
@@ -325,6 +327,11 @@ export function createConfiguredAiReviewerController({
           retryable: false,
         });
       }
+      context.setFailureProvider(
+        configuration.provider,
+        context.request.model ?? null,
+      );
+      await circuitBreakerStore?.assertRequestAllowed(configuration.id);
       const runConfiguration = await resolveRunConfiguration(
         configuration,
         context,
@@ -349,6 +356,7 @@ export function createConfiguredAiReviewerController({
         ),
       ]);
       const gateway = providerService.createAgentGateway(runConfiguration, {
+        connectionId: configuration.id,
         skills,
         modeInstructions,
         readProjectFile: scope.readProjectFile,
@@ -417,7 +425,10 @@ async function loadProjectDocuments(projectId, { signal } = {}) {
   );
 }
 
-const providerService = createAiReviewerProviderService();
+const circuitBreakerStore = createAiReviewerProviderCircuitBreakerStore();
+const providerService = createAiReviewerProviderService({
+  circuitBreakerStore,
+});
 const configStore = createAiReviewerProviderConfigStore();
 const requestScopeReader = createRequestScopeReader({
   loadProjectDocuments,
@@ -439,6 +450,7 @@ const providerController = createAiReviewerProviderController({
   providerService,
   workspaceStore,
   failureRecorder: recordAiReviewerFailure,
+  circuitBreakerStore,
 });
 const skillStore = createAiReviewerSkillStore();
 const modeInstructionStore = createAiReviewerModeInstructionStore();
@@ -454,6 +466,7 @@ const configuredController = createConfiguredAiReviewerController({
   modeInstructionStore,
   requestScopeReader,
   failureRecorder: recordAiReviewerFailure,
+  circuitBreakerStore,
 });
 const workspaceController = createAiReviewerWorkspaceController({
   workspaceStore,
@@ -473,6 +486,7 @@ export default {
   createConnection: expressify(providerController.createConnection),
   updateConnection: expressify(providerController.updateConnection),
   deleteConnection: expressify(providerController.deleteConnection),
+  resetCircuit: expressify(providerController.resetCircuit),
   listSkills: expressify(skillController.listSkills),
   uploadSkill: expressify(skillController.uploadSkill),
   previewSkillGitImport: expressify(skillController.previewGitImport),

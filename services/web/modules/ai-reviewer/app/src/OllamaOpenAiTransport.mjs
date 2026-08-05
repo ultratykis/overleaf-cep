@@ -2472,6 +2472,13 @@ export function createGuardedOpenAiCompatibleFetch({
     } catch (error) {
       closePinnedDispatcher(dispatcher);
       observeInvalidNativePromise(error);
+      if (
+        error instanceof AgentGatewayError &&
+        (error.code === "AI_PROVIDER_CIRCUIT_OPEN" ||
+          error.code === "AI_PROVIDER_COOLDOWN")
+      ) {
+        throw error;
+      }
       const signal =
         init?.signal ??
         (typeof Request !== "undefined" && input instanceof Request
@@ -3740,6 +3747,13 @@ export function createNativeProviderFetch({
     } catch (error) {
       closePinnedDispatcher(dispatcher);
       observeInvalidNativePromise(error);
+      if (
+        error instanceof AgentGatewayError &&
+        (error.code === "AI_PROVIDER_CIRCUIT_OPEN" ||
+          error.code === "AI_PROVIDER_COOLDOWN")
+      ) {
+        throw error;
+      }
       const signal =
         init?.signal ??
         (typeof Request !== "undefined" && input instanceof Request

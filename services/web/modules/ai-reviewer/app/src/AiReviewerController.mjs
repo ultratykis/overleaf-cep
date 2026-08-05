@@ -154,6 +154,22 @@ const PUBLIC_CONNECTION_SELECTION_ERROR = Object.freeze({
   retryable: false,
 });
 
+const PUBLIC_PROVIDER_CIRCUIT_OPEN_ERROR = Object.freeze({
+  code: "AI_PROVIDER_CIRCUIT_OPEN",
+  category: "configuration",
+  message:
+    "This AI provider connection was stopped after repeated failures. Check and save its settings before trying again.",
+  retryable: false,
+});
+
+const PUBLIC_PROVIDER_COOLDOWN_ERROR = Object.freeze({
+  code: "AI_PROVIDER_COOLDOWN",
+  category: "rate-limit",
+  message:
+    "This AI provider connection is cooling down after a failure. Wait a few seconds before trying again.",
+  retryable: true,
+});
+
 // A busy model and a withdrawn model both arrive as "the provider failed",
 // but only one of them clears by waiting. Split them so the panel can name the
 // action instead of offering the same generic advice for both.
@@ -423,6 +439,12 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
     }
     if (error.code === PUBLIC_CONNECTION_SELECTION_ERROR.code) {
       return { ...PUBLIC_CONNECTION_SELECTION_ERROR };
+    }
+    if (error.code === PUBLIC_PROVIDER_CIRCUIT_OPEN_ERROR.code) {
+      return { ...PUBLIC_PROVIDER_CIRCUIT_OPEN_ERROR };
+    }
+    if (error.code === PUBLIC_PROVIDER_COOLDOWN_ERROR.code) {
+      return { ...PUBLIC_PROVIDER_COOLDOWN_ERROR };
     }
     return (
       publicModelActionError(error) ?? publicErrorForCategory(error.category)

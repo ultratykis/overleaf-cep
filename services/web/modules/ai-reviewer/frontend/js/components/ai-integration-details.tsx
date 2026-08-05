@@ -650,6 +650,10 @@ function noticeContent(notice: Notice, t: TFunction): string {
       return t("ai_reviewer_connection_limit_reached");
     case "AI_PROVIDER_CONNECTION_NOT_FOUND":
       return t("ai_reviewer_connection_not_found");
+    case "AI_PROVIDER_CIRCUIT_OPEN":
+      return t("ai_reviewer_error_guidance_circuit_open");
+    case "AI_PROVIDER_COOLDOWN":
+      return t("ai_reviewer_error_guidance_cooldown");
     case "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED":
       return t("ai_reviewer_provider_models_unavailable");
     case "AI_PROVIDER_NETWORK_FAILED":

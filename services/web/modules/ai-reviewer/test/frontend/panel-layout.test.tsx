@@ -982,6 +982,7 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
     const alert = await screen.findByRole("alert");
 
+    expect(screen.getAllByRole("alert")).to.have.length(1);
     expect(alert.textContent).to.include(modelContextTooSmallGuidance);
     expect(
       within(alert).getByRole("button", { name: "Open connection settings" }),
@@ -1163,6 +1164,7 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
     const alert = await screen.findByRole("alert");
 
+    expect(screen.getAllByRole("alert")).to.have.length(1);
     expect(alert.textContent).to.include(modelContextUnknownGuidance);
     expect(alert.textContent).not.to.include(
       "Context length override (tokens)",

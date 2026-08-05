@@ -1584,6 +1584,9 @@ describe("AI reviewer: context-driven panel", function () {
       expect(
         screen.getByRole("button", { name: "Retry loading models" }),
       ).to.exist;
+      expect(
+        screen.getAllByRole("button", { name: "Retry loading models" }),
+      ).to.have.length(1);
     });
   });
 

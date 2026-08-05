@@ -2727,6 +2727,100 @@ describe("AI reviewer provider configuration", function () {
     expect(modelFetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("does not count an unsupported model-list endpoint in the execution circuit", async function () {
+    const circuitBreakerStore = {
+      assertProviderRequestAllowed: vi.fn(async () => {}),
+      recordFailure: vi.fn(async () => {}),
+      recordSuccess: vi.fn(async () => {}),
+    };
+    const service = createAiReviewerProviderService({
+      circuitBreakerStore,
+      modelFetchImpl: vi.fn(
+        async () => new Response(null, { status: 404 }),
+      ),
+    });
+
+    const error = await captureError(
+      service.listModels({
+        id: storedConnectionId,
+        provider: "openai-compatible",
+        baseUrl,
+        label: "localhost:11434",
+      }),
+    );
+
+    expect(error).toMatchObject({
+      code: "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
+      category: "configuration",
+    });
+    expect(
+      circuitBreakerStore.assertProviderRequestAllowed,
+    ).not.toHaveBeenCalled();
+    expect(circuitBreakerStore.recordFailure).not.toHaveBeenCalled();
+    expect(circuitBreakerStore.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it("does not count Ollama or context-length capability probes in the execution circuit", async function () {
+    const requests = [];
+    const circuitBreakerStore = {
+      assertProviderRequestAllowed: vi.fn(async () => {}),
+      recordFailure: vi.fn(async () => {}),
+      recordSuccess: vi.fn(async () => {}),
+    };
+    const modelFetchImpl = vi.fn(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/models")) {
+        return new Response(
+          JSON.stringify({
+            object: "list",
+            data: [{ id: model, object: "model", owned_by: "library" }],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/chat/completions")) {
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const service = createAiReviewerProviderService({
+      circuitBreakerStore,
+      modelFetchImpl,
+      contextLengthDetectionSignalFactory: () => undefined,
+    });
+    const connection = {
+      id: storedConnectionId,
+      provider: "openai-compatible",
+      baseUrl,
+      label: "localhost:11434",
+    };
+
+    expect(await service.listModels(connection)).toEqual([
+      { id: model, displayName: model },
+    ]);
+    expect(await service.resolveContextLength(connection, model)).toEqual({
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    });
+
+    expect(requests).toEqual([
+      `${baseUrl}/models`,
+      "http://127.0.0.1:11434/api/tags",
+      `${baseUrl}/chat/completions`,
+      "http://127.0.0.1:11434/api/ps",
+      "http://127.0.0.1:11434/slots",
+      "http://127.0.0.1:11434/props",
+    ]);
+    expect(
+      circuitBreakerStore.assertProviderRequestAllowed,
+    ).not.toHaveBeenCalled();
+    expect(circuitBreakerStore.recordFailure).not.toHaveBeenCalled();
+    expect(circuitBreakerStore.recordSuccess).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported and oversized model-list responses without returning provider bodies", async function () {
     const unsupportedBody = "RAW_UNSUPPORTED_PROVIDER_BODY";
     const unsupported = createAiReviewerProviderService({
