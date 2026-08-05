@@ -23,6 +23,7 @@ export type EditorSuggestionLiveContextResult =
   | {
       status: "ready";
       view: EditorView;
+      connectionEpoch: number;
       context: EditorSuggestionContext;
     }
   | {
@@ -110,6 +111,10 @@ function readEditorSuggestionLiveContextUnsafe(
   if (!hostContext.connected) {
     return conflict("AI_EDITOR_OFFLINE");
   }
+  const connectionEpoch = hostContext.connectionEpoch;
+  if (!Number.isFinite(connectionEpoch) || connectionEpoch < 0) {
+    return conflict("AI_EDITOR_SYNC_PENDING");
+  }
 
   const shareDocument = currentDocument.doc;
   if (
@@ -178,6 +183,7 @@ function readEditorSuggestionLiveContextUnsafe(
   return {
     status: "ready",
     view,
+    connectionEpoch,
     context: {
       projectId: hostContext.projectId,
       documentId,
@@ -237,6 +243,9 @@ export async function applySelectedEditorSelectionSuggestion({
   if (initial.context.trackChanges !== session.binding.trackChanges) {
     return contextConflict("AI_EDITOR_TRACK_CHANGES_PENDING");
   }
+  if (initial.connectionEpoch !== session.binding.connectionEpoch) {
+    return contextConflict("AI_EDITOR_SYNC_PENDING");
+  }
 
   const initialView = initial.view;
   return applySelectedSingleDocumentSuggestion({
@@ -252,6 +261,9 @@ export async function applySelectedEditorSelectionSuggestion({
       }
       if (current.view !== initialView) {
         return contextConflict("AI_EDITOR_DOCUMENT_UNBOUND");
+      }
+      if (current.connectionEpoch !== session.binding.connectionEpoch) {
+        return contextConflict("AI_EDITOR_SYNC_PENDING");
       }
       return {
         status: "ready",

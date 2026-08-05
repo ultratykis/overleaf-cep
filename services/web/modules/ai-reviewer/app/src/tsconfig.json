@@ -7,6 +7,8 @@
     "AiReviewerRouter.mjs",
     "ConfiguredAiReviewerController.mjs",
     "EnabledAiReviewerModule.mjs",
+    "OllamaEndpointPolicy.mjs",
+    "OllamaOpenAiTransport.mjs",
     "../../shared/contracts.mjs",
     "../../shared/contract-types.ts"
   ],

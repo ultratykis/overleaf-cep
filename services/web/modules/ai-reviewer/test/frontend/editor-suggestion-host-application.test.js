@@ -125,6 +125,7 @@ function createFixture({
     trackedWrite: true,
   },
 } = {}) {
+  const connectionEpoch = 17;
   const shareDocument = {
     connection: {
       state: "ok",
@@ -200,6 +201,7 @@ function createFixture({
     currentDocument,
     sourceMode: true,
     connected: true,
+    connectionEpoch,
     permissions: {
       ...permissions,
     },
@@ -212,6 +214,7 @@ function createFixture({
       currentDocument,
       shareDocument,
       trackChanges,
+      connectionEpoch,
     }),
   });
   return {
@@ -368,6 +371,41 @@ describe("AI reviewer: OT safety production host application", function () {
       },
     },
     {
+      name: "undefined connection epoch",
+      code: "AI_EDITOR_SYNC_PENDING",
+      change: (current) => {
+        current.hostContext.connectionEpoch = undefined;
+      },
+    },
+    {
+      name: "string connection epoch",
+      code: "AI_EDITOR_SYNC_PENDING",
+      change: (current) => {
+        current.hostContext.connectionEpoch = "17";
+      },
+    },
+    {
+      name: "negative connection epoch",
+      code: "AI_EDITOR_SYNC_PENDING",
+      change: (current) => {
+        current.hostContext.connectionEpoch = -1;
+      },
+    },
+    {
+      name: "NaN connection epoch",
+      code: "AI_EDITOR_SYNC_PENDING",
+      change: (current) => {
+        current.hostContext.connectionEpoch = Number.NaN;
+      },
+    },
+    {
+      name: "infinite connection epoch",
+      code: "AI_EDITOR_SYNC_PENDING",
+      change: (current) => {
+        current.hostContext.connectionEpoch = Number.POSITIVE_INFINITY;
+      },
+    },
+    {
       name: "missing ShareDoc",
       code: "AI_EDITOR_SYNC_PENDING",
       change: (current) => {
@@ -448,6 +486,77 @@ describe("AI reviewer: OT safety production host application", function () {
       expect(current.view.state.doc.toString()).to.equal(baseText);
     });
   }
+
+  const invalidLiveConnectionEpochCases = [
+    {
+      name: "undefined",
+      value: undefined,
+    },
+    {
+      name: "a string",
+      value: "17",
+    },
+    {
+      name: "a negative number",
+      value: -1,
+    },
+    {
+      name: "NaN",
+      value: Number.NaN,
+    },
+    {
+      name: "infinity",
+      value: Number.POSITIVE_INFINITY,
+    },
+  ];
+
+  for (const invalidEpoch of invalidLiveConnectionEpochCases) {
+    it(`rejects ${invalidEpoch.name} directly from the live connection epoch reader`, function () {
+      const current = fixture();
+      current.hostContext.connectionEpoch = invalidEpoch.value;
+
+      expect(
+        readEditorSuggestionLiveContext(current.hostContext),
+      ).to.deep.equal({
+        status: "conflict",
+        code: "AI_EDITOR_SYNC_PENDING",
+      });
+    });
+  }
+
+  it("rejects an initial host connection epoch mismatch before compile, hash, or dispatch", async function () {
+    const current = fixture();
+    let compileCalls = 0;
+    let hashCalls = 0;
+    current.hostContext.connectionEpoch += 1;
+
+    const result = await applySelectedEditorSelectionSuggestion(
+      applicationOptions(current, {
+        compileSelectedSuggestionHunks: async () => {
+          compileCalls += 1;
+          return compileReplacement({
+            request: request(),
+            suggestion: suggestion(),
+            selectedHunkIds: ["hunk-host-0001"],
+            documentLength: baseText.length,
+          });
+        },
+        hashText: async () => {
+          hashCalls += 1;
+          return baseTextHash;
+        },
+      }),
+    );
+
+    expect(result).to.deep.equal({
+      status: "conflict",
+      code: "AI_EDITOR_SYNC_PENDING",
+    });
+    expect(compileCalls).to.equal(0);
+    expect(hashCalls).to.equal(0);
+    expect(current.aiTransactionCount()).to.equal(0);
+    expect(current.view.state.doc.toString()).to.equal(baseText);
+  });
 
   it("rejects a destroyed EditorView after realtime detaches it", async function () {
     const current = fixture();
@@ -742,6 +851,7 @@ describe("AI reviewer: OT safety production host application", function () {
       path: "chapters/main.tex",
       currentDocument: current.currentDocument,
       connected: true,
+      connectionEpoch: 17,
       permissions: {
         read: true,
         write: true,
@@ -796,12 +906,15 @@ describe("AI reviewer: OT safety production host application", function () {
       trackChanges: false,
       wantTrackChanges: false,
     });
-    sinon.stub(connectionContext, "useConnectionContext").returns({
-      isConnected: true,
-      connectionState: {
-        forceDisconnected: false,
-      },
-    });
+    const connection = sinon
+      .stub(connectionContext, "useConnectionContext")
+      .returns({
+        isConnected: true,
+        connectionState: {
+          forceDisconnected: false,
+          lastConnectionAttempt: 17,
+        },
+      });
     sinon.stub(permissionsContext, "usePermissionsContext").returns({
       read: true,
       write: true,
@@ -819,6 +932,20 @@ describe("AI reviewer: OT safety production host application", function () {
     const rendered = render(React.createElement(SelectionContextProbe));
     try {
       expect(getContext().sourceMode).to.equal(false);
+      expect(getContext().connectionEpoch).to.equal(17);
+      const committedGetContext = getContext;
+
+      connection.returns({
+        isConnected: true,
+        connectionState: {
+          forceDisconnected: false,
+          lastConnectionAttempt: 18,
+        },
+      });
+      rendered.rerender(React.createElement(SelectionContextProbe));
+
+      expect(getContext).to.equal(committedGetContext);
+      expect(getContext().connectionEpoch).to.equal(18);
 
       openDocument.returns({
         currentDocumentId: "document-0001",
@@ -954,6 +1081,91 @@ describe("AI reviewer: OT safety production host application", function () {
     });
     expect(current.aiTransactionCount()).to.equal(0);
     expect(replacementAiTransactionCount).to.equal(0);
+  });
+
+  it("rejects a fully reconnected session after going offline during compilation", async function () {
+    const current = fixture();
+    const compilation = deferred();
+    let hashCalls = 0;
+    const application = applySelectedEditorSelectionSuggestion(
+      applicationOptions(current, {
+        compileSelectedSuggestionHunks: () => compilation.promise,
+        hashText: async () => {
+          hashCalls += 1;
+          return baseTextHash;
+        },
+      }),
+    );
+    await Promise.resolve();
+
+    current.hostContext.connected = false;
+    current.currentDocument.joined = false;
+    current.shareDocument.connection.state = "disconnected";
+    current.currentDocument.buffered = true;
+
+    current.hostContext.connectionEpoch += 1;
+    current.hostContext.connected = true;
+    current.currentDocument.joined = true;
+    current.shareDocument.connection.state = "ok";
+    current.currentDocument.buffered = false;
+
+    compilation.resolve(
+      await compileReplacement({
+        request: request(),
+        suggestion: suggestion(),
+        selectedHunkIds: ["hunk-host-0001"],
+        documentLength: baseText.length,
+      }),
+    );
+
+    expect(await application).to.deep.equal({
+      status: "conflict",
+      code: "AI_EDITOR_SYNC_PENDING",
+    });
+    expect(hashCalls).to.equal(0);
+    expect(current.aiTransactionCount()).to.equal(0);
+    expect(current.view.state.doc.toString()).to.equal(baseText);
+  });
+
+  it("rejects a fully reconnected session during final document hashing", async function () {
+    const current = fixture();
+    const hashing = deferred();
+    let signalHashStarted;
+    const hashStarted = new Promise((resolve) => {
+      signalHashStarted = resolve;
+    });
+    let hashCalls = 0;
+    const application = applySelectedEditorSelectionSuggestion(
+      applicationOptions(current, {
+        hashText: () => {
+          hashCalls += 1;
+          signalHashStarted();
+          return hashing.promise;
+        },
+      }),
+    );
+    await hashStarted;
+
+    current.hostContext.connected = false;
+    current.currentDocument.joined = false;
+    current.shareDocument.connection.state = "disconnected";
+    current.currentDocument.buffered = true;
+
+    current.hostContext.connectionEpoch += 1;
+    current.hostContext.connected = true;
+    current.currentDocument.joined = true;
+    current.shareDocument.connection.state = "ok";
+    current.currentDocument.buffered = false;
+
+    hashing.resolve(baseTextHash);
+
+    expect(await application).to.deep.equal({
+      status: "conflict",
+      code: "AI_EDITOR_SYNC_PENDING",
+    });
+    expect(hashCalls).to.equal(1);
+    expect(current.aiTransactionCount()).to.equal(0);
+    expect(current.view.state.doc.toString()).to.equal(baseText);
   });
 
   it("rejects a capture-time ShareDoc replacement during compilation", async function () {

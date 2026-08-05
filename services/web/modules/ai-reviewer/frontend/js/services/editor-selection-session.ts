@@ -41,6 +41,7 @@ export type EditorSelectionSessionContext = {
   currentDocument: EditorSelectionDocument | null;
   sourceMode: boolean;
   connected: boolean;
+  connectionEpoch: number;
   permissions: EditorSelectionSessionPermissions;
   trackChanges: boolean;
   wantTrackChanges: boolean;
@@ -66,6 +67,7 @@ export type EditorSelectionSessionBinding = Readonly<{
   currentDocument: EditorSelectionDocument;
   shareDocument: EditorSelectionShareDocument;
   trackChanges: boolean;
+  connectionEpoch: number;
 }>;
 
 export type EditorSelectionSession = Readonly<{
@@ -102,6 +104,7 @@ type CapturedSelection = {
   path: string;
   sourceMode: boolean;
   connected: boolean;
+  connectionEpoch: number;
   permissionRead: boolean;
   permissionWrite: boolean;
   permissionTrackedWrite: boolean;
@@ -159,6 +162,7 @@ function captureContextUnsafe(
   const currentDocument = context.currentDocument;
   const sourceMode = context.sourceMode;
   const connected = context.connected;
+  const connectionEpoch = context.connectionEpoch;
   const permissionRead = context.permissions?.read === true;
   const permissionWrite = context.permissions?.write === true;
   const permissionTrackedWrite = context.permissions?.trackedWrite === true;
@@ -190,6 +194,9 @@ function captureContextUnsafe(
   }
   if (!connected) {
     return conflict("AI_SELECTION_OFFLINE");
+  }
+  if (!Number.isFinite(connectionEpoch) || connectionEpoch < 0) {
+    return conflict("AI_SELECTION_SYNC_PENDING");
   }
 
   const shareDocument = currentDocument.doc;
@@ -275,6 +282,7 @@ function captureContextUnsafe(
       path: path ?? "",
       sourceMode,
       connected,
+      connectionEpoch,
       permissionRead,
       permissionWrite,
       permissionTrackedWrite,
@@ -316,6 +324,7 @@ function equalCapture(
     before.path === after.path &&
     before.sourceMode === after.sourceMode &&
     before.connected === after.connected &&
+    before.connectionEpoch === after.connectionEpoch &&
     before.permissionRead === after.permissionRead &&
     before.permissionWrite === after.permissionWrite &&
     before.permissionTrackedWrite === after.permissionTrackedWrite &&
@@ -440,6 +449,7 @@ export async function captureEditorSelectionSession(
     currentDocument: before.snapshot.currentDocument,
     shareDocument: before.snapshot.shareDocument,
     trackChanges: before.snapshot.trackChanges,
+    connectionEpoch: before.snapshot.connectionEpoch,
   });
   const session = Object.freeze({
     request,

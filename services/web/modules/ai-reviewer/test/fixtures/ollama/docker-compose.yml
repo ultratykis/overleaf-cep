@@ -1,0 +1,83 @@
+services:
+  redis:
+    image: redis@sha256:9e89b78d46cd180daa196f1ef2cf53c2f219d19e71fe340124b8789587b2ee79
+    platform: linux/arm64/v8
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  mongo:
+    image: mongo@sha256:f3053e1fb01377126929b87a5ed5141a4458089c282518e953304ae457027774
+    platform: linux/arm64/v8
+    command: ["mongod", "--bind_ip_all", "--quiet"]
+    ports:
+      - "127.0.0.1:27017:27017"
+    tmpfs:
+      - /data/db:rw,noexec,nosuid,size=256m
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--quiet",
+          "--eval",
+          "quit(db.adminCommand({ ping: 1 }).ok ? 0 : 2)",
+        ]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 2s
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  web-probe:
+    image: node@sha256:fdf1c60c166aaf02dd124c08a1c67b5df800766d3c00661427b84d26138a5432
+    platform: linux/arm64/v8
+    init: true
+    user: node
+    working_dir: /workspace/services/web
+    command:
+      [
+        "node",
+        "-e",
+        "const timer=setInterval(()=>{},2147483647);process.once('SIGTERM',()=>{clearInterval(timer);process.exit(0)})",
+      ]
+    environment:
+      NODE_ENV: test
+      TZ: GMT
+    volumes:
+      - ../../../../../../../:/workspace:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "process.exit(process.versions.node==='24.14.1'?0:2)",
+        ]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"

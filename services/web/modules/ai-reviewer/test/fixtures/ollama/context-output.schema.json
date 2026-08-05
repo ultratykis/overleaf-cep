@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["begin", "middle", "end"],
+  "properties": {
+    "begin": {
+      "const": "CTX_BEGIN_42"
+    },
+    "middle": {
+      "const": "CTX_MIDDLE_42"
+    },
+    "end": {
+      "const": "CTX_END_42"
+    }
+  }
+}

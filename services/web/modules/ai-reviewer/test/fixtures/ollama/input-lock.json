@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "evaluation": {
+    "id": "EVAL-OLLAMA-01",
+    "revision": 4
+  },
+  "hashAlgorithm": "sha256",
+  "fileBytes": "raw",
+  "aggregate": {
+    "pathOrder": "unicode-code-point",
+    "recordEncoding": "utf8",
+    "recordFormat": "<repo-relative-path>\\u0000<raw-file-sha256>\\n",
+    "includesThisLockFile": true,
+    "expectedValueLocation": [".loop/EVALS.md", ".loop/STATE.md"]
+  },
+  "aggregatePaths": [
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/Modelfile.template",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/compat-cases-v1.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/context-output.schema.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/docker-compose.yml",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/input-lock.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/installed-4b-v1.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/m1-16gb-orbstack-v1.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/structured-output.schema.json",
+    "services/web/modules/ai-reviewer/test/fixtures/ollama/tool-definition.json"
+  ],
+  "entries": [
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/Modelfile.template",
+      "bytes": 43,
+      "sha256": "fbbcd42e5a1f0deac5a285b38e7911878a20d267b6b6c4cb0acc6912c0e595a0"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/compat-cases-v1.json",
+      "bytes": 8916,
+      "sha256": "3a86f6abb871740c26130cc752666719ad43495ee2c56cee35e34c4cbf69aacf"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/context-output.schema.json",
+      "bytes": 274,
+      "sha256": "731ee89d96e0a3394f410a5d33ac66842772453729df30217a5845e52dc2f3f8"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/docker-compose.yml",
+      "bytes": 2066,
+      "sha256": "db2b0fb7d252cf916278d2c3b31957b701b0ff381b518a8cdc7beac38f8d2648"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/installed-4b-v1.json",
+      "bytes": 3865,
+      "sha256": "b2b2f7f139da39e9e8e2b1513fa7fefdb401b57cb43fc24dc30fdc8be3af1de2"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/m1-16gb-orbstack-v1.json",
+      "bytes": 8597,
+      "sha256": "fbd04158913179325921d77714b249f901778ad7c25d30de44308d43ffe2ab17"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/structured-output.schema.json",
+      "bytes": 247,
+      "sha256": "44ad3f7131844f876a9a4099910b0063328c161d176a5011b2a64df4062de4de"
+    },
+    {
+      "path": "services/web/modules/ai-reviewer/test/fixtures/ollama/tool-definition.json",
+      "bytes": 342,
+      "sha256": "8173aca03ffac45759de0af6f1c31b36b14a8968d763e0fd8e98dfd5cf0a370d"
+    }
+  ]
+}

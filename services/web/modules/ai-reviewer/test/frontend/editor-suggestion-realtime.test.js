@@ -381,6 +381,7 @@ describe("AI reviewer: OT safety production realtime", function () {
           currentDocument,
           shareDocument: currentDocument.doc,
           trackChanges: false,
+          connectionEpoch: 17,
         },
       },
       suggestion: multiHunkSuggestion(),
@@ -393,6 +394,7 @@ describe("AI reviewer: OT safety production realtime", function () {
         currentDocument,
         sourceMode: true,
         connected: true,
+        connectionEpoch: 17,
         permissions: {
           read: true,
           write: true,

@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "id", "count"],
+  "properties": {
+    "status": {
+      "const": "ok"
+    },
+    "id": {
+      "const": "SYNTH-001"
+    },
+    "count": {
+      "const": 3
+    }
+  }
+}

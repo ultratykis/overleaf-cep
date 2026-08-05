@@ -12,6 +12,7 @@ import { v4 as uuid } from "uuid";
 import type {
   AgentEvent,
   AgentRequest,
+  Finding,
   ProposedSuggestion,
 } from "../../../shared/contract-types";
 import {
@@ -23,6 +24,12 @@ import {
 } from "./ai-reviewer-suggestion-preview";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import { AgentStreamError, streamAgentEvents } from "../services/agent-stream";
+import {
+  createEditorEvidenceNavigationTarget,
+  navigateToEditorEvidence,
+  type EditorEvidenceNavigationResult,
+  type EditorEvidenceNavigationTarget,
+} from "../services/editor-evidence-navigation";
 import {
   captureEditorSelectionSession,
   type EditorSelectionSession,
@@ -38,6 +45,7 @@ import {
 } from "../services/selection-workspace-state";
 
 type StreamRequest = typeof streamAgentEvents;
+type NavigateEvidence = typeof navigateToEditorEvidence;
 type CaptureSelectionRequest = {
   requestId: string;
   action: EditorSelectionSessionAction;
@@ -69,6 +77,27 @@ type ActiveSuggestionPreview = {
 type ActiveSuggestionLease = {
   dispose: SuggestionPreviewDisposer;
 };
+
+type ActiveEvidenceNavigation = {
+  generation: number;
+  requestId: string;
+  session: EditorSelectionSession;
+  finding: Finding;
+  evidenceIndex: number;
+  target: EditorEvidenceNavigationTarget;
+  controller: AbortController;
+};
+
+type EvidenceNavigationNotice =
+  | {
+      identity: ActiveEvidenceNavigation;
+      status: "pending";
+    }
+  | {
+      identity: ActiveEvidenceNavigation;
+      status: "settled";
+      result: EditorEvidenceNavigationResult;
+    };
 
 const statusLabels: Record<SelectionWorkspaceStatus, string> = {
   idle: "Ready",
@@ -121,6 +150,77 @@ function evidenceLocation(reference: {
     : `${reference.path}:${reference.range.from}-${reference.range.to}`;
 }
 
+function evidenceNavigationMessage(notice: EvidenceNavigationNotice) {
+  if (notice.status === "pending") {
+    return "Selecting evidence";
+  }
+  if (notice.result.status === "navigated") {
+    return "Evidence selected";
+  }
+  if (notice.result.status === "conflict") {
+    return `Evidence unavailable: ${notice.result.code}`;
+  }
+  if (notice.result.status === "cancelled") {
+    return "Evidence navigation cancelled";
+  }
+  return `Evidence navigation failed: ${notice.result.code}`;
+}
+
+function normalizeEvidenceNavigationResult(
+  result: unknown,
+): EditorEvidenceNavigationResult {
+  if (typeof result !== "object" || result == null) {
+    return {
+      status: "error",
+      code: "AI_EVIDENCE_NAVIGATION_FAILED",
+    };
+  }
+  const candidate = result as {
+    status?: unknown;
+    code?: unknown;
+  };
+  if (candidate.status === "navigated") {
+    return {
+      status: "navigated",
+    };
+  }
+  if (candidate.status === "cancelled") {
+    return {
+      status: "cancelled",
+    };
+  }
+  if (candidate.status === "conflict") {
+    switch (candidate.code) {
+      case "AI_EVIDENCE_DOCUMENT_MISMATCH":
+      case "AI_EVIDENCE_EDITOR_UNAVAILABLE":
+      case "AI_EVIDENCE_PATH_MISMATCH":
+      case "AI_EVIDENCE_PERMISSION_DENIED":
+      case "AI_EVIDENCE_PROJECT_MISMATCH":
+      case "AI_EVIDENCE_RANGE_INVALID":
+      case "AI_EVIDENCE_REFERENCE_INVALID":
+      case "AI_EVIDENCE_STATE_STALE":
+        return {
+          status: "conflict",
+          code: candidate.code,
+        };
+    }
+  }
+  if (candidate.status === "error") {
+    switch (candidate.code) {
+      case "AI_EVIDENCE_HASH_FAILED":
+      case "AI_EVIDENCE_NAVIGATION_FAILED":
+        return {
+          status: "error",
+          code: candidate.code,
+        };
+    }
+  }
+  return {
+    status: "error",
+    code: "AI_EVIDENCE_NAVIGATION_FAILED",
+  };
+}
+
 function suggestionDecision(
   decisions: Readonly<Record<string, SelectionSuggestionDecision | undefined>>,
   suggestionId: string,
@@ -136,6 +236,7 @@ export function AiReviewerPanelView({
   streamRequest = streamAgentEvents,
   captureSelectionSession,
   getSelectionContext,
+  navigateEvidence = navigateToEditorEvidence,
   mountSuggestionPreview,
   applySelectionSuggestion,
 }: {
@@ -144,6 +245,7 @@ export function AiReviewerPanelView({
   streamRequest?: StreamRequest;
   captureSelectionSession?: CaptureSelectionSession;
   getSelectionContext?: () => EditorSelectionSessionContext;
+  navigateEvidence?: NavigateEvidence;
   mountSuggestionPreview?: MountSuggestionPreview;
   applySelectionSuggestion?: ApplySelectionSuggestion;
 }) {
@@ -156,9 +258,14 @@ export function AiReviewerPanelView({
   );
   const [activeSuggestionPreview, setActiveSuggestionPreview] =
     useState<ActiveSuggestionPreview | null>(null);
+  const [evidenceNavigationNotice, setEvidenceNavigationNotice] =
+    useState<EvidenceNavigationNotice | null>(null);
   const activeRun = useRef<ActiveRun | null>(null);
   const activeSuggestionIdentity = useRef<ActiveSuggestionPreview | null>(null);
   const activeSuggestionLease = useRef<ActiveSuggestionLease | null>(null);
+  const activeEvidenceNavigation = useRef<ActiveEvidenceNavigation | null>(
+    null,
+  );
   const nextGeneration = useRef(0);
   const mounted = useRef(true);
 
@@ -181,6 +288,20 @@ export function AiReviewerPanelView({
     activeSuggestionIdentity.current = null;
     if (mounted.current) {
       setActiveSuggestionPreview(null);
+    }
+  }, []);
+
+  const disposeActiveEvidenceNavigation = useCallback((reason: unknown) => {
+    const activeNavigation = activeEvidenceNavigation.current;
+    activeEvidenceNavigation.current = null;
+    if (
+      activeNavigation != null &&
+      !activeNavigation.controller.signal.aborted
+    ) {
+      activeNavigation.controller.abort(reason);
+    }
+    if (mounted.current) {
+      setEvidenceNavigationNotice(null);
     }
   }, []);
 
@@ -220,6 +341,9 @@ export function AiReviewerPanelView({
 
   const beginRun = useCallback(
     (status: "capturing" | "streaming") => {
+      disposeActiveEvidenceNavigation(
+        cancellationReason("The evidence navigation was replaced."),
+      );
       disposeActiveSuggestion(
         cancellationReason("The review was replaced by a new request."),
       );
@@ -252,7 +376,12 @@ export function AiReviewerPanelView({
       });
       return run;
     },
-    [createRequestId, disposeActiveSuggestion, invalidateRun],
+    [
+      createRequestId,
+      disposeActiveEvidenceNavigation,
+      disposeActiveSuggestion,
+      invalidateRun,
+    ],
   );
 
   const failRun = useCallback(
@@ -299,6 +428,9 @@ export function AiReviewerPanelView({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      disposeActiveEvidenceNavigation(
+        cancellationReason("The AI reviewer panel was closed."),
+      );
       disposeActiveSuggestion(
         cancellationReason("The AI reviewer panel was closed."),
       );
@@ -310,7 +442,7 @@ export function AiReviewerPanelView({
         );
       }
     };
-  }, [disposeActiveSuggestion, invalidateRun]);
+  }, [disposeActiveEvidenceNavigation, disposeActiveSuggestion, invalidateRun]);
 
   const executeStream = useCallback(
     async (run: ActiveRun, request: AgentRequest) => {
@@ -523,6 +655,104 @@ export function AiReviewerPanelView({
     ],
   );
 
+  const openFindingEvidence = useCallback(
+    (finding: Finding, evidenceIndex: number) => {
+      const session = state.session;
+      const requestId = state.requestId;
+      if (
+        state.status !== "completed" ||
+        session == null ||
+        requestId == null ||
+        getSelectionContext == null ||
+        nextGeneration.current !== state.generation ||
+        session.request.scope.kind !== "selection" ||
+        session.request.requestId !== requestId ||
+        !state.findings.includes(finding)
+      ) {
+        return;
+      }
+
+      const target = createEditorEvidenceNavigationTarget({
+        session,
+        finding,
+        evidenceIndex,
+      });
+      if (target == null) {
+        return;
+      }
+
+      const previous = activeEvidenceNavigation.current;
+      if (
+        previous?.generation === state.generation &&
+        previous.requestId === requestId &&
+        previous.session === session &&
+        previous.finding === finding &&
+        previous.evidenceIndex === evidenceIndex
+      ) {
+        return;
+      }
+
+      disposeActiveEvidenceNavigation(
+        cancellationReason("Another evidence reference was selected."),
+      );
+      const identity: ActiveEvidenceNavigation = {
+        generation: state.generation,
+        requestId,
+        session,
+        finding,
+        evidenceIndex,
+        target,
+        controller: new AbortController(),
+      };
+      activeEvidenceNavigation.current = identity;
+      setEvidenceNavigationNotice({
+        identity,
+        status: "pending",
+      });
+
+      void (async () => {
+        let result: EditorEvidenceNavigationResult;
+        try {
+          result = normalizeEvidenceNavigationResult(
+            await navigateEvidence({
+              target,
+              getContext: getSelectionContext,
+              signal: identity.controller.signal,
+            }),
+          );
+        } catch {
+          result = {
+            status: "error",
+            code: "AI_EVIDENCE_NAVIGATION_FAILED",
+          };
+        }
+        if (
+          !mounted.current ||
+          activeEvidenceNavigation.current !== identity ||
+          identity.controller.signal.aborted
+        ) {
+          return;
+        }
+        activeEvidenceNavigation.current = null;
+        setEvidenceNavigationNotice({
+          identity,
+          status: "settled",
+          result,
+        });
+      })();
+    },
+    [
+      disposeActiveEvidenceNavigation,
+      getSelectionContext,
+      navigateEvidence,
+      state.findings,
+      state.generation,
+      state.requestId,
+      state.session,
+      state.status,
+    ],
+  );
+
   const busy =
     state.status === "capturing" ||
     state.status === "streaming" ||
@@ -665,14 +895,43 @@ export function AiReviewerPanelView({
               <h4 className="h6">{finding.title}</h4>
               <p>{finding.message}</p>
               <ul>
-                {finding.evidence.map((reference, index) => (
-                  <li key={`${finding.id}-evidence-${index}`}>
-                    {evidenceLocation(reference)}
-                  </li>
-                ))}
+                {finding.evidence.map((reference, index) => {
+                  const navigationTarget =
+                    state.status === "completed" &&
+                    state.session != null &&
+                    state.requestId != null &&
+                    getSelectionContext != null &&
+                    nextGeneration.current === state.generation &&
+                    state.session.request.requestId === state.requestId
+                      ? createEditorEvidenceNavigationTarget({
+                          session: state.session,
+                          finding,
+                          evidenceIndex: index,
+                        })
+                      : null;
+                  return (
+                    <li key={`${finding.id}-evidence-${index}`}>
+                      {evidenceLocation(reference)}
+                      {navigationTarget != null && (
+                        <button
+                          type="button"
+                          className="btn btn-link btn-sm"
+                          onClick={() => openFindingEvidence(finding, index)}
+                        >
+                          Go to evidence {index + 1}
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </article>
           ))}
+          {evidenceNavigationNotice != null && (
+            <p aria-live="polite">
+              {evidenceNavigationMessage(evidenceNavigationNotice)}
+            </p>
+          )}
         </section>
       )}
       {state.suggestions.length > 0 && (

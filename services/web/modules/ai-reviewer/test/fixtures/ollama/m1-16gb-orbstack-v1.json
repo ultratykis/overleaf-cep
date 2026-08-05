@@ -1,0 +1,263 @@
+{
+  "version": 1,
+  "id": "m1-16gb-orbstack-v1",
+  "evaluation": {
+    "id": "EVAL-OLLAMA-01",
+    "revision": 4
+  },
+  "target": {
+    "hardware": {
+      "machine": "Apple M1 MacBook Pro",
+      "unifiedMemoryBytes": 17179869184,
+      "power": "ac"
+    },
+    "host": {
+      "os": "macos",
+      "architecture": "arm64"
+    },
+    "ollama": {
+      "clientVersion": "0.32.3",
+      "daemonVersion": "0.32.3",
+      "nativeHostBaseUrl": "http://127.0.0.1:11434",
+      "openAiHostBaseUrl": "http://127.0.0.1:11434/v1",
+      "localInterfaceOnly": true
+    },
+    "docker": {
+      "runtime": "OrbStack",
+      "engineVersion": "29.4.0",
+      "architecture": "arm64",
+      "composeProject": "overleaf-ai-ollama-eval"
+    }
+  },
+  "inputs": {
+    "selectionPolicy": "installed-4b-v1.json",
+    "cases": "compat-cases-v1.json",
+    "modelfileTemplate": "Modelfile.template",
+    "compose": "docker-compose.yml",
+    "lock": "input-lock.json"
+  },
+  "model": {
+    "fallback": "qwen3.5:4b",
+    "derivedTag": "overleaf-ai-reviewer-compat-8k:latest",
+    "missingTag": "overleaf-ai-missing-model-do-not-pull:latest",
+    "derivedTagMustBeAbsentAtEntry": true,
+    "missingTagMustBeAbsentAtEntry": true,
+    "contextTokens": 8192,
+    "loadedAtEntry": 0,
+    "loadedDuringGeneration": 1,
+    "parallelGeneration": 1
+  },
+  "routes": [
+    {
+      "id": "host",
+      "openAiBaseUrl": "http://127.0.0.1:11434/v1",
+      "nativeBaseUrl": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "docker",
+      "openAiBaseUrl": "http://host.docker.internal:11434/v1",
+      "nativeBaseUrl": "http://host.docker.internal:11434"
+    }
+  ],
+  "schedule": {
+    "repetitions": 3,
+    "routeOrderByRepetition": [
+      ["host", "docker"],
+      ["docker", "host"],
+      ["host", "docker"]
+    ],
+    "providerPhaseOrder": [
+      "model-list",
+      "latency-cold-warm-pairs",
+      "remaining-provider-cases",
+      "gateway-smoke",
+      "controls"
+    ],
+    "modelListLoopNesting": ["route-order-for-repetition-1"],
+    "latencyLoopNesting": ["repetition", "route", "cold-then-warm"],
+    "latencyPair": {
+      "unloadBeforeCold": true,
+      "pollUntilDigestAbsent": true,
+      "waitAfterUnloadMilliseconds": 2000,
+      "warmDispatchMaximumDelayMilliseconds": 5000,
+      "allowInterveningRequest": false
+    },
+    "remainingCaseLoopNesting": [
+      "case-in-fixture-order-excluding-model-list-and-latency",
+      "repetition",
+      "route-order-for-repetition"
+    ],
+    "gatewaySmoke": "after-all-provider-measurements",
+    "controls": "after-all-measured-work",
+    "allowWarmup": false,
+    "allowRetry": false,
+    "allowOutlierRemoval": false,
+    "watchdogMilliseconds": 2700000
+  },
+  "latencyAggregation": {
+    "statistic": "median",
+    "threeSampleDefinition": "middle-of-three-sorted-milliseconds",
+    "poolAcrossRoutes": false,
+    "poolAcrossCases": false,
+    "toolProposalAndResultHalvesSeparate": true,
+    "contextRoutesSeparate": true
+  },
+  "latencyBudgets": {
+    "hostColdStream": {
+      "medianScope": "latency-cold-host-three-repetitions",
+      "ttftMedianMilliseconds": 30000,
+      "ttftEachMilliseconds": 45000,
+      "totalMedianMilliseconds": 50000,
+      "totalEachMilliseconds": 75000
+    },
+    "dockerColdStream": {
+      "medianScope": "latency-cold-docker-three-repetitions",
+      "ttftMedianMilliseconds": 30000,
+      "ttftEachMilliseconds": 45000,
+      "totalMedianMilliseconds": 50000,
+      "totalEachMilliseconds": 75000
+    },
+    "hostWarmStream": {
+      "medianScope": "latency-warm-host-three-repetitions",
+      "ttftMedianMilliseconds": 12000,
+      "ttftEachMilliseconds": 20000,
+      "totalMedianMilliseconds": 25000,
+      "totalEachMilliseconds": 40000
+    },
+    "dockerWarmStream": {
+      "medianScope": "latency-warm-docker-three-repetitions",
+      "ttftMedianMilliseconds": 15000,
+      "ttftEachMilliseconds": 25000,
+      "totalMedianMilliseconds": 30000,
+      "totalEachMilliseconds": 45000
+    },
+    "context8k": {
+      "medianScope": "per-route-three-repetitions",
+      "ttftMedianMilliseconds": 45000,
+      "ttftEachMilliseconds": 60000,
+      "totalMedianMilliseconds": 65000,
+      "totalEachMilliseconds": 90000
+    },
+    "hostNonStream": {
+      "medianScope": "per-case-host-three-repetitions",
+      "toolProposalAndResultHalvesSeparate": true,
+      "totalMedianMilliseconds": 20000,
+      "totalEachMilliseconds": 30000
+    },
+    "dockerNonStream": {
+      "medianScope": "per-case-docker-three-repetitions",
+      "toolProposalAndResultHalvesSeparate": true,
+      "totalMedianMilliseconds": 25000,
+      "totalEachMilliseconds": 35000
+    },
+    "hostWarmGateway": {
+      "medianScope": "three-gateway-smoke-attempts",
+      "ttftMedianMilliseconds": 45000,
+      "ttftEachMilliseconds": 60000,
+      "totalMedianMilliseconds": 60000,
+      "totalEachMilliseconds": 90000
+    }
+  },
+  "memory": {
+    "sampleIntervalMaximumMilliseconds": 100,
+    "unloadedBaselineSamples": 10,
+    "unloadedBaselineStatistic": "median",
+    "ollamaPidSet": "daemon-and-all-transitive-descendants",
+    "modelResidentFormula": "max(size,size_vram,max(0,ollamaTreeRss-unloadedBaseline))",
+    "modelResidentMaximumBytes": 7516192768,
+    "containerWorkingSetFormula": "max(0,memory_stats.usage-memory_stats.stats.inactive_file)",
+    "coexistenceFormula": "max_t(modelResident_t+redis_t+mongo_t+webProbe_t)",
+    "coexistenceMaximumBytes": 10737418240,
+    "allowIndependentPeakAddition": false,
+    "missingSampleFails": true
+  },
+  "endpointPolicy": {
+    "scheme": "http",
+    "canonicalHosts": [
+      "127.0.0.1",
+      "[::1]",
+      "localhost",
+      "host.docker.internal"
+    ],
+    "explicitPortMinimum": 1,
+    "explicitPortMaximum": 65535,
+    "path": "/v1",
+    "allowUserInfo": false,
+    "allowQuery": false,
+    "allowFragment": false,
+    "followRedirects": false,
+    "accepted": [
+      "http://127.0.0.1:11434/v1",
+      "http://127.0.0.1:11435/v1",
+      "http://[::1]:11434/v1",
+      "http://localhost:11434/v1",
+      "http://host.docker.internal:11434/v1",
+      "http://host.docker.internal:11435/v1"
+    ],
+    "rejected": [
+      "https://127.0.0.1:11434/v1",
+      "ftp://127.0.0.1:11434/v1",
+      "http://127.0.0.1/v1",
+      "http://127.0.0.1:0/v1",
+      "http://127.0.0.1:65536/v1",
+      "http://0.0.0.0:11434/v1",
+      "http://127.0.0.2:11434/v1",
+      "http://[::ffff:127.0.0.1]:11434/v1",
+      "http://2130706433:11434/v1",
+      "http://0177.0.0.1:11434/v1",
+      "http://10.0.0.1:11434/v1",
+      "http://172.16.0.1:11434/v1",
+      "http://192.168.0.1:11434/v1",
+      "http://169.254.169.254:11434/v1",
+      "http://224.0.0.1:11434/v1",
+      "http://example.com:11434/v1",
+      "http://127.0.0.1.example.com:11434/v1",
+      "http://%31%32%37.0.0.1:11434/v1",
+      "http://user@127.0.0.1:11434/v1",
+      "http://127.0.0.1:11434/v1?model=x",
+      "http://127.0.0.1:11434/v1#fragment",
+      "http://127.0.0.1:11434/v1/../api",
+      "http://127.0.0.1:11434/api"
+    ]
+  },
+  "containers": {
+    "redis": {
+      "version": "7.4.8",
+      "image": "redis@sha256:9e89b78d46cd180daa196f1ef2cf53c2f219d19e71fe340124b8789587b2ee79",
+      "platform": "linux/arm64/v8",
+      "hostBinding": "127.0.0.1:6379:6379",
+      "license": "RSALv2 OR SSPL-1.0",
+      "maintenanceSource": "Docker Official Image library/redis",
+      "decision": "adopt-test-only"
+    },
+    "mongo": {
+      "version": "8.0.11",
+      "image": "mongo@sha256:f3053e1fb01377126929b87a5ed5141a4458089c282518e953304ae457027774",
+      "platform": "linux/arm64/v8",
+      "hostBinding": "127.0.0.1:27017:27017",
+      "license": "SSPL-1.0",
+      "maintenanceSource": "Docker Official Image library/mongo",
+      "decision": "adopt-test-only"
+    },
+    "webProbe": {
+      "version": "24.14.1-bookworm-slim",
+      "image": "node@sha256:fdf1c60c166aaf02dd124c08a1c67b5df800766d3c00661427b84d26138a5432",
+      "platform": "linux/arm64/v8",
+      "hostBinding": null,
+      "license": "Node.js MIT; Debian package licenses retained in image",
+      "maintenanceSource": "Docker Official Image library/node",
+      "decision": "adopt-test-only"
+    }
+  },
+  "cleanup": {
+    "failOnRegisteredResourceCollision": true,
+    "runForOutcomes": ["success", "failure", "signal", "watchdog"],
+    "unloadTarget": true,
+    "deleteOnlyCreatedDerivedTag": true,
+    "composeDownArguments": ["--volumes", "--remove-orphans"],
+    "requireNoResidualTestResource": true,
+    "requireEmptyLoadedModelInventory": true,
+    "preserveInstalledInventory": true,
+    "permittedInventoryAddition": "authorized-fallback-base"
+  }
+}

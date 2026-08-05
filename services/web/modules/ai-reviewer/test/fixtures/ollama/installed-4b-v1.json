@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "id": "installed-4b-v1",
+  "inventory": {
+    "tagsMethod": "GET",
+    "tagsPath": "/api/tags",
+    "showMethod": "POST",
+    "showPath": "/api/show",
+    "showRequest": {
+      "model": "normalized-full-tag",
+      "verbose": false
+    },
+    "mustCompleteBeforeFirstModelRequest": true,
+    "inspectEveryDeduplicatedTag": true,
+    "invalidOrInconsistentOutcome": "fail-before-mutation",
+    "deduplication": {
+      "key": "fullTag",
+      "identicalDuplicateFields": [
+        "digest",
+        "storedBytes",
+        "displayParameterSize",
+        "quantization"
+      ],
+      "conflictingDuplicateOutcome": "fail-before-mutation"
+    }
+  },
+  "normalization": {
+    "fullTag": {
+      "tagsJsonPointers": ["/name", "/model"],
+      "requiredType": "nonempty-string",
+      "requireExactEquality": true,
+      "comparison": "unmodified-unicode-code-points",
+      "trim": false,
+      "caseFold": false,
+      "unicodeNormalize": false,
+      "appendDefaultTag": false
+    },
+    "digest": {
+      "source": "tags",
+      "jsonPointer": "/digest",
+      "requiredPattern": "^[0-9a-f]{64}$"
+    },
+    "storedBytes": {
+      "source": "tags",
+      "jsonPointer": "/size",
+      "requiredType": "positive-safe-integer"
+    },
+    "displayParameterSize": {
+      "tagsJsonPointer": "/details/parameter_size",
+      "showJsonPointer": "/details/parameter_size",
+      "requiredType": "nonempty-string",
+      "requireExactEquality": true,
+      "usedForEligibility": false
+    },
+    "quantization": {
+      "tagsJsonPointer": "/details/quantization_level",
+      "showJsonPointer": "/details/quantization_level",
+      "requiredType": "nonempty-string",
+      "requireExactEquality": true
+    },
+    "parameterCount": {
+      "source": "show",
+      "jsonPointer": "/model_info/general.parameter_count",
+      "requiredType": "positive-safe-integer"
+    },
+    "architecture": {
+      "source": "show",
+      "jsonPointer": "/model_info/general.architecture",
+      "requiredType": "nonempty-string"
+    },
+    "nativeContextTokens": {
+      "source": "show",
+      "jsonPointerTemplate": "/model_info/{architecture}.context_length",
+      "requiredType": "positive-safe-integer"
+    },
+    "capabilities": {
+      "source": "show",
+      "jsonPointer": "/capabilities",
+      "requiredType": "unique-array-of-nonempty-strings",
+      "normalizedOrder": "unicode-code-point"
+    }
+  },
+  "eligibility": {
+    "parameterCount": {
+      "exclusiveMinimum": 0,
+      "maximum": 4500000000
+    },
+    "storedBytes": {
+      "maximum": 4294967296
+    },
+    "quantizationPatterns": ["^Q4_", "^Q5_"],
+    "nativeContextTokens": {
+      "minimum": 8192
+    },
+    "requiredCapabilities": ["completion", "tools"],
+    "excludedTagComparison": "normalized-full-tag-exact",
+    "excludedTags": [
+      "overleaf-ai-reviewer-compat-8k:latest",
+      "overleaf-ai-missing-model-do-not-pull:latest"
+    ]
+  },
+  "ranking": [
+    {
+      "field": "parameterCount",
+      "direction": "descending",
+      "comparison": "numeric"
+    },
+    {
+      "field": "storedBytes",
+      "direction": "ascending",
+      "comparison": "numeric"
+    },
+    {
+      "field": "fullTag",
+      "direction": "ascending",
+      "comparison": "unicode-code-point"
+    }
+  ],
+  "fallback": {
+    "fullTag": "qwen3.5:4b",
+    "pullOnlyWhenEligibleInventoryIsEmpty": true,
+    "requireAbsentBeforePull": true,
+    "installedButIneligibleOutcome": "fail-before-mutation",
+    "allowOverwriteOrRefresh": false,
+    "mustPassEligibilityAfterPull": true,
+    "retainAfterRun": true
+  },
+  "freeze": {
+    "fields": [
+      "fullTag",
+      "digest",
+      "parameterCount",
+      "storedBytes",
+      "quantization",
+      "nativeContextTokens",
+      "capabilities"
+    ],
+    "allowSwitchAfterFirstModelRequest": false,
+    "allowFallbackAfterCompatibilityFailure": false
+  }
+}

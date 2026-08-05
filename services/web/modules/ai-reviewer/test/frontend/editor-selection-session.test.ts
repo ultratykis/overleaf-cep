@@ -67,6 +67,7 @@ type MutableContext = {
   currentDocument: SyntheticDocument | null;
   sourceMode: boolean;
   connected: boolean;
+  connectionEpoch: number;
   permissions: {
     read: boolean;
     write: boolean;
@@ -177,6 +178,7 @@ describe("AI reviewer: single document selection session", function () {
       currentDocument,
       sourceMode: true,
       connected: true,
+      connectionEpoch: 17,
       permissions: {
         read: true,
         write: false,
@@ -238,6 +240,7 @@ describe("AI reviewer: single document selection session", function () {
       currentDocument,
       shareDocument: currentDocument.doc,
       trackChanges: false,
+      connectionEpoch: 17,
     });
     expect(Object.isFrozen(result.session)).to.equal(true);
     expect(Object.isFrozen(result.session.request)).to.equal(true);
@@ -581,6 +584,56 @@ describe("AI reviewer: single document selection session", function () {
     });
   }
 
+  const invalidConnectionEpochCases: Array<{
+    title: string;
+    value: unknown;
+  }> = [
+    {
+      title: "undefined",
+      value: undefined,
+    },
+    {
+      title: "a string",
+      value: "17",
+    },
+    {
+      title: "a negative number",
+      value: -1,
+    },
+    {
+      title: "NaN",
+      value: Number.NaN,
+    },
+    {
+      title: "infinity",
+      value: Number.POSITIVE_INFINITY,
+    },
+  ];
+
+  for (const invalidEpoch of invalidConnectionEpochCases) {
+    it(`rejects ${invalidEpoch.title} as a connection epoch before hashing`, async function () {
+      let hashCalls = 0;
+      (
+        context as unknown as {
+          connectionEpoch: unknown;
+        }
+      ).connectionEpoch = invalidEpoch.value;
+
+      expect(
+        await capture({
+          hashText: async () => {
+            hashCalls += 1;
+            return syntheticHash;
+          },
+        }),
+      ).to.deep.equal({
+        status: "conflict",
+        code: "AI_SELECTION_SYNC_PENDING",
+      });
+      expect(hashCalls).to.equal(0);
+    });
+  }
+
   it("rejects a live Visual Editor even when the committed context claims source mode", async function () {
     context.view = createView({
       includeVisualMode: true,
@@ -830,6 +883,13 @@ describe("AI reviewer: single document selection session", function () {
       expectedCode: "AI_SELECTION_OFFLINE",
       mutate: () => {
         context.connected = false;
+      },
+    },
+    {
+      title: "rejects a fully reconnected connection epoch during hashing",
+      expectedCode: "AI_SELECTION_CHANGED_DURING_CAPTURE",
+      mutate: () => {
+        context.connectionEpoch += 1;
       },
     },
     {

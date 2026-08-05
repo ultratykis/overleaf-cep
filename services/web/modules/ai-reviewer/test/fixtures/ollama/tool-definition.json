@@ -1,0 +1,17 @@
+{
+  "type": "function",
+  "function": {
+    "name": "lookup_synthetic_record",
+    "description": "Return one fixed synthetic record.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "const": "SYNTH-001"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,286 @@
+{
+  "version": 1,
+  "id": "ollama-compat-cases-v1",
+  "encoding": "utf8",
+  "lineEnding": "lf",
+  "commonRequest": {
+    "temperature": 0,
+    "topP": 1,
+    "seed": 424242,
+    "reasoning": "disabled",
+    "maxRetries": 0,
+    "parallelRequests": 1
+  },
+  "transport": {
+    "providerAdapter": "OllamaOpenAiTransport",
+    "generationApi": "openai-chat-completions",
+    "nativeApiMayGenerate": false,
+    "healthCaseId": "non-stream",
+    "healthUsesSameRoute": true,
+    "healthUsesSelectedDerivedModel": true
+  },
+  "generators": {
+    "latency-v1": {
+      "lines": [
+        "Return exactly 80 copies of OK separated by one ASCII space and nothing else.",
+        "BEGIN_SYNTHETIC_PAYLOAD",
+        {
+          "kind": "indexed-words",
+          "count": 512,
+          "prefix": "w",
+          "decimalWidth": 4,
+          "separator": " "
+        },
+        "END_SYNTHETIC_PAYLOAD"
+      ],
+      "join": "\n",
+      "words": 528,
+      "bytes": 3195,
+      "sha256": "3566e9414a63402ae1371d4b4c9f15b55d7356d17177d01bd8abc2c77fad42e3"
+    },
+    "context-8k-v1": {
+      "instruction": "Read the payload and return only this JSON object: {\"begin\":\"CTX_BEGIN_42\",\"middle\":\"CTX_MIDDLE_42\",\"end\":\"CTX_END_42\"}. Do not add keys or prose.",
+      "payload": {
+        "kind": "fixed-word-array",
+        "count": 7560,
+        "default": "alpha",
+        "replacements": {
+          "0": "CTX_BEGIN_42",
+          "3779": "CTX_MIDDLE_42",
+          "7559": "CTX_END_42"
+        },
+        "separator": " "
+      },
+      "join": "\n",
+      "words": 7576,
+      "bytes": 45526,
+      "sha256": "ffdc474e3600ebd2671ec23e86605750a6ddae11b681e46218756485c14426c3"
+    }
+  },
+  "schemas": {
+    "structuredOutput": {
+      "path": "structured-output.schema.json",
+      "canonicalJsonSha256": "5cb588100d31a0847e609dd9afa848aae8e46e4ef7e0080a07c5046568497f57"
+    },
+    "forcedTool": {
+      "path": "tool-definition.json",
+      "canonicalJsonSha256": "1cddfc54502dc7fae049d36c3150c935e1950838f44fe56c90bafa003365fd46"
+    },
+    "contextOutput": {
+      "path": "context-output.schema.json",
+      "canonicalJsonSha256": "f3d5613e399f0207114f869a2f8f40ae141e048c7547297965369689900e41ec"
+    }
+  },
+  "cases": [
+    {
+      "id": "model-list",
+      "kind": "native-model-list",
+      "repetitionsPerRoute": 1,
+      "expectedResolvedTags": 1,
+      "expectedResolvedDigests": 1
+    },
+    {
+      "id": "non-stream",
+      "kind": "chat",
+      "stream": false,
+      "prompt": "Return exactly COMPAT_OK and nothing else.",
+      "promptBytes": 42,
+      "promptSha256": "cf1088659615107aff6b49a2b01868259a8b91028461ef962acdeb0a73da035d",
+      "maxTokens": 32,
+      "expectedText": "COMPAT_OK",
+      "expectedTextSha256": "6e9f79a241c8a6f05320a50bce99ade6aa3aa867ba5ce8562258e33f647360f7",
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "latency",
+      "kind": "chat",
+      "stream": true,
+      "promptGenerator": "latency-v1",
+      "maxTokens": 96,
+      "expectedTextGenerator": {
+        "kind": "repeat-word",
+        "word": "OK",
+        "count": 80,
+        "separator": " ",
+        "bytes": 239,
+        "sha256": "509f9923c29230b4b829ee6c45d75afe9ed54226361ef7914c25c8d47db359b6"
+      },
+      "completionTokens": {
+        "minimum": 64,
+        "maximum": 96
+      },
+      "minimumNonemptyChunks": 2,
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "structured-output",
+      "kind": "chat-schema",
+      "stream": false,
+      "prompt": "Return the synthetic record as JSON with status ok, id SYNTH-001, and count 3. Do not add keys or prose.",
+      "promptBytes": 104,
+      "promptSha256": "240fb1c86c05ca1a4ac93fb582f3c3cb206c4cc856ca92fcd308d26f6eb8b97e",
+      "schema": "structuredOutput",
+      "maxTokens": 48,
+      "expected": {
+        "status": "ok",
+        "id": "SYNTH-001",
+        "count": 3
+      },
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "forced-tool",
+      "kind": "chat-tool-round-trip",
+      "stream": false,
+      "prompt": "Call lookup_synthetic_record exactly once with id SYNTH-001. After the tool result, return exactly TOOL_OK and nothing else.",
+      "promptBytes": 124,
+      "promptSha256": "3282fe4ffa27a07c9cb92f71fc3030e49b970f9c2cda64c05f97b7e5937c8f18",
+      "tool": "forcedTool",
+      "toolChoice": {
+        "type": "function",
+        "name": "lookup_synthetic_record"
+      },
+      "proposalMaxTokens": 64,
+      "expectedArguments": {
+        "id": "SYNTH-001"
+      },
+      "toolResult": {
+        "id": "SYNTH-001",
+        "value": "synthetic"
+      },
+      "toolResultCanonicalJsonSha256": "1eeaa440b52115e33a0882076b14ae680d8a0dd63401f74a0f4de0484ae9c852",
+      "finalMaxTokens": 32,
+      "expectedFinalText": "TOOL_OK",
+      "expectedFinalTextSha256": "2fb312672ec1b36b3f47ce88c3995907838a2d27ba8a407341d898fc32773935",
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "context-8k",
+      "kind": "chat-schema",
+      "stream": true,
+      "promptGenerator": "context-8k-v1",
+      "schema": "contextOutput",
+      "maxTokens": 96,
+      "promptTokens": {
+        "minimum": 7500,
+        "maximum": 7900
+      },
+      "promptPlusMaxTokensMaximum": 8192,
+      "expected": {
+        "begin": "CTX_BEGIN_42",
+        "middle": "CTX_MIDDLE_42",
+        "end": "CTX_END_42"
+      },
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "cancellation",
+      "kind": "chat-cancellation",
+      "stream": true,
+      "prompt": "Return exactly 400 copies of RUN separated by one ASCII space and nothing else.",
+      "promptBytes": 79,
+      "promptSha256": "7d784fc7f0d23f20e5babaa127071d95345836d11c9c326083f64fc2507a0564",
+      "maxTokens": 512,
+      "abortAfterNonemptyChunks": 1,
+      "expectedError": {
+        "code": "AI_REQUEST_ABORTED",
+        "category": "aborted",
+        "retryable": false
+      },
+      "classifyWithinMilliseconds": 1000,
+      "observeNoLaterEventMilliseconds": 1000,
+      "postFailureHealth": {
+        "caseId": "non-stream",
+        "sameRoute": true,
+        "sameModel": true,
+        "deadlineMilliseconds": 20000
+      },
+      "repetitionsPerRoute": 3
+    },
+    {
+      "id": "timeout",
+      "kind": "chat-timeout",
+      "stream": true,
+      "prompt": "Return exactly 400 copies of RUN separated by one ASCII space and nothing else.",
+      "promptBytes": 79,
+      "promptSha256": "7d784fc7f0d23f20e5babaa127071d95345836d11c9c326083f64fc2507a0564",
+      "maxTokens": 512,
+      "deadlineMilliseconds": 250,
+      "expectedError": {
+        "code": "AI_REQUEST_TIMEOUT",
+        "category": "timeout",
+        "retryable": true
+      },
+      "classifyWithinMilliseconds": 1250,
+      "observeNoLaterEventMilliseconds": 1000,
+      "postFailureHealth": {
+        "caseId": "non-stream",
+        "sameRoute": true,
+        "sameModel": true,
+        "deadlineMilliseconds": 20000
+      },
+      "repetitionsPerRoute": 3
+    }
+  ],
+  "controls": [
+    {
+      "id": "missing-model",
+      "kind": "chat-error",
+      "transport": "OllamaOpenAiTransport",
+      "requestCaseId": "non-stream",
+      "model": "overleaf-ai-missing-model-do-not-pull:latest",
+      "mustBeAbsentAtEntry": true,
+      "preexistingTagOutcome": "fail-before-mutation",
+      "expectedError": {
+        "code": "AI_PROVIDER_REQUEST_FAILED",
+        "category": "provider",
+        "retryable": false
+      },
+      "repetitionsPerRoute": 1,
+      "mustPreserveInventory": true
+    },
+    {
+      "id": "daemon-unavailable",
+      "kind": "chat-error",
+      "transport": "OllamaOpenAiTransport",
+      "requestCaseId": "non-stream",
+      "model": "selected-derived-model",
+      "hostBaseUrl": "http://127.0.0.1:11435/v1",
+      "dockerBaseUrl": "http://host.docker.internal:11435/v1",
+      "proveNoListenerBeforeRequest": true,
+      "expectedError": {
+        "code": "AI_PROVIDER_NETWORK_FAILED",
+        "category": "network",
+        "retryable": true
+      },
+      "repetitionsPerRoute": 1
+    }
+  ],
+  "gatewaySmoke": {
+    "request": {
+      "requestId": "ollama-gateway-smoke-001",
+      "projectId": "synthetic-project",
+      "action": "review",
+      "instruction": "Return a short narrative confirming this synthetic selection can be reviewed. Use empty findings and suggestions.",
+      "skill": null,
+      "scope": {
+        "kind": "selection",
+        "documentId": "synthetic-document",
+        "path": "main.tex",
+        "baseRevision": 1,
+        "baseTextHash": "231b0b0c3a87250aaf7cdeb3cfc5923097b993e85c2d73f40faa13143a75c3f9",
+        "range": {
+          "from": 0,
+          "to": 34
+        },
+        "text": "A synthetic sentence needs review."
+      }
+    },
+    "canonicalJsonBytes": 484,
+    "canonicalJsonSha256": "566b6e379f9f963fbf1794a53f236f604e90c7860fa264fc27e55545df239246",
+    "connectionTestRepetitions": 1,
+    "reviewRepetitions": 3,
+    "minimumTextDeltaEvents": 1,
+    "completedTerminalEvents": 1
+  }
+}

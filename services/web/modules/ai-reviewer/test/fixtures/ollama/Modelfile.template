@@ -1,0 +1,2 @@
+FROM {{BASE_MODEL}}
+PARAMETER num_ctx 8192

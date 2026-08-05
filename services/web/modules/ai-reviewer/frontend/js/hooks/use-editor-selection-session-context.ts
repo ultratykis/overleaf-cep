@@ -95,6 +95,7 @@ export function useEditorSelectionSessionContext() {
         documentName: openDocName,
         visualRequested: showVisual,
         connected: isConnected && !connectionState.forceDisconnected,
+        connectionEpoch: connectionState.lastConnectionAttempt,
         permissions: {
           read: permissions.read,
           write: permissions.write,
@@ -105,6 +106,7 @@ export function useEditorSelectionSessionContext() {
       }),
     [
       connectionState.forceDisconnected,
+      connectionState.lastConnectionAttempt,
       currentDocument,
       currentDocumentId,
       isConnected,

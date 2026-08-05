@@ -60,6 +60,7 @@ const session = Object.freeze({
     }),
     shareDocument: Object.freeze({}),
     trackChanges: false,
+    connectionEpoch: 17,
   }),
 });
 
@@ -81,6 +82,58 @@ const suggestion = Object.freeze({
       range: request.scope.range,
       revision: request.scope.baseRevision,
       textHash: request.scope.baseTextHash,
+    }),
+  ]),
+  provider: "fake",
+  model: "deterministic-v1",
+  skill: "line-edit",
+  createdAt: "2026-07-24T00:00:00.000Z",
+  status: "proposed",
+});
+
+const shortenText =
+  "start\nalpha very old omega\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nalpha extremely old omega\nend\n";
+const shortenReplacement =
+  "start\nalpha old omega\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nalpha old omega\nend\n";
+const shortenTextHash =
+  "0b6b0b887aaf43e83757b08efc83c1e3ff2d70f00504901b461b41e0d5794a21";
+const shortenRequest = Object.freeze({
+  requestId: "request-preview-shorten-0001",
+  projectId: "project-0001",
+  action: "shorten",
+  instruction: "Shorten two separated synthetic phrases.",
+  skill: "line-edit",
+  scope: Object.freeze({
+    kind: "selection",
+    documentId: "document-0001",
+    path: "chapters/main.tex",
+    baseRevision: 11,
+    baseTextHash: shortenTextHash,
+    range: Object.freeze({
+      from: 0,
+      to: shortenText.length,
+    }),
+    text: shortenText,
+  }),
+});
+const shortenSuggestion = Object.freeze({
+  id: "suggestion-preview-shorten-0001",
+  requestId: shortenRequest.requestId,
+  projectId: shortenRequest.projectId,
+  documentId: shortenRequest.scope.documentId,
+  path: shortenRequest.scope.path,
+  baseRevision: shortenRequest.scope.baseRevision,
+  baseTextHash: shortenRequest.scope.baseTextHash,
+  range: shortenRequest.scope.range,
+  original: shortenText,
+  replacement: shortenReplacement,
+  rationale: "Remove redundant modifiers from two synthetic phrases.",
+  evidence: Object.freeze([
+    Object.freeze({
+      path: shortenRequest.scope.path,
+      range: shortenRequest.scope.range,
+      revision: shortenRequest.scope.baseRevision,
+      textHash: shortenRequest.scope.baseTextHash,
     }),
   ]),
   provider: "fake",
@@ -757,19 +810,22 @@ describe("AI reviewer: OT safety suggestion workspace", function () {
     view = undefined;
   });
 
-  function createLiveEditor() {
+  function createLiveEditor({
+    requestAtCapture = request,
+    text = "Alpha beta gamma.",
+  } = {}) {
     const { currentDocument, shareDoc, documentErrors } =
       createStatefulLegacyDocument({
-        documentId: request.scope.documentId,
-        text: "Alpha beta gamma.",
-        revision: request.scope.baseRevision,
+        documentId: requestAtCapture.scope.documentId,
+        text,
+        revision: requestAtCapture.scope.baseRevision,
       });
     const realtimeErrors = [];
     const documentTransactions = [];
     let aiTransactionCount = 0;
     view = new EditorView({
       state: EditorState.create({
-        doc: "Alpha beta gamma.",
+        doc: text,
         extensions: [
           history(),
           realtime({ currentDoc: currentDocument }, (error) => {
@@ -796,21 +852,23 @@ describe("AI reviewer: OT safety suggestion workspace", function () {
       }),
     });
     const liveSession = Object.freeze({
-      request,
+      request: requestAtCapture,
       binding: Object.freeze({
         currentDocument,
         shareDocument: currentDocument.doc,
         trackChanges: false,
+        connectionEpoch: 17,
       }),
     });
     const getContext = () => ({
       view,
-      projectId: request.projectId,
-      currentDocumentId: request.scope.documentId,
-      path: request.scope.path,
+      projectId: requestAtCapture.projectId,
+      currentDocumentId: requestAtCapture.scope.documentId,
+      path: requestAtCapture.scope.path,
       currentDocument,
       sourceMode: true,
       connected: true,
+      connectionEpoch: 17,
       permissions: {
         read: true,
         write: true,
@@ -919,6 +977,104 @@ describe("AI reviewer: OT safety suggestion workspace", function () {
         type: "insert",
         position: 6,
         text: "beta",
+        fromUndo: true,
+      },
+    ]);
+    await waitForRealtimeCheck();
+    expect(live.realtimeErrors).to.deep.equal([]);
+    expect(live.shareDoc.errors).to.deep.equal([]);
+    expect(live.documentErrors).to.deep.equal([]);
+    rendered.unmount();
+  });
+
+  it("routes a completed shorten suggestion through one selected hunk and normal Undo", async function () {
+    const live = createLiveEditor({
+      requestAtCapture: shortenRequest,
+      text: shortenText,
+    });
+    const onDecision = sinon.stub();
+    const applySuggestion = sinon.spy((options) =>
+      applySelectedEditorSelectionSuggestion(options),
+    );
+    const rendered = render(
+      React.createElement(AiReviewerSuggestionPreview, {
+        session: live.liveSession,
+        suggestion: shortenSuggestion,
+        getContext: live.getContext,
+        applySuggestion,
+        onDecision,
+      }),
+    );
+
+    const checkboxes = await screen.findAllByRole("checkbox", {
+      name: /Select proposed change/,
+    });
+    await screen.findByText("Suggestion preview ready");
+    expect(checkboxes).to.have.length(2);
+    expect(shortenSuggestion.replacement.length).to.be.lessThan(
+      shortenSuggestion.original.length,
+    );
+    expect(live.liveSession.request).to.equal(shortenRequest);
+    expect(live.liveSession.request.action).to.equal("shorten");
+    expect(live.liveSession.request.skill).to.equal("line-edit");
+    expect(view.state.doc.toString()).to.equal(shortenText);
+    expect(live.shareDoc.getText()).to.equal(shortenText);
+    expect(live.shareDoc.localOperations).to.deep.equal([]);
+    expect(live.documentTransactions).to.deep.equal([]);
+
+    fireEvent.click(checkboxes[0]);
+    expect(checkboxes[0].checked).to.equal(true);
+    expect(checkboxes[1].checked).to.equal(false);
+    expect(view.state.doc.toString()).to.equal(shortenText);
+    expect(live.shareDoc.getText()).to.equal(shortenText);
+    expect(live.shareDoc.localOperations).to.deep.equal([]);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Apply selected changes",
+      }),
+    );
+
+    await screen.findByText("Selected changes applied");
+    const selectedHunkId = checkboxes[0].dataset.aiReviewerHunkId;
+    const expectedText = shortenText.replace("very ", "");
+    expect(
+      onDecision.calledOnceWithExactly({
+        status: "applied",
+      }),
+    ).to.equal(true);
+    expect(applySuggestion.calledOnce).to.equal(true);
+    expect(applySuggestion.firstCall.args[0].session).to.equal(
+      live.liveSession,
+    );
+    expect(applySuggestion.firstCall.args[0].suggestion).to.equal(
+      shortenSuggestion,
+    );
+    expect(applySuggestion.firstCall.args[0].selectedHunkIds).to.deep.equal([
+      selectedHunkId,
+    ]);
+    expect(view.state.doc.toString()).to.equal(expectedText);
+    expect(live.shareDoc.getText()).to.equal(expectedText);
+    expect(live.aiTransactionCount).to.equal(1);
+    expect(live.documentTransactions).to.have.length(1);
+    expect(live.shareDoc.localOperations).to.deep.equal([
+      {
+        type: "delete",
+        position: shortenText.indexOf("very "),
+        length: "very ".length,
+        fromUndo: false,
+      },
+    ]);
+
+    expect(undo(view)).to.equal(true);
+    expect(view.state.doc.toString()).to.equal(shortenText);
+    expect(live.shareDoc.getText()).to.equal(shortenText);
+    expect(live.documentTransactions).to.have.length(2);
+    expect(live.shareDoc.localOperations.slice(1)).to.deep.equal([
+      {
+        type: "insert",
+        position: shortenText.indexOf("very "),
+        text: "very ",
         fromUndo: true,
       },
     ]);

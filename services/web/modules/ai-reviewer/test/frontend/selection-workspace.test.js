@@ -196,6 +196,7 @@ function renderPanel({
   streamRequest,
   createRequestId = () => "request-duplicate",
   getSelectionContext,
+  navigateEvidence,
   mountSuggestionPreview,
   applySelectionSuggestion,
 }) {
@@ -206,6 +207,7 @@ function renderPanel({
       captureSelectionSession,
       streamRequest,
       getSelectionContext,
+      navigateEvidence,
       mountSuggestionPreview,
       applySelectionSuggestion,
     }),
@@ -1236,6 +1238,485 @@ describe("AI reviewer: single document selection workspace", function () {
       screen.getByRole("button", {
         name: "Preview suggestion 1",
       }),
+    ).to.exist;
+  });
+});
+async function renderCompletedEvidenceWorkspace({
+  navigateEvidence,
+  evidence,
+  getSelectionContext = sinon.stub(),
+  streamRequest: receivedStreamRequest,
+  createRequestId = () => "request-duplicate",
+} = {}) {
+  const instruction = "Review the selected phrase.";
+  const session = selectionSession({
+    action: "review",
+    instruction,
+  });
+  const emittedFinding = {
+    ...finding(session.request),
+    evidence: evidence ?? finding(session.request).evidence,
+    suggestionIds: [],
+  };
+  const captureSelectionSession = sinon.stub().resolves({
+    status: "ready",
+    session,
+  });
+  const streamRequest =
+    receivedStreamRequest ??
+    sinon.stub().callsFake(async (call) => {
+      call.onEvent(startedEvent(session.request));
+      call.onEvent({
+        ...eventBase(session.request.requestId, 1, "finding"),
+        type: "finding",
+        finding: emittedFinding,
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+  const rendered = renderPanel({
+    captureSelectionSession,
+    streamRequest,
+    createRequestId,
+    getSelectionContext,
+    navigateEvidence,
+  });
+
+  await clickSelectionAction("Review selection", instruction);
+  await screen.findByText("Completed");
+  return {
+    captureSelectionSession,
+    emittedFinding,
+    getSelectionContext,
+    rendered,
+    session,
+    streamRequest,
+  };
+}
+describe("AI reviewer: single document evidence navigation workspace", function () {
+  it("passes one exact completed finding target to the injected navigator", async function () {
+    const navigateEvidence = sinon.stub().resolves({
+      status: "navigated",
+    });
+    const workspace = await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+    await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
+
+    const options = navigateEvidence.firstCall.args[0];
+    expect(options.target).to.include({
+      requestId: workspace.session.request.requestId,
+      findingId: workspace.emittedFinding.id,
+      projectId,
+      documentId,
+      path,
+      baseRevision: 7,
+      baseTextHash,
+    });
+    expect(options.target.range).to.deep.equal({
+      from: 6,
+      to: 10,
+    });
+    expect(options.target.currentDocument).to.equal(
+      workspace.session.binding.currentDocument,
+    );
+    expect(options.target.shareDocument).to.equal(
+      workspace.session.binding.shareDocument,
+    );
+    expect(options.getContext).to.equal(workspace.getSelectionContext);
+    expect(options.signal.addEventListener).to.be.a("function");
+    expect(options.signal.removeEventListener).to.be.a("function");
+    expect(options.signal.aborted).to.equal(false);
+    expect(workspace.streamRequest.calledOnce).to.equal(true);
+    expect(await screen.findByText("Evidence selected")).to.exist;
+  });
+
+  it("normalizes a malformed resolved navigator result without unmounting", async function () {
+    const navigateEvidence = sinon.stub().resolves(null);
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Evidence navigation failed: AI_EVIDENCE_NAVIGATION_FAILED",
+      ),
+    ).to.exist;
+    expect(screen.getByText("Completed")).to.exist;
+    expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
+    expect(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    ).to.exist;
+  });
+
+  const malformedNavigatorResults = [
+    {
+      name: "an unknown status",
+      value: {
+        status: "AI_EVIDENCE_PRIVATE_STATUS",
+      },
+    },
+    {
+      name: "an unknown conflict code",
+      value: {
+        status: "conflict",
+        code: "AI_EVIDENCE_PRIVATE_CONFLICT",
+      },
+    },
+    {
+      name: "an unknown error code",
+      value: {
+        status: "error",
+        code: "AI_EVIDENCE_PRIVATE_ERROR",
+      },
+    },
+  ];
+
+  for (const malformedResult of malformedNavigatorResults) {
+    it(`normalizes ${malformedResult.name} without exposing it`, async function () {
+      const navigateEvidence = sinon.stub().resolves(malformedResult.value);
+      await renderCompletedEvidenceWorkspace({
+        navigateEvidence,
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Go to evidence 1",
+        }),
+      );
+
+      expect(
+        await screen.findByText(
+          "Evidence navigation failed: AI_EVIDENCE_NAVIGATION_FAILED",
+        ),
+      ).to.exist;
+      expect(document.body.textContent).not.to.contain(
+        malformedResult.value.code ?? malformedResult.value.status,
+      );
+      expect(screen.getByText("Completed")).to.exist;
+    });
+  }
+
+  it("normalizes a rejected navigator without exposing its raw error", async function () {
+    const navigateEvidence = sinon
+      .stub()
+      .rejects(new Error("AI_EVIDENCE_PRIVATE_REJECTION"));
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Evidence navigation failed: AI_EVIDENCE_NAVIGATION_FAILED",
+      ),
+    ).to.exist;
+    expect(document.body.textContent).not.to.contain(
+      "AI_EVIDENCE_PRIVATE_REJECTION",
+    );
+    expect(screen.getByText("Completed")).to.exist;
+  });
+
+  it("keeps project-scope evidence as read-only text", async function () {
+    const navigateEvidence = sinon.stub().resolves({
+      status: "navigated",
+    });
+    const streamRequest = sinon.stub().callsFake(async (call) => {
+      call.onEvent(startedEvent(call.request));
+      call.onEvent({
+        ...eventBase(call.request.requestId, 1, "finding"),
+        type: "finding",
+        finding: {
+          id: "finding-project-0001",
+          requestId: call.request.requestId,
+          projectId: call.request.projectId,
+          severity: "warning",
+          category: "structure",
+          title: "Project evidence",
+          message: "This project result remains read-only in Phase 2.",
+          evidence: [
+            {
+              path: "chapters/other.tex",
+              range: {
+                from: 1,
+                to: 3,
+              },
+              revision: 12,
+              textHash: "b".repeat(64),
+            },
+          ],
+          suggestionIds: [],
+        },
+      });
+      call.onEvent({
+        ...eventBase(call.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+    renderPanel({
+      streamRequest,
+      navigateEvidence,
+      getSelectionContext: sinon.stub(),
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Run review",
+      }),
+    );
+    await screen.findByText("Completed");
+
+    expect(screen.getByText("chapters/other.tex:1-3")).to.exist;
+    expect(
+      screen.queryByRole("button", {
+        name: /Go to evidence/,
+      }),
+    ).not.to.exist;
+    expect(navigateEvidence.called).to.equal(false);
+  });
+
+  it("keeps range-less selection evidence as read-only text", async function () {
+    const navigateEvidence = sinon.stub().resolves({
+      status: "navigated",
+    });
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+      evidence: [
+        {
+          path,
+          revision: 7,
+          textHash: baseTextHash,
+        },
+      ],
+    });
+
+    expect(screen.getByText(path)).to.exist;
+    expect(
+      screen.queryByRole("button", {
+        name: /Go to evidence/,
+      }),
+    ).not.to.exist;
+    expect(navigateEvidence.called).to.equal(false);
+  });
+
+  it("aborts an earlier evidence click and ignores its late result", async function () {
+    const navigationA = deferred();
+    const navigationB = deferred();
+    const navigateEvidence = sinon.stub();
+    navigateEvidence.onFirstCall().returns(navigationA.promise);
+    navigateEvidence.onSecondCall().returns(navigationB.promise);
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+      evidence: [
+        {
+          path,
+          range: {
+            from: 6,
+            to: 8,
+          },
+          revision: 7,
+          textHash: baseTextHash,
+        },
+        {
+          path,
+          range: {
+            from: 8,
+            to: 10,
+          },
+          revision: 7,
+          textHash: baseTextHash,
+        },
+      ],
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+    await waitFor(() => expect(navigateEvidence.callCount).to.equal(1));
+    const firstSignal = navigateEvidence.firstCall.args[0].signal;
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 2",
+      }),
+    );
+    await waitFor(() => expect(navigateEvidence.callCount).to.equal(2));
+    expect(firstSignal.aborted).to.equal(true);
+
+    await act(async () => {
+      navigationB.resolve({
+        status: "navigated",
+      });
+      await navigationB.promise;
+    });
+    expect(await screen.findByText("Evidence selected")).to.exist;
+
+    await act(async () => {
+      navigationA.resolve({
+        status: "conflict",
+        code: "AI_EVIDENCE_STATE_STALE",
+      });
+      await navigationA.promise;
+    });
+    expect(screen.getByText("Evidence selected")).to.exist;
+    expect(screen.queryByText(/AI_EVIDENCE_STATE_STALE/)).not.to.exist;
+  });
+
+  it("aborts pending evidence navigation before a replacement review starts", async function () {
+    const navigation = deferred();
+    const secondStream = deferred();
+    const navigateEvidence = sinon.stub().returns(navigation.promise);
+    let streamCount = 0;
+    const streamRequest = sinon.stub().callsFake(async (call) => {
+      streamCount += 1;
+      if (streamCount === 2) {
+        return secondStream.promise;
+      }
+      call.onEvent(startedEvent(call.request));
+      call.onEvent({
+        ...eventBase(call.request.requestId, 1, "finding"),
+        type: "finding",
+        finding: {
+          ...finding(call.request),
+          suggestionIds: [],
+        },
+      });
+      call.onEvent({
+        ...eventBase(call.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+      streamRequest,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+    await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
+    const navigationSignal = navigateEvidence.firstCall.args[0].signal;
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Review selection",
+      }),
+    );
+    expect(navigationSignal.aborted).to.equal(true);
+    await waitFor(() => expect(streamRequest.callCount).to.equal(2));
+
+    await act(async () => {
+      navigation.resolve({
+        status: "navigated",
+      });
+      await navigation.promise;
+    });
+    expect(screen.queryByText("Evidence selected")).not.to.exist;
+    expect(screen.getByText("Streaming")).to.exist;
+    secondStream.resolve();
+  });
+
+  it("does not revive a stale evidence closure across a same-identity generation", async function () {
+    const navigateEvidence = sinon.stub().resolves({
+      status: "navigated",
+    });
+    const workspace = await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+    const replacementRunButton = screen.getByRole("button", {
+      name: "Review selection",
+    });
+    const staleEvidenceButton = screen.getByRole("button", {
+      name: "Go to evidence 1",
+    });
+
+    await act(async () => {
+      replacementRunButton.click();
+      staleEvidenceButton.click();
+    });
+    await waitFor(() => expect(workspace.streamRequest.callCount).to.equal(2));
+    await screen.findByText("Completed");
+
+    expect(workspace.captureSelectionSession.callCount).to.equal(2);
+    expect(navigateEvidence.called).to.equal(false);
+    expect(screen.queryByText("Selecting evidence")).not.to.exist;
+    expect(screen.queryByText("Evidence selected")).not.to.exist;
+    expect(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    ).to.exist;
+  });
+
+  it("aborts pending evidence navigation on unmount", async function () {
+    const navigation = deferred();
+    const navigateEvidence = sinon.stub().returns(navigation.promise);
+    const workspace = await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+    await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
+    const navigationSignal = navigateEvidence.firstCall.args[0].signal;
+
+    workspace.rendered.unmount();
+    expect(navigationSignal.aborted).to.equal(true);
+    await act(async () => {
+      navigation.resolve({
+        status: "navigated",
+      });
+      await navigation.promise;
+    });
+  });
+
+  it("shows only the bounded conflict code from the active navigation", async function () {
+    const navigateEvidence = sinon.stub().resolves({
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    });
+    await renderCompletedEvidenceWorkspace({
+      navigateEvidence,
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Go to evidence 1",
+      }),
+    );
+
+    expect(
+      await screen.findByText("Evidence unavailable: AI_EVIDENCE_STATE_STALE"),
     ).to.exist;
   });
 });
