@@ -543,8 +543,19 @@ describe("AI reviewer panel width", function () {
           : "var(--bg-light-primary)",
       );
       const portaledMenu = declarationsFor(".ai-reviewer-panel-portaled-menu");
-      expect(portaledMenu.get("display")).to.equal("block");
       expect(portaledMenu.get("height")).to.equal("auto");
+      // Bootstrap hides a closed dropdown with `display: none`. Restating the
+      // box unconditionally left every dismissed menu on screen, so the
+      // override has to stay inside the open state.
+      expect(portaledMenu.get("display")).to.equal(undefined);
+      expect(
+        declarationsFor(
+          ".ai-reviewer-panel-portaled-menu:not(.show)",
+        ).get("display"),
+      ).to.equal("none");
+      expect(
+        declarationsFor(".ai-reviewer-panel-portaled-menu.show").get("display"),
+      ).to.equal("block");
     });
   }
 
@@ -703,8 +714,16 @@ describe("AI reviewer panel width", function () {
     );
 
     const portaledMenu = declarationsFor(".ai-reviewer-panel-portaled-menu");
-    expect(portaledMenu.get("display")).to.equal("block");
     expect(portaledMenu.get("height")).to.equal("auto");
+    expect(portaledMenu.get("display")).to.equal(undefined);
+      expect(
+        declarationsFor(
+          ".ai-reviewer-panel-portaled-menu:not(.show)",
+        ).get("display"),
+      ).to.equal("none");
+    expect(
+      declarationsFor(".ai-reviewer-panel-portaled-menu.show").get("display"),
+    ).to.equal("block");
 
     const footer = declarationsFor(
       ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-footer",

@@ -1454,10 +1454,23 @@
  * still needs a viewport ceiling because provider labels are untrusted text. */
 .ai-reviewer-panel-portaled-menu {
   box-sizing: border-box;
-  // The host theme marker is also a layout container elsewhere in the IDE;
-  // a menu must keep Bootstrap's own standalone box in both themes.
-  display: block;
+  // The host theme marker is also a layout container elsewhere in the IDE, so
+  // the menu restates its own box. Scope that to the open state: Bootstrap
+  // hides a closed dropdown with `display: none`, and an unconditional
+  // `display: block` here left every menu on screen after it was dismissed.
   height: auto;
+
+  // The host theme marker doubles as an IDE layout container and brings its own
+  // `display: flex`, which outranks Bootstrap's `display: none` on a closed
+  // dropdown. State both sides here so a dismissed menu actually leaves the
+  // screen instead of covering the panel underneath it.
+  &:not(.show) {
+    display: none;
+  }
+
+  &.show {
+    display: block;
+  }
 
   .dropdown-item {
     min-width: 0;
