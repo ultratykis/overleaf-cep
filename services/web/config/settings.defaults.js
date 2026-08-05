@@ -1086,7 +1086,16 @@ module.exports = {
       ),
     ],
     contactUsModal: [],
-    sourceEditorExtensions: [],
+    sourceEditorExtensions: [
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/extensions/document-identity.ts'
+            ),
+          ]
+        : []),
+    ],
     sourceEditorVisualExtensions: [],
     sourceEditorComponents: [],
     pdfLogEntryHeaderActionComponents: [],

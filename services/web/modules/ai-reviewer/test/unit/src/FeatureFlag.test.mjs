@@ -37,6 +37,15 @@ function expectThinFrontendShells(settings) {
   ).toHaveLength(1);
 }
 
+function aiReviewerSourceEditorExtensions(settings) {
+  return settings.overleafModuleImports.sourceEditorExtensions.filter(
+    (extensionPath) =>
+      extensionPath.endsWith(
+        "/modules/ai-reviewer/frontend/js/extensions/document-identity.ts",
+      ),
+  );
+}
+
 afterEach(function () {
   if (originalValue == null) {
     delete process.env.OVERLEAF_AI_REVIEWER_ENABLED;
@@ -56,6 +65,7 @@ describe("AI reviewer: feature off", function () {
       expect(
         settings.moduleImportSequence.filter((name) => name === "ai-reviewer"),
       ).toEqual([]);
+      expect(aiReviewerSourceEditorExtensions(settings)).toEqual([]);
       expectThinFrontendShells(settings);
     },
   );
@@ -69,6 +79,7 @@ describe("AI reviewer: feature off", function () {
       expect(
         settings.moduleImportSequence.filter((name) => name === "ai-reviewer"),
       ).toEqual(["ai-reviewer"]);
+      expect(aiReviewerSourceEditorExtensions(settings)).toHaveLength(1);
       expectThinFrontendShells(settings);
     },
   );

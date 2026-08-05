@@ -3,12 +3,15 @@ import getMeta from "@/utils/meta";
 import {
   AgentErrorSchema,
   AgentEventSchema,
+  AgentRequestSchema,
 } from "../../../shared/contracts.mjs";
 import type {
   AgentError,
   AgentEvent,
   AgentRequest,
+  EvidenceReference,
 } from "../../../shared/contract-types";
+import { prepareSingleDocumentSuggestion } from "./single-document-suggestions";
 
 export class AgentStreamError extends Error {
   constructor(public readonly details: AgentError) {
@@ -29,28 +32,258 @@ type StreamAgentEventsOptions = {
 function genericStreamError(
   code: string,
   message: string,
-  category: AgentError["category"] = "network",
+  category: AgentError["category"],
+  retryable: boolean,
 ): AgentStreamError {
   return new AgentStreamError({
     code,
     category,
     message,
-    retryable: true,
+    retryable,
   });
 }
 
-async function errorFromResponse(response: Response) {
+function protocolError(code: string, message: string) {
+  return genericStreamError(code, message, "schema", false);
+}
+
+function networkError(code: string, message: string) {
+  return genericStreamError(code, message, "network", true);
+}
+
+function throwIfAborted(signal: AbortSignal) {
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+}
+
+function waitWithAbort<T>(operation: Promise<T>, signal: AbortSignal) {
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      finish(() => reject(signal.reason));
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        finish(() => resolve(value));
+      },
+      (error: unknown) => {
+        finish(() => reject(error));
+      },
+    );
+  });
+}
+
+function normalizeTransportError(error: unknown, signal: AbortSignal) {
+  if (signal.aborted) {
+    return signal.reason;
+  }
+  if (error instanceof AgentStreamError) {
+    return error;
+  }
+  return networkError(
+    "AI_STREAM_NETWORK_ERROR",
+    "The AI reviewer stream could not be read.",
+  );
+}
+
+function cancelReaderWithoutWaiting(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reason: unknown,
+) {
+  try {
+    void Promise.resolve(reader.cancel(reason)).catch(() => {});
+  } catch {
+    // Preserve the stream, protocol, callback, or abort failure.
+  }
+}
+
+async function readJsonResponseBody(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (response.body == null) {
+    return null;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  let failure: unknown;
+  let failed = false;
+
+  try {
+    while (true) {
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await waitWithAbort(reader.read(), signal);
+      } catch (error) {
+        throw normalizeTransportError(error, signal);
+      }
+      const { done, value } = result;
+      throwIfAborted(signal);
+      body += decoder.decode(value, { stream: !done });
+      if (done) {
+        break;
+      }
+    }
+  } catch (error) {
+    failed = true;
+    failure = signal.aborted ? signal.reason : error;
+    cancelReaderWithoutWaiting(reader, failure);
+  }
+  try {
+    reader.releaseLock();
+  } catch (error) {
+    if (!failed) {
+      failed = true;
+      failure = normalizeTransportError(error, signal);
+    }
+  }
+  if (failed) {
+    throw failure;
+  }
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+async function errorFromResponse(response: Response, signal: AbortSignal) {
   if (response.headers.get("content-type")?.includes("application/json")) {
-    const body = await response.json().catch(() => null);
-    const parsed = AgentErrorSchema.safeParse(body?.error);
+    const body = await readJsonResponseBody(response, signal);
+    const responseError =
+      body != null && typeof body === "object" && "error" in body
+        ? body.error
+        : undefined;
+    const parsed = AgentErrorSchema.safeParse(responseError);
     if (parsed.success) {
       return new AgentStreamError(parsed.data);
     }
   }
-  return genericStreamError(
+  return networkError(
     "AI_HTTP_ERROR",
     `The AI reviewer request failed with HTTP ${response.status}.`,
   );
+}
+
+function assertPathAndRangeWithinRequest(
+  request: AgentRequest,
+  reference: {
+    path: string;
+    range?: {
+      from: number;
+      to: number;
+    };
+  },
+) {
+  if (request.scope.kind === "project") {
+    return;
+  }
+
+  const scope = request.scope;
+  const lowerBound = scope.kind === "selection" ? scope.range.from : 0;
+  const upperBound =
+    scope.kind === "selection" ? scope.range.to : scope.text.length;
+  const selectionRangeMissing =
+    scope.kind === "selection" && reference.range == null;
+  const rangeOutside =
+    reference.range != null &&
+    (reference.range.from < lowerBound || reference.range.to > upperBound);
+  if (reference.path !== scope.path || selectionRangeMissing || rangeOutside) {
+    throw protocolError(
+      "AI_STREAM_EVENT_SCOPE_INVALID",
+      "The AI reviewer returned data outside the requested document scope.",
+    );
+  }
+}
+
+function assertEvidenceForRequest(
+  request: AgentRequest,
+  evidence: EvidenceReference[],
+) {
+  for (const reference of evidence) {
+    assertPathAndRangeWithinRequest(request, reference);
+    if (
+      request.scope.kind !== "project" &&
+      ((reference.revision != null &&
+        reference.revision !== request.scope.baseRevision) ||
+        (reference.textHash != null &&
+          reference.textHash !== request.scope.baseTextHash))
+    ) {
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "The AI reviewer returned evidence for another document state.",
+      );
+    }
+  }
+}
+
+function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
+  if (event.type === "started") {
+    if (event.skill !== request.skill) {
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "The AI reviewer started with a different skill.",
+      );
+    }
+    return;
+  }
+
+  if (event.type === "finding") {
+    if (event.finding.projectId !== request.projectId) {
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "The AI reviewer returned a finding for another project.",
+      );
+    }
+    assertEvidenceForRequest(request, event.finding.evidence);
+    return;
+  }
+
+  if (event.type === "suggestion") {
+    if (
+      event.suggestion.projectId !== request.projectId ||
+      event.suggestion.skill !== request.skill
+    ) {
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "The AI reviewer returned a suggestion outside the active request.",
+      );
+    }
+    if (request.scope.kind === "project") {
+      return;
+    }
+    try {
+      prepareSingleDocumentSuggestion({
+        request,
+        suggestion: event.suggestion,
+      });
+    } catch {
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "The AI reviewer returned a suggestion outside the requested document scope.",
+      );
+    }
+    return;
+  }
+
+  if (event.type === "tool.call") {
+    assertPathAndRangeWithinRequest(request, event.call.arguments);
+  }
 }
 
 export async function streamAgentEvents({
@@ -61,33 +294,53 @@ export async function streamAgentEvents({
   csrfToken = getMeta("ol-csrfToken"),
   fetchImpl = fetch,
 }: StreamAgentEventsOptions) {
-  const response = await fetchImpl(
-    `/project/${encodeURIComponent(projectId)}/ai-reviewer/stream`,
-    {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Csrf-Token": csrfToken,
-        Accept: "application/x-ndjson, application/json",
-      },
-      body: JSON.stringify(request),
-      signal,
-    },
-  );
+  throwIfAborted(signal);
+  const parsedRequest = AgentRequestSchema.safeParse(request);
+  if (!parsedRequest.success || parsedRequest.data.projectId !== projectId) {
+    throw protocolError(
+      "AI_STREAM_REQUEST_INVALID",
+      "The AI reviewer request does not match the active project.",
+    );
+  }
+  const boundRequest = parsedRequest.data;
 
+  let response: Response;
+  try {
+    response = await waitWithAbort(
+      Promise.resolve(
+        fetchImpl(
+          `/project/${encodeURIComponent(boundRequest.projectId)}/ai-reviewer/stream`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Csrf-Token": csrfToken,
+              Accept: "application/x-ndjson, application/json",
+            },
+            body: JSON.stringify(boundRequest),
+            signal,
+          },
+        ),
+      ),
+      signal,
+    );
+  } catch (error) {
+    throw normalizeTransportError(error, signal);
+  }
+
+  throwIfAborted(signal);
   if (!response.ok) {
-    throw await errorFromResponse(response);
+    throw await errorFromResponse(response, signal);
   }
   if (!response.headers.get("content-type")?.includes("application/x-ndjson")) {
-    throw genericStreamError(
+    throw protocolError(
       "AI_STREAM_CONTENT_TYPE_INVALID",
       "The AI reviewer returned an invalid stream type.",
-      "schema",
     );
   }
   if (response.body == null) {
-    throw genericStreamError(
+    throw networkError(
       "AI_STREAM_BODY_MISSING",
       "The AI reviewer returned an empty stream.",
     );
@@ -98,52 +351,60 @@ export async function streamAgentEvents({
   let buffer = "";
   let nextSequence = 0;
   let terminal = false;
+  let failure: unknown;
+  let failed = false;
 
   const consumeLine = (line: string) => {
     if (line.trim() === "") {
       return;
     }
+    throwIfAborted(signal);
+    if (terminal) {
+      throw protocolError(
+        "AI_STREAM_AFTER_TERMINAL",
+        "The AI reviewer returned data after a terminal event.",
+      );
+    }
+
     let rawEvent: unknown;
     try {
       rawEvent = JSON.parse(line);
     } catch {
-      throw genericStreamError(
+      throw protocolError(
         "AI_STREAM_JSON_INVALID",
         "The AI reviewer returned malformed stream data.",
-        "schema",
       );
     }
     const parsed = AgentEventSchema.safeParse(rawEvent);
     if (
       !parsed.success ||
-      parsed.data.requestId !== request.requestId ||
+      parsed.data.requestId !== boundRequest.requestId ||
       parsed.data.sequence !== nextSequence
     ) {
-      throw genericStreamError(
+      throw protocolError(
         "AI_STREAM_EVENT_INVALID",
         "The AI reviewer returned an invalid stream event.",
-        "schema",
-      );
-    }
-    if (terminal) {
-      throw genericStreamError(
-        "AI_STREAM_AFTER_TERMINAL",
-        "The AI reviewer returned data after a terminal event.",
-        "schema",
       );
     }
 
+    assertEventForRequest(boundRequest, parsed.data);
     nextSequence += 1;
     terminal = parsed.data.type === "completed" || parsed.data.type === "error";
     onEvent(parsed.data);
+    throwIfAborted(signal);
   };
 
   try {
     while (true) {
-      if (signal.aborted) {
-        throw signal.reason;
+      throwIfAborted(signal);
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await waitWithAbort(reader.read(), signal);
+      } catch (error) {
+        throw normalizeTransportError(error, signal);
       }
-      const { done, value } = await reader.read();
+      const { done, value } = result;
+      throwIfAborted(signal);
       buffer += decoder.decode(value, { stream: !done });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -156,12 +417,25 @@ export async function streamAgentEvents({
     }
     consumeLine(buffer);
     if (!terminal) {
-      throw genericStreamError(
+      throw networkError(
         "AI_STREAM_INCOMPLETE",
         "The AI reviewer stream ended before completion.",
       );
     }
-  } finally {
+  } catch (error) {
+    failed = true;
+    failure = signal.aborted ? signal.reason : error;
+    cancelReaderWithoutWaiting(reader, failure);
+  }
+  try {
     reader.releaseLock();
+  } catch (error) {
+    if (!failed) {
+      failed = true;
+      failure = normalizeTransportError(error, signal);
+    }
+  }
+  if (failed) {
+    throw failure;
   }
 }

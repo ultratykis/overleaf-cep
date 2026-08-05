@@ -11,6 +11,7 @@ const serverContentBoundary = [
 const browserContentBoundary = [
   "../../../frontend/js/services/agent-stream.ts",
   "../../../frontend/js/components/ai-reviewer-panel.tsx",
+  "../../../frontend/js/components/ai-reviewer-suggestion-preview.tsx",
 ];
 
 async function readSource(relativePath) {

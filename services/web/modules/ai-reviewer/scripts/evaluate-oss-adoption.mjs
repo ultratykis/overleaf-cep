@@ -11,6 +11,7 @@ import { spawn } from "node:child_process";
 
 import { runDiffProbe } from "./oss-adoption-diff-probe.mjs";
 import { runMcpProbe } from "./oss-adoption-mcp-probe.mjs";
+import { allSettledOrThrow } from "./all-settled-or-throw.mjs";
 
 const REPOSITORY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -686,7 +687,7 @@ async function createIsolatedInstall({ fixtureSet, manifest, candidates }) {
     const npmCache = path.join(temporaryRoot, "npm-cache");
     const tarballs = [];
     for (const candidate of candidates) {
-      const [tarball, publication] = await Promise.all([
+      const [tarball, publication] = await allSettledOrThrow([
         verifyTarball(candidate),
         verifyPublishedAt(candidate, manifest.registry, npmCache),
       ]);
