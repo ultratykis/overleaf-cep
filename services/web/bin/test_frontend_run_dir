@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -euo pipefail
+
+export NODE_ENV="${NODE_ENV:-test}"
+export TZ="${TZ:-GMT}"
+
+exec mocha \
+  --recursive \
+  --timeout 5000 \
+  --exit \
+  --extension js,jsx,mjs,ts,tsx \
+  --grep="${MOCHA_GREP:-}" \
+  --require test/frontend/bootstrap.js \
+  --ignore '**/*.spec.{js,jsx,ts,tsx}' \
+  --ignore '**/helpers/**/*.{js,jsx,ts,tsx}' \
+  "$@"

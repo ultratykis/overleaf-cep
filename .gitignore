@@ -4,3 +4,15 @@
 # user defined files
 .env
 docker-compose.override.yml
+
+# Local dependency and build caches
+node_modules/
+.cache/
+.yarn/cache/
+.yarn/install-state.gz
+
+# Loop engineering infrastructure
+!.loop/
+!.loop/**
+.loop/runs/**
+!.loop/runs/.gitkeep
