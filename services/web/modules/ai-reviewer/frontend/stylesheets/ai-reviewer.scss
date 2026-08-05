@@ -52,12 +52,21 @@
 
   .modal-content,
   .focus-trap-container,
+  .ai-reviewer-connections,
+  .ai-reviewer-connection-footer,
+  .ai-reviewer-connection-name,
+  .ai-reviewer-connection-table-scroll,
+  .ai-reviewer-provider-form-card,
+  .ai-reviewer-provider-form-actions,
   .ai-reviewer-provider-settings-form,
   .ai-reviewer-provider-settings-header,
   .ai-reviewer-provider-settings-body,
   .ai-reviewer-provider-settings-footer,
   .ai-reviewer-provider-settings-field,
-  .ai-reviewer-provider-settings-details,
+  .ai-reviewer-provider-settings-state,
+  .ai-reviewer-provider-settings-hint,
+  .ai-reviewer-provider-request-preview,
+  .ai-reviewer-provider-request-url,
   .ai-reviewer-provider-advanced,
   .ai-reviewer-provider-advanced-summary,
   .ai-reviewer-provider-advanced-content,
@@ -72,9 +81,187 @@
     gap: var(--spacing-02);
   }
 
-  .ai-reviewer-connections,
-  .ai-reviewer-connection-list,
-  .ai-reviewer-connection-row,
+  .ai-reviewer-provider-settings-body {
+    color: var(--content-primary-themed);
+    background: var(--bg-primary-themed);
+  }
+
+  .ai-reviewer-connections > .h5,
+  .ai-reviewer-skills > .h5,
+  .ai-reviewer-provider-form-heading {
+    margin: 0 0 var(--spacing-04);
+    color: var(--content-primary-themed);
+  }
+
+  .ai-reviewer-connection-table-scroll {
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    overflow-x: auto;
+  }
+
+  .ai-reviewer-connection-table {
+    --bs-table-color: var(--content-primary-themed);
+    --bs-table-bg: var(--bg-primary-themed);
+    --bs-border-color: var(--border-divider-themed);
+
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+    vertical-align: middle;
+
+    th,
+    td {
+      padding: var(--spacing-04);
+      border-color: var(--border-divider-themed);
+    }
+
+    thead th {
+      color: var(--content-secondary-themed);
+      font-size: var(--font-size-01);
+      white-space: nowrap;
+    }
+
+    tbody th {
+      font-weight: normal;
+    }
+  }
+
+  // No fixed widths on the content columns. Percentages fight `width: max-content`
+  // on the table and squeeze the actions column, which then clips its buttons.
+  // Let the table size itself and keep the actions to their own content.
+  .ai-reviewer-connection-actions-column,
+  .ai-reviewer-connection-actions-cell {
+    width: 1%;
+    white-space: nowrap;
+  }
+
+  // Truncate against whatever the column gives us, not a fixed number. A fixed
+  // cap cut the name short while the column stayed wide, leaving dead space
+  // between it and the next column.
+  .ai-reviewer-connection-name {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    font-weight: bold;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ai-reviewer-connection-credential-cell {
+    overflow-wrap: anywhere;
+  }
+
+  // Stack the two lines in these cells by naming them. Making every child a
+  // block instead would stretch the credential badge across the column, which
+  // reads as a filled bar rather than a badge.
+  .ai-reviewer-connection-provider,
+  .ai-reviewer-connection-credential-cell time {
+    display: block;
+    margin-top: var(--spacing-02);
+    color: var(--content-secondary-themed);
+    font-size: var(--font-size-01);
+  }
+
+  .ai-reviewer-connection-credential-cell .badge {
+    display: inline-block;
+    width: auto;
+    max-width: 100%;
+  }
+
+  // Bootstrap's secondary badge resolves to white on white in the dark theme,
+  // which hides the "no key" state entirely. State the colours from the themed
+  // variables so both themes read.
+  .ai-reviewer-connection-credential-cell .badge.bg-secondary {
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    color: var(--content-secondary-themed);
+    background-color: transparent;
+  }
+
+  .ai-reviewer-connection-actions-cell .btn-group {
+    display: inline-flex;
+    flex-wrap: nowrap;
+
+    // `width: 1%` on the column means "as narrow as the content allows", so the
+    // content has to refuse to shrink or the cell collapses and clips its own
+    // buttons. State that floor here, and give the buttons back the natural
+    // size the module's blanket min-width: 0 takes away.
+    min-width: max-content;
+
+    > .btn {
+      flex: 0 0 auto;
+      min-width: auto;
+    }
+  }
+
+  .ai-reviewer-connection-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-04);
+    margin-top: var(--spacing-02);
+    padding: var(--spacing-04);
+    border-radius: var(--border-radius-base);
+    color: var(--content-secondary-themed);
+    background: var(--bg-secondary-themed);
+  }
+
+  .ai-reviewer-connection-add {
+    flex: 0 0 auto;
+  }
+
+  .ai-reviewer-provider-settings-hint {
+    margin: var(--spacing-02) 0 0;
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-provider-form-card {
+    --bs-card-bg: var(--bg-secondary-themed);
+    --bs-card-border-color: var(--border-divider-themed);
+    --bs-card-border-width: var(--bs-border-width);
+    --bs-card-spacer-x: var(--spacing-06);
+    --bs-card-spacer-y: var(--spacing-06);
+
+    margin-top: var(--spacing-06);
+    color: var(--content-primary-themed);
+  }
+
+  .ai-reviewer-provider-settings-state {
+    margin: 0 0 var(--spacing-06);
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-provider-request-preview {
+    color: var(--content-secondary-themed);
+    font-weight: normal;
+  }
+
+  .ai-reviewer-provider-request-url {
+    display: block;
+    margin-top: var(--spacing-01);
+    color: var(--content-primary-themed);
+    font-family: "DM Mono", monospace;
+    font-weight: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-provider-form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-04);
+    margin-top: var(--spacing-06);
+
+    .ai-reviewer-provider-settings-hint {
+      flex: 1 1 auto;
+      margin: 0;
+    }
+
+    .btn-group {
+      flex: 0 0 auto;
+    }
+  }
+
   .ai-reviewer-skills,
   .ai-reviewer-skill-list,
   .ai-reviewer-skill-row,
@@ -86,10 +273,10 @@
     box-sizing: border-box;
   }
 
-  .ai-reviewer-connection-list {
-    margin: 0;
-    padding: 0;
-    list-style: none;
+  .ai-reviewer-skills {
+    margin-top: var(--spacing-07);
+    padding-top: var(--spacing-07);
+    border-top: var(--bs-border-width) solid var(--border-divider-themed);
   }
 
   .ai-reviewer-skill-list {
@@ -112,26 +299,12 @@
     overflow-wrap: anywhere;
   }
 
-  .ai-reviewer-connection-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: var(--spacing-02);
-  }
-
-  .ai-reviewer-connection-name {
-    flex: 1 1 auto;
-    text-align: start;
-    max-width: 100%;
-    min-width: 0;
-    box-sizing: border-box;
-    overflow-wrap: anywhere;
-  }
-
   .modal-title,
   .form-label,
-  .ai-reviewer-provider-settings-details,
-  .ai-reviewer-provider-settings-details > *,
+  .ai-reviewer-provider-settings-state,
+  .ai-reviewer-provider-settings-hint,
+  .ai-reviewer-provider-request-preview,
+  .ai-reviewer-provider-request-url,
   .ai-reviewer-provider-advanced-summary,
   .ai-reviewer-provider-advanced-help,
   .btn .button-content {
@@ -161,6 +334,7 @@
 
   .ai-reviewer-provider-settings-footer {
     flex-wrap: wrap;
+    background: var(--bg-primary-themed);
 
     .btn {
       max-width: 100%;

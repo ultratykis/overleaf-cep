@@ -5,11 +5,14 @@ import logger from "@overleaf/logger";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import {
   parseAiReviewerConnectionId,
+  parseAiReviewerConnectionDeleteRequest,
   parseAiReviewerConnectionUpdate,
+  parseAiReviewerConnectionUpdateRequest,
   publicAiReviewerProviderConnection,
 } from "./AiReviewerProviderConfig.mjs";
 import {
   AiReviewerConnectionAmbiguousError,
+  AiReviewerConnectionConflictError,
   AiReviewerConnectionLimitError,
   AiReviewerConnectionNotFoundError,
   AiReviewerProviderConfigInputError,
@@ -47,6 +50,13 @@ const ERRORS = Object.freeze({
     code: "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
     category: "configuration",
     message: "No more AI provider connections can be added.",
+    retryable: false,
+  }),
+  connectionConflict: Object.freeze({
+    code: "AI_PROVIDER_CONNECTION_CONFLICT",
+    category: "configuration",
+    message:
+      "The AI provider connection changed elsewhere. Your change was not applied. Reload the settings and try again.",
     retryable: false,
   }),
   unsupported: Object.freeze({
@@ -195,6 +205,7 @@ export function createAiReviewerProviderController(dependencies) {
   const {
     configStore,
     providerService,
+    workspaceStore,
     failureRecorder = () => {},
     elapsedNow = () => performance.now(),
   } = dependencies;
@@ -230,9 +241,27 @@ export function createAiReviewerProviderController(dependencies) {
    * @param {Response} response
    * @param {any[]} connections
    */
-  function sendConnections(response, connections) {
+  async function sendConnections(response, authenticatedUserId, connections) {
+    let projectUseCounts = null;
+    try {
+      projectUseCounts =
+        (await workspaceStore?.countProjectsSelectingConnections?.(
+          authenticatedUserId,
+          connections.map((connection) => connection.id),
+        )) ?? null;
+    } catch (error) {
+      logger.warn(
+        { err: error },
+        "AI reviewer connection project counts could not be read",
+      );
+    }
     return response.json({
-      connections: connections.map(publicAiReviewerProviderConnection),
+      connections: connections.map((connection) => ({
+        ...publicAiReviewerProviderConnection(connection),
+        ...(projectUseCounts == null
+          ? {}
+          : { projectUseCount: projectUseCounts[connection.id] ?? 0 }),
+      })),
     });
   }
 
@@ -242,7 +271,12 @@ export function createAiReviewerProviderController(dependencies) {
    */
   async function listConnections(request, response) {
     try {
-      return sendConnections(response, await configStore.list(userId(request)));
+      const authenticatedUserId = userId(request);
+      return await sendConnections(
+        response,
+        authenticatedUserId,
+        await configStore.list(authenticatedUserId),
+      );
     } catch {
       return sendError(response, 400, "invalid");
     }
@@ -256,9 +290,14 @@ export function createAiReviewerProviderController(dependencies) {
   async function writeConnection(request, response, create) {
     let config;
     let connectionId = null;
+    let expectedRevision = null;
     try {
-      config = parseAiReviewerConnectionUpdate(request.body);
-      if (!create) {
+      if (create) {
+        config = parseAiReviewerConnectionUpdate(request.body);
+      } else {
+        const update = parseAiReviewerConnectionUpdateRequest(request.body);
+        config = update.config;
+        expectedRevision = update.expectedRevision;
         connectionId = parseAiReviewerConnectionId(
           selectedConnectionId(request),
         );
@@ -271,7 +310,12 @@ export function createAiReviewerProviderController(dependencies) {
     try {
       const saved = create
         ? await configStore.create(userId(request), config)
-        : await configStore.update(userId(request), connectionId, config);
+        : await configStore.update(
+            userId(request),
+            connectionId,
+            config,
+            expectedRevision,
+          );
       return response.json(publicAiReviewerProviderConnection(saved));
     } catch (error) {
       if (error instanceof AiReviewerConnectionNotFoundError) {
@@ -279,6 +323,9 @@ export function createAiReviewerProviderController(dependencies) {
       }
       if (error instanceof AiReviewerConnectionLimitError) {
         return sendError(response, 409, "connectionLimit");
+      }
+      if (error instanceof AiReviewerConnectionConflictError) {
+        return sendError(response, 409, "connectionConflict");
       }
       if (error instanceof AiReviewerProviderConfigInputError) {
         return sendError(response, 400, "invalid");
@@ -301,21 +348,34 @@ export function createAiReviewerProviderController(dependencies) {
    */
   async function deleteConnection(request, response) {
     let connectionId;
+    let expectedRevision;
     try {
       connectionId = parseAiReviewerConnectionId(selectedConnectionId(request));
+      expectedRevision = parseAiReviewerConnectionDeleteRequest(
+        request.body,
+      ).expectedRevision;
     } catch {
       return sendError(response, 400, "invalid");
     }
 
     const startedAt = readElapsedNow(elapsedNow);
     try {
-      return sendConnections(
+      const authenticatedUserId = userId(request);
+      return await sendConnections(
         response,
-        await configStore.remove(userId(request), connectionId),
+        authenticatedUserId,
+        await configStore.remove(
+          authenticatedUserId,
+          connectionId,
+          expectedRevision,
+        ),
       );
     } catch (error) {
       if (error instanceof AiReviewerConnectionNotFoundError) {
         return sendError(response, 404, "connectionMissing");
+      }
+      if (error instanceof AiReviewerConnectionConflictError) {
+        return sendError(response, 409, "connectionConflict");
       }
       recordPersistenceFailure(null, startedAt);
       return sendError(response, 500, "persistence");

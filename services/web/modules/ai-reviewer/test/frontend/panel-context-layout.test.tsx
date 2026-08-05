@@ -46,6 +46,7 @@ const projectReviewInstruction =
 
 const localConnection: AiProviderConnection = {
   id: "connection-local",
+  revision: 1,
   label: "127.0.0.1:11434",
   classification: "local",
   config: {
@@ -58,6 +59,7 @@ const localConnection: AiProviderConnection = {
 };
 const claudeConnection: AiProviderConnection = {
   id: "connection-claude",
+  revision: 1,
   label: "Anthropic Claude",
   classification: "remote",
   config: {
@@ -827,7 +829,7 @@ describe("AI reviewer: context-driven panel", function () {
     }
   });
 
-  it("falls back to the first model when the stored connection is gone", async function () {
+  it("clears a stored selection when its connection is gone without choosing a fallback", async function () {
     const store = new MemoryWorkspace();
     store.workspace = {
       runs: [],
@@ -844,13 +846,11 @@ describe("AI reviewer: context-driven panel", function () {
 
     expect(
       (await screen.findByRole("button", { name: "Model" })).textContent,
-    ).to.equal("Default reviewer");
-    // The recovered choice is written back, so the next reload is not stale too.
+    ).to.equal("Model");
+    // The next workspace write omits the stale destination instead of choosing
+    // another connection for the manuscript.
     await waitFor(() => {
-      expect(store.workspace.selectedModel).to.deep.equal({
-        connectionId: localConnection.id,
-        model: defaultModel.id,
-      });
+      expect(store.workspace).not.to.have.property("selectedModel");
     });
   });
 

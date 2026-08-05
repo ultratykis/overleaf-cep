@@ -49,6 +49,7 @@ import {
   AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT,
   AI_REVIEWER_WORKSPACE_TURN_LIMIT,
   DISCUSSION_CONTEXT_TURN_LIMIT,
+  resolveWorkspaceModelSelection,
 } from "../../../shared/contracts.mjs";
 import {
   AiReviewerSuggestionPreview,
@@ -1228,7 +1229,14 @@ export function AiReviewerPanelView({
   );
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
-  selectedModelRef.current = selectedModel;
+  const resolvedSelectedModel = useMemo(
+    () =>
+      connectionsLoaded
+        ? resolveWorkspaceModelSelection(selectedModel, connections)
+        : selectedModel,
+    [connections, connectionsLoaded, selectedModel],
+  );
+  selectedModelRef.current = resolvedSelectedModel;
   const [selectedMode, setSelectedMode] = useState<ReviewMode>(null);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
@@ -1321,8 +1329,8 @@ export function AiReviewerPanelView({
         setModelFailures(catalog.failures);
       })
       .catch(() => {
-        // An omitted model leaves the choice to the server, which still works
-        // when the user has exactly one connection.
+        // Without a live catalog the panel stays unselected. The server must
+        // not infer a destination from the number of remaining connections.
       });
     return () => controller.abort();
   }, [loadProviderModels, projectId]);
@@ -1331,25 +1339,12 @@ export function AiReviewerPanelView({
     () =>
       models.find(
         (model) =>
-          selectedModel != null &&
-          model.connectionId === selectedModel.connectionId &&
-          model.id === selectedModel.model,
+          resolvedSelectedModel != null &&
+          model.connectionId === resolvedSelectedModel.connectionId &&
+          model.id === resolvedSelectedModel.model,
       ) ?? null,
-    [models, selectedModel],
+    [models, resolvedSelectedModel],
   );
-
-  useEffect(() => {
-    // A stored choice can name a connection or model the user has since
-    // removed. Falling back to the head of the list keeps every later request
-    // pointed somewhere real, and writing it back records what actually ran.
-    if (!persistenceReady || models.length === 0 || runModel != null) {
-      return;
-    }
-    setSelectedModel({
-      connectionId: models[0].connectionId,
-      model: models[0].id,
-    });
-  }, [models, persistenceReady, runModel]);
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
       setDiscussions((current) => {
@@ -1539,7 +1534,7 @@ export function AiReviewerPanelView({
     const storedWorkspace = persistedWorkspaceFromState(
       workspace,
       discussions,
-      selectedModel,
+      resolvedSelectedModel,
     );
     if (storedWorkspace == null) {
       return;
@@ -1600,7 +1595,7 @@ export function AiReviewerPanelView({
     persistenceMutationPending,
     persistenceReady,
     projectId,
-    selectedModel,
+    resolvedSelectedModel,
     t,
     workspace,
     workspacePersistence,

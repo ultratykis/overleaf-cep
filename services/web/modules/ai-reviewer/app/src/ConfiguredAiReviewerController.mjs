@@ -10,7 +10,6 @@ import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProve
 import { createAiReviewerController } from "./AiReviewerController.mjs";
 import { recordAiReviewerFailure } from "./AiReviewerFailureLogger.mjs";
 import {
-  AiReviewerConnectionAmbiguousError,
   AiReviewerConnectionNotFoundError,
   aiReviewerModelCacheKey,
   createAiReviewerProviderConfigStore,
@@ -108,21 +107,23 @@ function modelSelectionRequired() {
  * Load the connection the request selected. A connection identifier that is
  * not this user's own is absent rather than readable, and is reported as an
  * unconfigured provider instead of leaking that it exists for somebody else.
- * With several connections and no selection there is nothing to fall back to,
- * so the run asks for a model rather than picking a destination on its own.
+ * With no selection there is no destination to fall back to, even when only
+ * one connection remains: sending manuscript content requires an explicit
+ * project choice.
  *
  * @param {any} configStore @param {any} context
  */
 async function loadRunConnection(configStore, context) {
+  const connectionId = context.request.connectionId ?? null;
+  if (connectionId == null) {
+    throw modelSelectionRequired();
+  }
   try {
     return await configStore.get(
       authenticatedUserId(context.httpRequest),
-      context.request.connectionId ?? null,
+      connectionId,
     );
   } catch (error) {
-    if (error instanceof AiReviewerConnectionAmbiguousError) {
-      throw modelSelectionRequired();
-    }
     if (error instanceof AiReviewerConnectionNotFoundError) {
       return null;
     }
@@ -131,19 +132,20 @@ async function loadRunConnection(configStore, context) {
 }
 
 /**
- * Decide which model this run uses. Discovery answers both questions: whether
- * a named model belongs to this connection, and — when the request named none
- * — whether the connection leaves anything to choose between.
+ * Validate the explicitly selected model against this connection. A model is
+ * never inferred from catalog size because that would choose a destination
+ * for manuscript content on the user's behalf.
  *
  * @param {any} connection @param {any} context @param {any} providerService
  */
 async function resolveRunModel(connection, context, providerService) {
   const requestedModel = context.request.model ?? null;
+  if (requestedModel == null) {
+    throw modelSelectionRequired();
+  }
   let models;
   try {
-    if (requestedModel != null) {
-      parseOpenAiCompatibleModelId(requestedModel);
-    }
+    parseOpenAiCompatibleModelId(requestedModel);
     models = await providerService.listModels(connection, {
       signal: context.signal,
       cacheKey: aiReviewerModelCacheKey(
@@ -157,19 +159,10 @@ async function resolveRunModel(connection, context, providerService) {
       error.code === "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED"
     ) {
       // Providers without discovery still receive the existing bounded ID
-      // check, but cannot say which model a request that named none wanted.
-      if (requestedModel == null) {
-        throw modelSelectionRequired();
-      }
+      // check for the model the user explicitly selected.
       return requestedModel;
     }
     throw error instanceof AgentGatewayError ? error : invalidRunModel();
-  }
-  if (requestedModel == null) {
-    if (models.length !== 1) {
-      throw modelSelectionRequired();
-    }
-    return models[0].id;
   }
   if (!models.some((candidate) => candidate.id === requestedModel)) {
     throw invalidRunModel();
@@ -186,8 +179,17 @@ async function resolveRunConfiguration(connection, context, providerService) {
   );
   return Object.freeze({
     provider: connection.provider,
-    ...(connection.provider === "openai-compatible"
-      ? { baseUrl: connection.baseUrl }
+    ...(connection.provider === "openai-compatible" ||
+    connection.provider === "azure"
+      ? {
+          baseUrl: connection.baseUrl,
+          ...(connection.provider === "azure"
+            ? {
+                requestStyle: connection.requestStyle,
+                apiVersion: connection.apiVersion,
+              }
+            : {}),
+        }
       : {}),
     ...(typeof connection.credential === "string"
       ? { credential: connection.credential }
@@ -316,9 +318,13 @@ const requestScopeReader = createRequestScopeReader({
     });
   },
 });
+const workspaceStore = createAiReviewerWorkspaceStore({
+  connectionStore: configStore,
+});
 const providerController = createAiReviewerProviderController({
   configStore,
   providerService,
+  workspaceStore,
   failureRecorder: recordAiReviewerFailure,
 });
 const skillStore = createAiReviewerSkillStore();
@@ -329,7 +335,6 @@ const configuredController = createConfiguredAiReviewerController({
   requestScopeReader,
   failureRecorder: recordAiReviewerFailure,
 });
-const workspaceStore = createAiReviewerWorkspaceStore();
 const workspaceController = createAiReviewerWorkspaceController({
   workspaceStore,
 });

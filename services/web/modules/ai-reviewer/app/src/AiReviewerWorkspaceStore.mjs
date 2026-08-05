@@ -3,7 +3,10 @@
 import { createHash } from "node:crypto";
 
 import { AiReviewerWorkspace as AiReviewerWorkspaceModel } from "../models/AiReviewerWorkspace.mjs";
-import { AiReviewerWorkspaceSchema } from "../../shared/contracts.mjs";
+import {
+  AiReviewerWorkspaceSchema,
+  resolveWorkspaceModelSelection,
+} from "../../shared/contracts.mjs";
 
 export class AiReviewerWorkspaceValidationError extends Error {
   constructor() {
@@ -304,11 +307,37 @@ export function clearResolvedWorkspace(workspace) {
 }
 
 /**
- * @param {{ model?: typeof AiReviewerWorkspaceModel }} [dependencies]
+ * @param {{
+ *   model?: typeof AiReviewerWorkspaceModel,
+ *   connectionStore?: { list(userId: string): Promise<{ id: string }[]> },
+ * }} [dependencies]
  */
 export function createAiReviewerWorkspaceStore({
   model = AiReviewerWorkspaceModel,
+  connectionStore,
 } = {}) {
+  /**
+   * A deleted connection is no selection in every workspace read and write.
+   * Omit the stale field instead of replacing it with another destination.
+   *
+   * @param {string} userId
+   * @param {import("../../shared/contract-types").AiReviewerWorkspace} workspace
+   */
+  async function resolveCurrentModelSelection(userId, workspace) {
+    if (connectionStore == null || workspace.selectedModel == null) {
+      return workspace;
+    }
+    const selection = resolveWorkspaceModelSelection(
+      workspace.selectedModel,
+      await connectionStore.list(userId),
+    );
+    if (selection != null) {
+      return workspace;
+    }
+    const { selectedModel: _staleSelection, ...resolvedWorkspace } = workspace;
+    return resolvedWorkspace;
+  }
+
   /**
    * @param {string} userId
    * @param {string} projectId
@@ -352,6 +381,46 @@ export function createAiReviewerWorkspaceStore({
 
   return {
     /**
+     * Count at most one persisted selection per project for each named
+     * connection. One indexed query serves the whole settings listing.
+     *
+     * @param {unknown} userIdInput
+     * @param {unknown[]} connectionIdInputs
+     */
+    async countProjectsSelectingConnections(userIdInput, connectionIdInputs) {
+      const userId = scopeIdentifier(userIdInput);
+      const connectionIds = [
+        ...new Set(connectionIdInputs.map(boundedIdentifier)),
+      ];
+      const counts = Object.fromEntries(
+        connectionIds.map((connectionId) => [connectionId, 0]),
+      );
+      if (connectionIds.length === 0) {
+        return counts;
+      }
+      const records = await model
+        .find(
+          {
+            userId,
+            "workspace.selectedModel.connectionId": { $in: connectionIds },
+          },
+          { "workspace.selectedModel.connectionId": 1 },
+        )
+        .lean()
+        .exec();
+      for (const record of records) {
+        const connectionId = record?.workspace?.selectedModel?.connectionId;
+        if (
+          typeof connectionId === "string" &&
+          Object.hasOwn(counts, connectionId)
+        ) {
+          counts[connectionId] += 1;
+        }
+      }
+      return counts;
+    },
+
+    /**
      * Loading is the sole operation that clears artifacts resolved in a prior
      * session.
      *
@@ -375,9 +444,13 @@ export function createAiReviewerWorkspaceStore({
         if (snapshot == null) {
           return emptySnapshot();
         }
-        const cleaned = clearResolvedWorkspace(snapshot.workspace);
+        const resolvedWorkspace = await resolveCurrentModelSelection(
+          userId,
+          snapshot.workspace,
+        );
+        const cleaned = clearResolvedWorkspace(resolvedWorkspace);
         if (!cleaned.changed) {
-          return snapshot;
+          return { ...snapshot, workspace: resolvedWorkspace };
         }
         const validated = parseWorkspace(cleaned.workspace, projectId);
         const persisted = await persist(userId, projectId, validated, {
@@ -402,7 +475,10 @@ export function createAiReviewerWorkspaceStore({
     async save(userIdInput, projectIdInput, input, expectedRevisionInput) {
       const userId = scopeIdentifier(userIdInput);
       const projectId = scopeIdentifier(projectIdInput);
-      const workspace = parseWorkspace(input, projectId);
+      const workspace = await resolveCurrentModelSelection(
+        userId,
+        parseWorkspace(input, projectId),
+      );
       const revision = expectedRevision(expectedRevisionInput);
       try {
         const persisted = await persist(userId, projectId, workspace, {
@@ -444,16 +520,20 @@ export function createAiReviewerWorkspaceStore({
         if (snapshot == null) {
           return emptySnapshot();
         }
-        const discussions = snapshot.workspace.discussions.filter(
+        const currentWorkspace = await resolveCurrentModelSelection(
+          userId,
+          snapshot.workspace,
+        );
+        const discussions = currentWorkspace.discussions.filter(
           (discussion) => discussion.id !== discussionId,
         );
-        if (discussions.length === snapshot.workspace.discussions.length) {
-          return snapshot;
+        if (discussions.length === currentWorkspace.discussions.length) {
+          return { ...snapshot, workspace: currentWorkspace };
         }
         // Only runs bound to the removed discussion became orphaned here.
         // Other empty runs remain eligible for the deliberate load-time sweep.
         const orphanedRequestIds = new Set(
-          snapshot.workspace.discussions.flatMap((discussion) =>
+          currentWorkspace.discussions.flatMap((discussion) =>
             discussion.id !== discussionId || discussion.subject == null
               ? []
               : [discussion.subject.sourceRequest.requestId],
@@ -461,7 +541,7 @@ export function createAiReviewerWorkspaceStore({
         );
         const withoutDiscussion = dropEmptyRunsOrphanedByDeletedDiscussion(
           {
-            ...snapshot.workspace,
+            ...currentWorkspace,
             discussions,
           },
           orphanedRequestIds,

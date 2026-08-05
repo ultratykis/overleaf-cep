@@ -25,7 +25,7 @@ function exactEnvelope(input) {
   if (typeof value.credential !== "string" || value.credential.length === 0) {
     throw credentialError();
   }
-  if (value.provider === "openai-compatible") {
+  if (value.provider === "openai-compatible" || value.provider === "azure") {
     if (
       keys.length !== OPENAI_COMPATIBLE_ENVELOPE_KEYS.length ||
       keys.some(
@@ -58,7 +58,7 @@ export function createAiReviewerProviderCredentialManager({
   return Object.freeze({
     /**
      * @param {{
-     *   provider: "openai-compatible" | "gemini" | "claude",
+     *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
      *   baseUrl?: string,
      *   credential: string,
      * }} input
@@ -66,7 +66,7 @@ export function createAiReviewerProviderCredentialManager({
     async encrypt(input) {
       try {
         const envelope =
-          input.provider === "openai-compatible"
+          input.provider === "openai-compatible" || input.provider === "azure"
             ? {
                 provider: input.provider,
                 baseUrl: input.baseUrl,
@@ -89,7 +89,7 @@ export function createAiReviewerProviderCredentialManager({
     /**
      * @param {unknown} encrypted
      * @param {{
-     *   provider: "openai-compatible" | "gemini" | "claude",
+     *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
      *   baseUrl?: string,
      * }} destination
      */
@@ -103,7 +103,8 @@ export function createAiReviewerProviderCredentialManager({
         );
         if (
           envelope.provider !== destination.provider ||
-          (destination.provider === "openai-compatible" &&
+          ((destination.provider === "openai-compatible" ||
+            destination.provider === "azure") &&
             envelope.baseUrl !== destination.baseUrl)
         ) {
           throw credentialError();

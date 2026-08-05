@@ -6,6 +6,12 @@ import {
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
+import {
+  DEFAULT_AZURE_OPENAI_REQUEST_STYLE,
+  LEGACY_AZURE_OPENAI_REQUEST_STYLE,
+  parseAzureOpenAiConnection,
+  parseAzureOpenAiRunDestination,
+} from "./AzureOpenAiEndpointPolicy.mjs";
 
 const ContextLengthSchema = z
   .number()
@@ -38,6 +44,15 @@ const CoreProviderConfigSchema = z.discriminatedUnion("provider", [
       model: z.string(),
     })
     .strict(),
+  z
+    .object({
+      provider: z.literal("azure"),
+      baseUrl: z.string(),
+      requestStyle: z.enum(["v1", "deployment"]).optional(),
+      apiVersion: z.string().optional(),
+      model: z.string(),
+    })
+    .strict(),
 ]);
 const DestinationSchema = z.discriminatedUnion("provider", [
   z
@@ -48,6 +63,15 @@ const DestinationSchema = z.discriminatedUnion("provider", [
     .strict(),
   z.object({ provider: z.literal("gemini") }).strict(),
   z.object({ provider: z.literal("claude") }).strict(),
+  z
+    .object({
+      provider: z.literal("azure"),
+      baseUrl: z.string(),
+      requestStyle: z.enum(["v1", "deployment"]).optional(),
+      apiVersion: z.string().optional(),
+      deployments: z.array(z.string()).max(100).default([]),
+    })
+    .strict(),
 ]);
 const CredentialSchema = z
   .string()
@@ -68,6 +92,11 @@ const LabelSchema = z
   .transform((value) => value.trim());
 
 const ConnectionIdSchema = z.string().min(1).max(200);
+const ConnectionRevisionSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER);
 
 const NATIVE_PROVIDER_LABELS = Object.freeze({
   gemini: "Google Gemini",
@@ -116,6 +145,8 @@ function parseCoreProviderConfig(input) {
             : value.model,
         ),
       });
+    case "azure":
+      return parseAzureOpenAiRunDestination(value);
   }
 }
 
@@ -126,17 +157,34 @@ function parseCoreProviderConfig(input) {
  *
  * @param {Record<string, unknown>} value
  */
-function parseDestination(value) {
+function parseDestination(
+  value,
+  azureDefaultRequestStyle = LEGACY_AZURE_OPENAI_REQUEST_STYLE,
+) {
   const candidate = {
     provider:
       value.provider === "ollama" ? "openai-compatible" : value.provider,
     ...(Object.hasOwn(value, "baseUrl") ? { baseUrl: value.baseUrl } : {}),
+    ...(Object.hasOwn(value, "requestStyle")
+      ? { requestStyle: value.requestStyle }
+      : {}),
+    ...(Object.hasOwn(value, "apiVersion")
+      ? { apiVersion: value.apiVersion }
+      : {}),
+    ...(Object.hasOwn(value, "deployments")
+      ? { deployments: value.deployments }
+      : {}),
   };
   const destination = DestinationSchema.parse(candidate);
-  return destination.provider === "openai-compatible"
-    ? Object.freeze({
-        provider: destination.provider,
-        baseUrl: parseOpenAiCompatibleBaseUrl(destination.baseUrl).baseUrl,
+  if (destination.provider === "openai-compatible") {
+    return Object.freeze({
+      provider: destination.provider,
+      baseUrl: parseOpenAiCompatibleBaseUrl(destination.baseUrl).baseUrl,
+    });
+  }
+  return destination.provider === "azure"
+    ? parseAzureOpenAiConnection(destination, {
+        defaultRequestStyle: azureDefaultRequestStyle,
       })
     : Object.freeze({ provider: destination.provider });
 }
@@ -147,10 +195,13 @@ function parseDestination(value) {
  * Deriving this on read is what lets an existing connection gain a label
  * without a migration.
  *
- * @param {{ provider: "openai-compatible" | "gemini" | "claude", baseUrl?: string }} destination
+ * @param {{ provider: "openai-compatible" | "gemini" | "claude" | "azure", baseUrl?: string }} destination
  */
 export function deriveAiReviewerConnectionLabel(destination) {
-  if (destination.provider !== "openai-compatible") {
+  if (
+    destination.provider !== "openai-compatible" &&
+    destination.provider !== "azure"
+  ) {
     return NATIVE_PROVIDER_LABELS[destination.provider];
   }
   const endpoint = parseOpenAiCompatibleBaseUrl(destination.baseUrl);
@@ -170,6 +221,12 @@ function coreProviderConfigInput(value) {
   return {
     provider: value.provider,
     ...(Object.hasOwn(value, "baseUrl") ? { baseUrl: value.baseUrl } : {}),
+    ...(Object.hasOwn(value, "requestStyle")
+      ? { requestStyle: value.requestStyle }
+      : {}),
+    ...(Object.hasOwn(value, "apiVersion")
+      ? { apiVersion: value.apiVersion }
+      : {}),
     model: value.model,
   };
 }
@@ -216,6 +273,9 @@ const CONNECTION_KEYS = new Set([
   "id",
   "provider",
   "baseUrl",
+  "requestStyle",
+  "apiVersion",
+  "deployments",
   "label",
   "contextLengthOverride",
   "credential",
@@ -224,13 +284,23 @@ const CONNECTION_KEYS = new Set([
 const CONNECTION_UPDATE_KEYS = new Set([
   "provider",
   "baseUrl",
+  "requestStyle",
+  "apiVersion",
+  "deployments",
   "label",
   "contextLengthOverride",
   "credential",
 ]);
+const CONNECTION_UPDATE_REQUEST_KEYS = new Set([
+  ...CONNECTION_UPDATE_KEYS,
+  "expectedRevision",
+]);
+const CONNECTION_DELETE_REQUEST_KEYS = new Set(["expectedRevision"]);
 const RUN_CONFIG_KEYS = new Set([
   "provider",
   "baseUrl",
+  "requestStyle",
+  "apiVersion",
   "model",
   "contextLength",
   "contextLengthSource",
@@ -282,7 +352,10 @@ export function parseAiReviewerConnection(input) {
  */
 export function parseAiReviewerConnectionUpdate(input) {
   const value = objectWithKnownKeys(input, CONNECTION_UPDATE_KEYS);
-  const destination = parseDestination(value);
+  const destination = parseDestination(
+    value,
+    DEFAULT_AZURE_OPENAI_REQUEST_STYLE,
+  );
   // An empty label is how the client asks to go back to the derived name.
   const label =
     !Object.hasOwn(value, "label") ||
@@ -303,6 +376,43 @@ export function parseAiReviewerConnectionUpdate(input) {
     label,
     ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
     ...(credential === undefined ? {} : { credential }),
+  });
+}
+
+/** @param {unknown} input */
+export function parseAiReviewerConnectionRevision(input) {
+  return ConnectionRevisionSchema.parse(input);
+}
+
+/**
+ * An edit replaces one connection, so the HTTP request must identify the
+ * exact connection revision the form was loaded from.
+ *
+ * @param {unknown} input
+ */
+export function parseAiReviewerConnectionUpdateRequest(input) {
+  const value = objectWithKnownKeys(input, CONNECTION_UPDATE_REQUEST_KEYS);
+  const configInput = Object.fromEntries(
+    [...CONNECTION_UPDATE_KEYS]
+      .filter((key) => Object.hasOwn(value, key))
+      .map((key) => [key, value[key]]),
+  );
+  return Object.freeze({
+    expectedRevision: parseAiReviewerConnectionRevision(value.expectedRevision),
+    config: parseAiReviewerConnectionUpdate(configInput),
+  });
+}
+
+/**
+ * Delete is also conditional: confirming deletion of an old view must not
+ * remove a connection that was edited elsewhere after that view loaded.
+ *
+ * @param {unknown} input
+ */
+export function parseAiReviewerConnectionDeleteRequest(input) {
+  const value = objectWithKnownKeys(input, CONNECTION_DELETE_REQUEST_KEYS);
+  return Object.freeze({
+    expectedRevision: parseAiReviewerConnectionRevision(value.expectedRevision),
   });
 }
 
@@ -340,8 +450,18 @@ export function parseAiReviewerProviderConfig(input) {
     : undefined;
   return Object.freeze({
     provider: config.provider,
-    ...(config.provider === "openai-compatible"
-      ? { baseUrl: config.baseUrl }
+    ...(config.provider === "openai-compatible" || config.provider === "azure"
+      ? {
+          baseUrl: config.baseUrl,
+          ...(config.provider === "azure"
+            ? {
+                requestStyle: config.requestStyle,
+                ...(config.apiVersion == null
+                  ? {}
+                  : { apiVersion: config.apiVersion }),
+              }
+            : {}),
+        }
       : {}),
     model: config.model,
     contextLength,
@@ -362,10 +482,11 @@ export function publicAiReviewerProviderConnection(input) {
   if (input == null || typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("AI provider connection must be an object.");
   }
-  const { credentialSet, ...rest } = /** @type {any} */ (input);
+  const { credentialSet, revision, ...rest } = /** @type {any} */ (input);
   const connection = parseAiReviewerConnection(rest);
   return Object.freeze({
     id: parseAiReviewerConnectionId(connection.id),
+    revision: parseAiReviewerConnectionRevision(revision),
     label: connection.label,
     classification:
       connection.provider === "openai-compatible"
@@ -373,8 +494,20 @@ export function publicAiReviewerProviderConnection(input) {
         : "remote",
     config: Object.freeze({
       provider: connection.provider,
-      ...(connection.provider === "openai-compatible"
-        ? { baseUrl: connection.baseUrl }
+      ...(connection.provider === "openai-compatible" ||
+      connection.provider === "azure"
+        ? {
+            baseUrl: connection.baseUrl,
+            ...(connection.provider === "azure"
+              ? {
+                  requestStyle: connection.requestStyle,
+                  ...(connection.apiVersion == null
+                    ? {}
+                    : { apiVersion: connection.apiVersion }),
+                  deployments: connection.deployments,
+                }
+              : {}),
+          }
         : {}),
       contextLengthOverride: connection.contextLengthOverride ?? null,
       credentialSet: credentialSet === true,

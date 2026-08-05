@@ -7,6 +7,7 @@ import {
 } from "../models/AiReviewerProviderConfig.mjs";
 import {
   parseAiReviewerConnection,
+  parseAiReviewerConnectionRevision,
   parseAiReviewerConnectionUpdate,
 } from "./AiReviewerProviderConfig.mjs";
 import { createAiReviewerProviderCredentialManager } from "./AiReviewerProviderCredentialManager.mjs";
@@ -45,6 +46,13 @@ export class AiReviewerConnectionNotFoundError extends Error {
   constructor() {
     super("The AI provider connection does not exist.");
     this.name = "AiReviewerConnectionNotFoundError";
+  }
+}
+
+export class AiReviewerConnectionConflictError extends Error {
+  constructor() {
+    super("The AI provider connection changed elsewhere.");
+    this.name = "AiReviewerConnectionConflictError";
   }
 }
 
@@ -95,6 +103,11 @@ function storedRevision(record) {
   return /** @type {number} */ (revision);
 }
 
+/** @param {any} connection */
+function storedConnectionRevision(connection) {
+  return parseAiReviewerConnectionRevision(connection?.revision ?? 0);
+}
+
 /**
  * Legacy records have no revision and are treated as revision zero. Matching
  * both representations lets the first successful CAS migrate them in place.
@@ -123,7 +136,18 @@ function coreConnectionInput(value) {
     provider: value?.provider,
     ...(value?.provider === "openai-compatible" || value?.provider === "ollama"
       ? { baseUrl: value?.baseUrl }
-      : {}),
+      : value?.provider === "azure"
+        ? {
+            baseUrl: value?.baseUrl,
+            ...(value != null && Object.hasOwn(value, "requestStyle")
+              ? { requestStyle: value.requestStyle }
+              : {}),
+            ...(value != null && Object.hasOwn(value, "apiVersion")
+              ? { apiVersion: value.apiVersion }
+              : {}),
+            deployments: value?.deployments,
+          }
+        : {}),
     ...(value?.label == null ? {} : { label: value.label }),
     ...(value?.contextLengthOverride == null
       ? {}
@@ -145,8 +169,9 @@ function connectionRecords(record) {
     // A connection stored before the model moved to the run still carries
     // `model` and `contextLength`. Those paths no longer exist, and the schema
     // is `strict: "throw"`, so writing one back unchanged is rejected.
-    return record.connections.map((connection) => ({
+    return record.connections.map((/** @type {any} */ connection) => ({
       _id: connection._id,
+      revision: storedConnectionRevision(connection),
       ...coreConnectionInput(connection),
       ...(connection.credentialEncrypted == null
         ? {}
@@ -162,6 +187,7 @@ function connectionRecords(record) {
   return [
     {
       _id: record._id,
+      revision: 0,
       ...coreConnectionInput(record),
       ...(record.credentialEncrypted == null
         ? {}
@@ -205,6 +231,7 @@ function publicConnections(record) {
   return connectionRecords(record).map((connection) =>
     Object.freeze({
       id: String(connection._id),
+      revision: storedConnectionRevision(connection),
       credentialSet:
         typeof connection.credentialEncrypted === "string" &&
         connection.credentialEncrypted.length > 0,
@@ -220,7 +247,8 @@ function publicConnections(record) {
  * @param {ReturnType<typeof parseAiReviewerConnection>} connection
  */
 function credentialDestination(connection) {
-  return connection.provider === "openai-compatible"
+  return connection.provider === "openai-compatible" ||
+    connection.provider === "azure"
     ? Object.freeze({
         provider: connection.provider,
         baseUrl: connection.baseUrl,
@@ -237,8 +265,12 @@ function isSameCredentialDestination(current, next) {
     return false;
   }
   return (
-    next.provider !== "openai-compatible" ||
+    (next.provider !== "openai-compatible" && next.provider !== "azure") ||
     (current.provider === "openai-compatible" &&
+      next.provider === "openai-compatible" &&
+      current.baseUrl === next.baseUrl) ||
+    (current.provider === "azure" &&
+      next.provider === "azure" &&
       current.baseUrl === next.baseUrl)
   );
 }
@@ -313,6 +345,39 @@ export function createAiReviewerProviderConfigStore({
   newConnectionId = newAiReviewerConnectionId,
 } = {}) {
   /**
+   * A connection is a destination: provider plus endpoint. Projects reference
+   * that destination by id, so changing its provider in place would silently
+   * redirect every project that selected it.
+   *
+   * @param {any} currentConnection
+   * @param {ReturnType<typeof parseAiReviewerConnectionUpdate>} config
+   */
+  function assertProviderUnchanged(currentConnection, config) {
+    const current = parseAiReviewerConnection(
+      coreConnectionInput(currentConnection),
+    );
+    if (current.provider !== config.provider) {
+      throw new AiReviewerProviderConfigInputError(
+        "The provider of an existing AI provider connection cannot be changed.",
+      );
+    }
+  }
+
+  /**
+   * The parent record can move because another connection changed. That is
+   * safe to retry. A changed revision on this connection means the replacement
+   * was prepared from stale state and must be refused.
+   *
+   * @param {any} currentConnection
+   * @param {number} expectedRevision
+   */
+  function assertConnectionUnchanged(currentConnection, expectedRevision) {
+    if (storedConnectionRevision(currentConnection) !== expectedRevision) {
+      throw new AiReviewerConnectionConflictError();
+    }
+  }
+
+  /**
    * Build the connection to store from its current state and a write. The
    * credential stays bound to its destination: a write that moves the
    * connection to another provider or base URL drops the stored credential
@@ -353,9 +418,24 @@ export function createAiReviewerProviderConfigStore({
     }
     return {
       _id: currentConnection?._id ?? newConnectionId(),
+      revision:
+        currentConnection == null
+          ? 1
+          : storedConnectionRevision(currentConnection) + 1,
       provider: config.provider,
-      ...(config.provider === "openai-compatible"
-        ? { baseUrl: config.baseUrl }
+      ...(config.provider === "openai-compatible" || config.provider === "azure"
+        ? {
+            baseUrl: config.baseUrl,
+            ...(config.provider === "azure"
+              ? {
+                  requestStyle: config.requestStyle,
+                  ...(config.apiVersion == null
+                    ? {}
+                    : { apiVersion: config.apiVersion }),
+                  deployments: config.deployments,
+                }
+              : {}),
+          }
         : {}),
       // Only a name the user typed is stored, so an unnamed connection keeps
       // following the endpoint it is derived from when that endpoint changes.
@@ -437,9 +517,28 @@ export function createAiReviewerProviderConfigStore({
    * @param {string} userId
    * @param {string | null} connectionId
    * @param {unknown} input
+   * @param {unknown} expectedRevisionInput
    */
-  async function writeConnection(userId, connectionId, input) {
+  async function writeConnection(
+    userId,
+    connectionId,
+    input,
+    expectedRevisionInput,
+  ) {
     const config = parseAiReviewerConnectionUpdate(input);
+    const expectedRevision =
+      connectionId == null
+        ? null
+        : parseAiReviewerConnectionRevision(expectedRevisionInput);
+    if (connectionId != null) {
+      const currentRecord = await lean(model.findOne({ _id: userId }));
+      const currentConnection = connectionRecord(currentRecord, connectionId);
+      assertConnectionUnchanged(
+        currentConnection,
+        /** @type {number} */ (expectedRevision),
+      );
+      assertProviderUnchanged(currentConnection, config);
+    }
     // Encrypting before the compare-and-set keeps a credential-storage failure
     // from reaching the stored document at all, and keeps a retry from
     // re-encrypting the same value.
@@ -447,8 +546,11 @@ export function createAiReviewerProviderConfigStore({
       typeof config.credential === "string"
         ? await credentialManager.encrypt({
             provider: config.provider,
-            ...(config.provider === "openai-compatible"
-              ? { baseUrl: config.baseUrl }
+            ...(config.provider === "openai-compatible" ||
+            config.provider === "azure"
+              ? {
+                  baseUrl: config.baseUrl,
+                }
               : {}),
             credential: config.credential,
           })
@@ -468,6 +570,13 @@ export function createAiReviewerProviderConfigStore({
       }
       if (connectionId != null && index < 0) {
         throw new AiReviewerConnectionNotFoundError();
+      }
+      if (connectionId != null) {
+        assertConnectionUnchanged(
+          connections[index],
+          /** @type {number} */ (expectedRevision),
+        );
+        assertProviderUnchanged(connections[index], config);
       }
       const connection = nextConnection(
         index < 0 ? null : connections[index],
@@ -546,16 +655,22 @@ export function createAiReviewerProviderConfigStore({
      * @param {unknown} input
      */
     async create(userId, input) {
-      return await writeConnection(userId, null, input);
+      return await writeConnection(userId, null, input, null);
     },
 
     /**
      * @param {string} userId
      * @param {string} connectionId
      * @param {unknown} input
+     * @param {unknown} expectedRevision
      */
-    async update(userId, connectionId, input) {
-      return await writeConnection(userId, connectionId, input);
+    async update(userId, connectionId, input, expectedRevision) {
+      return await writeConnection(
+        userId,
+        connectionId,
+        input,
+        expectedRevision,
+      );
     },
 
     /**
@@ -563,14 +678,22 @@ export function createAiReviewerProviderConfigStore({
      *
      * @param {string} userId
      * @param {string} connectionId
+     * @param {unknown} expectedRevisionInput
      */
-    async remove(userId, connectionId) {
+    async remove(userId, connectionId, expectedRevisionInput) {
+      const expectedRevision = parseAiReviewerConnectionRevision(
+        expectedRevisionInput,
+      );
       return publicConnections(
         await commit(userId, (currentRecord) => {
           const index = connectionIndex(currentRecord, connectionId);
           if (index < 0) {
             throw new AiReviewerConnectionNotFoundError();
           }
+          assertConnectionUnchanged(
+            connectionRecords(currentRecord)[index],
+            expectedRevision,
+          );
           return {
             connections: connectionRecords(currentRecord).filter(
               (_, position) => position !== index,

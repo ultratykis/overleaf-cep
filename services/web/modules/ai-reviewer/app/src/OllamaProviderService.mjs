@@ -11,12 +11,17 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import {
+  AzureAiSdkTransport,
   ClaudeAiSdkTransport,
   createGuardedOpenAiCompatibleFetch,
   detectOpenAiCompatibleContextLength,
   GeminiAiSdkTransport,
   OllamaOpenAiTransport,
 } from "./OllamaOpenAiTransport.mjs";
+
+// Enough for a reasoning model to think and still answer. The check only has
+// to prove the endpoint responded and accepted the credential.
+const AZURE_CONNECTION_TEST_OUTPUT_TOKENS = 2048;
 
 const MODEL_CACHE_TTL_MILLISECONDS = 60_000;
 const MAX_MODEL_COUNT = 1_000;
@@ -40,7 +45,7 @@ function throwIfAborted(signal) {
   }
 }
 
-/** @param {ReturnType<typeof parseAiReviewerProviderConfig>} config */
+/** @param {{ provider: string, credential?: string | null }} config */
 function requireNativeCredential(config) {
   if (
     config.provider !== "openai-compatible" &&
@@ -338,6 +343,38 @@ async function fetchOllamaCapabilities(baseUrl, guardedFetch, signal) {
 }
 
 /**
+ * Ollama identifies its shim-owned models as `library` by default and uses
+ * `ollama` for its hosted catalog. Requiring that marker keeps the native
+ * extension behind evidence from the compatible response instead of guessing
+ * a provider from its URL.
+ *
+ * @param {unknown} input
+ */
+function isOllamaCompatibleModelList(input) {
+  const root = /** @type {any} */ (input);
+  if (root?.object !== "list" || !Array.isArray(root.data)) {
+    return false;
+  }
+  return (
+    root.data.length > 0 &&
+    root.data.every(
+      (/** @type {any} */ entry) =>
+        entry != null &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        entry.object === "model" &&
+        (entry.owned_by === "library" || entry.owned_by === "ollama"),
+    )
+  );
+}
+
+/** @param {string} baseUrl */
+function ollamaNativeBaseUrl(baseUrl) {
+  const nativeBaseUrl = baseUrl.replace(/\/v1$/u, "");
+  return nativeBaseUrl === baseUrl ? null : nativeBaseUrl;
+}
+
+/**
  * @param {ReturnType<typeof parseAiReviewerConnection>} config
  * @returns {{ endpoint: string, baseUrl: string }}
  */
@@ -385,6 +422,11 @@ export function createAiReviewerProviderService(dependencies = {}) {
     dependencies.claudeTransportFactory ??
     ((/** @type {{ credential: string, modelTag: string }} */ options) =>
       new ClaudeAiSdkTransport(options));
+  const azureTransportFactory =
+    dependencies.azureTransportFactory ??
+    ((
+      /** @type {{ baseUrl: string, requestStyle: "v1" | "deployment", apiVersion?: string, credential: string, modelTag: string }} */ options,
+    ) => new AzureAiSdkTransport(options));
   const modelFetchImpl = dependencies.modelFetchImpl ?? globalThis.fetch;
   const modelCacheTtlMilliseconds =
     dependencies.modelCacheTtlMilliseconds ?? MODEL_CACHE_TTL_MILLISECONDS;
@@ -410,6 +452,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
           credential: requireNativeCredential(config),
           modelTag: config.model,
         });
+      case "azure":
+        return azureTransportFactory({
+          baseUrl: config.baseUrl,
+          requestStyle: config.requestStyle,
+          apiVersion: config.apiVersion,
+          credential: requireNativeCredential(config),
+          modelTag: config.model,
+        });
     }
   }
 
@@ -420,6 +470,16 @@ export function createAiReviewerProviderService(dependencies = {}) {
   async function listModels(input, { signal, cacheKey = "" } = {}) {
     throwIfAborted(signal);
     const config = parseAiReviewerConnection(input);
+    if (config.provider === "azure") {
+      // An Azure API key does not grant access to the management-plane
+      // deployments listing. These are the deployment names the user entered,
+      // not a catalogue inferred from an OpenAI-compatible endpoint.
+      return Object.freeze(
+        config.deployments.map((deployment) =>
+          Object.freeze({ id: deployment, displayName: deployment }),
+        ),
+      );
+    }
     const { endpoint, baseUrl } = modelEndpoint(config);
     const effectiveCacheKey = [
       cacheKey,
@@ -446,9 +506,6 @@ export function createAiReviewerProviderService(dependencies = {}) {
         headers.Authorization = `Bearer ${config.credential}`;
       }
     }
-    // Ollama serves its OpenAI shim under `/v1` and its native routes at the
-    // origin root, so drop one trailing `/v1` to reach `/api/tags`.
-    const nativeBaseUrl = baseUrl.replace(/\/v1$/u, "");
     const guardedFetch = createGuardedOpenAiCompatibleFetch({
       baseUrl,
       allowedRequestUrl: endpoint,
@@ -463,10 +520,13 @@ export function createAiReviewerProviderService(dependencies = {}) {
       throw providerHttpError(response);
     }
     const body = await readBoundedModelResponse(response, signal);
-    // Only an OpenAI-compatible endpoint can be Ollama, and its native list
-    // sits outside the configured base, so it needs its own pinned fetch.
+    // The standard list establishes both compatibility and Ollama identity
+    // before the native route widens discovery beyond the configured base.
+    const nativeBaseUrl = isOllamaCompatibleModelList(body)
+      ? ollamaNativeBaseUrl(baseUrl)
+      : null;
     const capabilities =
-      config.provider === "openai-compatible"
+      config.provider === "openai-compatible" && nativeBaseUrl !== null
         ? await fetchOllamaCapabilities(
             nativeBaseUrl,
             createGuardedOpenAiCompatibleFetch({
@@ -501,8 +561,17 @@ export function createAiReviewerProviderService(dependencies = {}) {
       return await resolveModelContextLength(
         {
           provider: connection.provider,
-          ...(connection.provider === "openai-compatible"
-            ? { baseUrl: connection.baseUrl }
+          ...(connection.provider === "openai-compatible" ||
+          connection.provider === "azure"
+            ? {
+                baseUrl: connection.baseUrl,
+                ...(connection.provider === "azure"
+                  ? {
+                      requestStyle: connection.requestStyle,
+                      apiVersion: connection.apiVersion,
+                    }
+                  : {}),
+              }
             : {}),
           model: parseOpenAiCompatibleModelId(model),
           ...(typeof connection.credential === "string"
@@ -521,15 +590,41 @@ export function createAiReviewerProviderService(dependencies = {}) {
     },
 
     /**
-     * Check one connection by asking it what it can run. Without a model there
-     * is nothing else to try, and a listing already proves the endpoint
-     * answered and accepted the stored credential.
+     * Check one connection by asking it what it can run. Catalogue providers
+     * can prove the endpoint and credential through their list. Azure has no
+     * data-plane deployment list, so check its first user-entered deployment.
      *
      * @param {unknown} input
      * @param {{ signal?: AbortSignal, cacheKey?: string }} [options]
      */
     async testConnection(input, { signal, cacheKey } = {}) {
       const config = parseAiReviewerConnection(input);
+      if (config.provider === "azure") {
+        await azureTransportFactory({
+          baseUrl: config.baseUrl,
+          requestStyle: config.requestStyle,
+          apiVersion: config.apiVersion,
+          credential: requireNativeCredential(config),
+          modelTag: config.deployments[0],
+        }).generateChat(
+          // A reasoning model spends its output budget thinking before it
+          // writes anything, so a budget of one token makes the provider
+          // reject the probe for running out rather than answer it. What this
+          // check needs to learn is only that the endpoint answered and took
+          // the credential, so leave room for a reply.
+          {
+            prompt: "Reply with OK.",
+            maxOutputTokens: AZURE_CONNECTION_TEST_OUTPUT_TOKENS,
+          },
+          { signal },
+        );
+        return Object.freeze({
+          ok: true,
+          provider: config.provider,
+          modelCount: config.deployments.length,
+          classification: "remote",
+        });
+      }
       const models = await listModels(config, { signal, cacheKey });
       return Object.freeze({
         ok: true,

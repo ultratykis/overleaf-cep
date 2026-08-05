@@ -4,7 +4,7 @@ import {
   InvalidToolInputError,
   jsonSchema,
   NoSuchToolError,
-  stepCountIs,
+  isStepCount,
   streamText,
   tool,
   wrapLanguageModel,
@@ -729,17 +729,37 @@ export function assertNoGlobalTelemetryIntegration() {
 }
 
 /**
- * AI SDK v6 logs provider-supplied stream warnings through process-global or
+ * AI SDK logs provider-supplied stream warnings through process-global or
  * console loggers. Provider warnings can contain request data, so remove them
  * at the per-model stream boundary without mutating process-global state.
+ * Tools hidden by product policy remain parseable by the SDK so the gateway
+ * can return its specific refusal code, but are removed from provider params.
  *
  * @param {object} model
+ * @param {ReadonlySet<string>} hiddenProviderTools
  */
-function withoutProviderWarnings(model) {
+function withoutProviderWarnings(model, hiddenProviderTools) {
   return wrapLanguageModel({
     model,
     middleware: {
       specificationVersion: "v3",
+      transformParams({ params, type }) {
+        if (
+          type !== "stream" ||
+          hiddenProviderTools.size === 0 ||
+          params.tools == null
+        ) {
+          return params;
+        }
+        return {
+          ...params,
+          tools: params.tools.filter(
+            (toolDefinition) =>
+              toolDefinition.type !== "function" ||
+              !hiddenProviderTools.has(toolDefinition.name),
+          ),
+        };
+      },
       async wrapStream({ doStream, params }) {
         const abortSignalResult = readSdkProperty(params, "abortSignal");
         const abortSignal = /** @type {AbortSignal | undefined} */ (
@@ -790,48 +810,14 @@ function withoutProviderWarnings(model) {
           throw providerFailedError();
         }
         const stream = resultSlots.values.stream;
-        const pipeThroughResult = readSdkProperty(stream, "pipeThrough");
+        const pipeToResult = readSdkProperty(stream, "pipeTo");
         throwIfSdkSignalAborted(abortSignal);
-        if (
-          !pipeThroughResult.ok ||
-          typeof pipeThroughResult.value !== "function"
-        ) {
+        if (!pipeToResult.ok || typeof pipeToResult.value !== "function") {
           throw providerFailedError();
         }
-        const streamState = createSdkStreamInspectionState();
-        const filteredStream = Reflect.apply(pipeThroughResult.value, stream, [
-          new TransformStream({
-            transform(part, controller) {
-              const inspected = inspectSdkStreamPart(
-                part,
-                abortSignal,
-                streamState,
-              );
-              throwIfSdkSignalAborted(abortSignal);
-              controller.enqueue(inspected);
-            },
-            flush() {
-              throwIfSdkSignalAborted(abortSignal);
-              assertSdkStreamComplete(streamState);
-            },
-          }),
-        ]);
-        throwIfSdkSignalAborted(abortSignal);
-        observeSdkValue(filteredStream);
-        const filteredPipeThrough = readSdkProperty(
-          filteredStream,
-          "pipeThrough",
-        );
-        throwIfSdkSignalAborted(abortSignal);
-        if (
-          !filteredPipeThrough.ok ||
-          typeof filteredPipeThrough.value !== "function"
-        ) {
-          throw providerFailedError();
-        }
-        const safeStream = createSdkStreamFacade(
-          filteredStream,
-          filteredPipeThrough.value,
+        const safeStream = createSdkReadableStream(
+          stream,
+          pipeToResult.value,
           abortSignal,
         );
         // Provider results are continuation carriers. Overlay only the stream
@@ -849,7 +835,7 @@ function withoutProviderWarnings(model) {
 }
 
 /**
- * Capture the exact LanguageModelV3 surface into a request-local plain object.
+ * Capture the exact LanguageModelV3/V4 surface into a request-local plain object.
  * The SDK receives no provider proxy or getter, and every callable remains
  * bound to the shared model while enforcing only this request's signal.
  *
@@ -879,7 +865,7 @@ function createSdkRequestModel(model, signal) {
   } = slots.values;
   if (
     !slots.ok ||
-    specificationVersion !== "v3" ||
+    (specificationVersion !== "v3" && specificationVersion !== "v4") ||
     typeof provider !== "string" ||
     provider.length === 0 ||
     typeof modelId !== "string" ||
@@ -1558,6 +1544,8 @@ function inspectSdkStreamPart(part, signal, state) {
       "providerMetadata",
     ],
     file: ["data", "mediaType", "providerMetadata"],
+    custom: ["kind", "providerMetadata"],
+    "reasoning-file": ["data", "mediaType", "providerMetadata"],
     source: [
       "sourceType",
       "id",
@@ -1586,56 +1574,77 @@ function inspectSdkStreamPart(part, signal, state) {
 }
 
 /**
- * Return only wrappers backed by already captured provider stream methods.
- * The SDK must never re-read a provider-owned method after validation.
+ * Pump a provider stream through an owned platform TransformStream using only
+ * the pipe method captured during validation. The SDK receives the genuine
+ * owned ReadableStream and never needs a provider-owned stream method.
  *
  * @param {object | Function} stream
- * @param {Function} pipeThrough
+ * @param {Function} pipeTo
  * @param {AbortSignal | undefined} signal
  */
-function createSdkStreamFacade(stream, pipeThrough, signal) {
-  return Object.freeze({
-    /** @param {unknown[]} args */
-    pipeThrough(...args) {
+function createSdkReadableStream(stream, pipeTo, signal) {
+  const streamState = createSdkStreamInspectionState();
+  /** @type {TransformStreamDefaultController | undefined} */
+  let ownedController;
+  const transform = new TransformStream({
+    start(controller) {
+      ownedController = controller;
+    },
+    transform(part, controller) {
+      const inspected = inspectSdkStreamPart(part, signal, streamState);
       throwIfSdkSignalAborted(signal);
-      let piped;
-      try {
-        piped = Reflect.apply(pipeThrough, stream, args);
-      } catch (error) {
-        observeSdkValue(error);
-        throwIfSdkSignalAborted(signal);
-        throw providerFailedError();
-      }
-      observeSdkValue(piped);
+      controller.enqueue(inspected);
+    },
+    flush() {
       throwIfSdkSignalAborted(signal);
-      const pipeToResult = readSdkProperty(piped, "pipeTo");
-      throwIfSdkSignalAborted(signal);
-      if (!pipeToResult.ok || typeof pipeToResult.value !== "function") {
-        throw providerFailedError();
-      }
-      return Object.freeze({
-        /** @param {unknown[]} pipeArgs */
-        pipeTo(...pipeArgs) {
-          throwIfSdkSignalAborted(signal);
-          let work;
-          try {
-            const providerPipeArgs =
-              signal == null || pipeArgs.length !== 1
-                ? pipeArgs
-                : [pipeArgs[0], Object.freeze({ signal })];
-            work = Reflect.apply(pipeToResult.value, piped, providerPipeArgs);
-          } catch (error) {
-            observeSdkValue(error);
-            throwIfSdkSignalAborted(signal);
-            throw providerFailedError();
-          }
-          observeSdkValue(work);
-          throwIfSdkSignalAborted(signal);
-          return bridgeSdkProviderPromise(work, signal);
-        },
-      });
+      assertSdkStreamComplete(streamState);
     },
   });
+
+  throwIfSdkSignalAborted(signal);
+  let work;
+  try {
+    work = Reflect.apply(pipeTo, stream, [
+      transform.writable,
+      Object.freeze({
+        preventAbort: true,
+        ...(signal == null ? {} : { signal }),
+      }),
+    ]);
+  } catch (error) {
+    observeSdkValue(error);
+    throwIfSdkSignalAborted(signal);
+    throw providerFailedError();
+  }
+  observeSdkValue(work);
+
+  const bridgedWork = bridgeSdkProviderPromise(work, signal);
+  const failOwnedStream = (error) => {
+    observeSdkValue(error);
+    try {
+      if (signal?.aborted) {
+        // Wake the SDK with a local error part before terminating the owned
+        // bridge. Erroring the ReadableStream itself makes the SDK cancel an
+        // already errored inner reader, whose rejected cancellation is not
+        // observed by AI SDK 7.
+        ownedController?.enqueue({ type: "error", error });
+        ownedController?.terminate();
+      } else {
+        ownedController?.error(error);
+      }
+    } catch (controllerError) {
+      observeSdkValue(controllerError);
+    }
+  };
+  try {
+    void Reflect.apply(INTRINSIC_PROMISE_THEN, bridgedWork, [
+      undefined,
+      failOwnedStream,
+    ]);
+  } catch (error) {
+    failOwnedStream(error);
+  }
+  return transform.readable;
 }
 
 /**
@@ -2779,32 +2788,39 @@ export class AiSdkAgentGateway {
 
     let result;
     try {
+      const providerActiveTools = selectionTransform
+        ? ["propose_suggestion"]
+        : [
+            "read_project_file",
+            ...(readSkillAllowed ? ["read_skill"] : []),
+            ...(zoteroSearchAllowed ? ["search_zotero"] : []),
+            "report_subject",
+            ...(findingsAllowed ? ["report_finding"] : []),
+            ...(suggestionAllowed ? ["propose_suggestion"] : []),
+          ];
+      const hiddenProviderTools = new Set(
+        suggestionAllowed ? [] : ["propose_suggestion"],
+      );
       const requestModel = withoutProviderWarnings(
         createSdkRequestModel(this.model, signal),
+        hiddenProviderTools,
       );
       assertNoGlobalTelemetryIntegration();
       result = streamText({
         model: /** @type {never} */ (requestModel),
-        system: systemInstructionForRequest(request, storedSkills),
+        instructions: systemInstructionForRequest(request, storedSkills),
         prompt,
         abortSignal: signal,
         maxRetries: 0,
         providerOptions: /** @type {never} */ (this.providerOptions),
         stopWhen: [
-          stepCountIs(MAX_AGENT_STEPS),
+          isStepCount(MAX_AGENT_STEPS),
           () => selectionTransform && reportedArtifactCount > 0,
           () => terminalToolPolicyError != null || terminalToolExecutionFailed,
         ],
-        activeTools: selectionTransform
-          ? ["propose_suggestion"]
-          : [
-              "read_project_file",
-              ...(readSkillAllowed ? ["read_skill"] : []),
-              ...(zoteroSearchAllowed ? ["search_zotero"] : []),
-              "report_subject",
-              ...(findingsAllowed ? ["report_finding"] : []),
-              ...(suggestionAllowed ? ["propose_suggestion"] : []),
-            ],
+        activeTools: hiddenProviderTools.has("propose_suggestion")
+          ? [...providerActiveTools, "propose_suggestion"]
+          : providerActiveTools,
         ...(selectionTransform
           ? {
               toolChoice: {
@@ -3140,12 +3156,12 @@ export class AiSdkAgentGateway {
             },
           }),
         },
-        experimental_telemetry: {
+        telemetry: {
           isEnabled: false,
           recordInputs: false,
           recordOutputs: false,
         },
-        experimental_include: {
+        include: {
           requestBody: false,
         },
         // The SDK default logs raw provider errors, including request bodies.
@@ -3157,8 +3173,11 @@ export class AiSdkAgentGateway {
         },
       });
 
-      for await (const part of result.fullStream) {
-        throwIfSdkSignalAborted(signal);
+      let sawSdkAbort = false;
+      for await (const part of result.stream) {
+        if (signal?.aborted && part.type !== "abort") {
+          continue;
+        }
         if (part.type === "text-delta") {
           if (part.text.length > 0) {
             yield parseEvent({
@@ -3169,7 +3188,6 @@ export class AiSdkAgentGateway {
               createdAt: this.now(),
               delta: part.text,
             });
-            throwIfSdkSignalAborted(signal);
           }
         } else if (part.type === "tool-call") {
           const toolCallError = inspectToolCall(part);
@@ -3204,7 +3222,6 @@ export class AiSdkAgentGateway {
               arguments: toolArguments,
             },
           });
-          throwIfSdkSignalAborted(signal);
         } else if (part.type === "tool-error") {
           if (recoverableSdkToolErrorIds.delete(part.toolCallId)) {
             continue;
@@ -3240,7 +3257,6 @@ export class AiSdkAgentGateway {
               createdAt: this.now(),
               subject,
             });
-            throwIfSdkSignalAborted(signal);
             continue;
           }
           const artifact = reportedArtifacts.get(part.toolCallId);
@@ -3255,9 +3271,8 @@ export class AiSdkAgentGateway {
             sequence,
             createdAt: this.now(),
           });
-          throwIfSdkSignalAborted(signal);
         } else if (part.type === "abort") {
-          throw abortErrorForSignal(signal);
+          sawSdkAbort = true;
         } else if (part.type === "error") {
           recordAiReviewerProviderDiagnostic({
             provider: this.provider,
@@ -3266,6 +3281,9 @@ export class AiSdkAgentGateway {
           });
           streamFailure ??= classifySdkError(part.error, signal);
         }
+      }
+      if (sawSdkAbort || signal?.aborted) {
+        throw abortErrorForSignal(signal);
       }
 
       if (terminalToolPolicyError != null) {
@@ -3292,7 +3310,7 @@ export class AiSdkAgentGateway {
         );
       }
 
-      const usage = await result.totalUsage;
+      const usage = await result.usage;
       throwIfSdkSignalAborted(signal);
       const finishReason = await result.finishReason;
       throwIfSdkSignalAborted(signal);

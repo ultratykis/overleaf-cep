@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
 import {
+  AzureAiSdkTransport,
   ClaudeAiSdkTransport,
   GeminiAiSdkTransport,
 } from "../../../app/src/OllamaOpenAiTransport.mjs";
 
 const credential = "PRIVATE_NATIVE_PROVIDER_CREDENTIAL";
 const createdAt = "2026-07-26T00:00:00.000Z";
+const azureBaseUrl = "https://reviewer.openai.azure.com/openai";
+const azureApiVersion = "2025-01-01-preview";
+const azureDefaultApiVersion = "v1";
+const azureDeployment = "gpt-5.6-terra";
 
 const providers = [
   {
@@ -127,6 +132,142 @@ function agentGateway(transport, options = {}) {
 }
 
 describe("AI reviewer: native AI SDK provider transports", function () {
+  it("constructs Azure through its chat adapter and accepts its V4 model", async function () {
+    const model = {
+      specificationVersion: "v4",
+      provider: "azure.chat",
+      modelId: azureDeployment,
+      supportedUrls: {},
+      doGenerate: vi.fn(async () => generateResult()),
+      doStream: vi.fn(),
+    };
+    const chat = vi.fn(() => model);
+    const createProvider = vi.fn(() => ({ chat }));
+    const transport = new AzureAiSdkTransport({
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      credential,
+      modelTag: azureDeployment,
+      createProvider,
+    });
+
+    expect(createProvider).toHaveBeenCalledExactlyOnceWith({
+      apiKey: credential,
+      apiVersion: azureApiVersion,
+      baseURL: azureBaseUrl,
+      fetch: expect.any(Function),
+      useDeploymentBasedUrls: true,
+    });
+    expect(chat).toHaveBeenCalledExactlyOnceWith(azureDeployment);
+    expect(
+      await transport.generateChat({ prompt: "Return COMPAT_OK." }),
+    ).toMatchObject({ type: "completed", text: "COMPAT_OK" });
+  });
+
+  it("sends the real Azure SDK request to the deployment-based portal URL", async function () {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "SyntheticRequestCapture",
+              message: "Synthetic rejection after request capture.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const transport = new AzureAiSdkTransport({
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      credential,
+      modelTag: azureDeployment,
+      fetchImpl,
+    });
+
+    await captureError(
+      transport.generateChat({ prompt: "Capture the Azure request." }),
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [request, init] = fetchImpl.mock.calls[0];
+    expect(String(request)).toBe(
+      `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`,
+    );
+    expect(init).toMatchObject({ method: "POST", redirect: "error" });
+    expect(new Headers(init.headers).get("api-key")).toBe(credential);
+  });
+
+  it("sends the real Azure SDK request to the v1 route", async function () {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "SyntheticRequestCapture",
+              message: "Synthetic rejection after request capture.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const transport = new AzureAiSdkTransport({
+      baseUrl: azureBaseUrl,
+      requestStyle: "v1",
+      credential,
+      modelTag: azureDeployment,
+      fetchImpl,
+    });
+
+    await captureError(
+      transport.generateChat({ prompt: "Capture the Azure v1 request." }),
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [request, init] = fetchImpl.mock.calls[0];
+    expect(String(request)).toBe(
+      `${azureBaseUrl}/v1/chat/completions?api-version=${azureDefaultApiVersion}`,
+    );
+    expect(init).toMatchObject({ method: "POST", redirect: "error" });
+    expect(JSON.parse(String(init.body)).model).toBe(azureDeployment);
+    expect(new Headers(init.headers).get("api-key")).toBe(credential);
+  });
+
+  it("keeps a blank deployment API version in storage and uses the SDK default on the request", async function () {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "SyntheticRequestCapture",
+              message: "Synthetic rejection after request capture.",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const transport = new AzureAiSdkTransport({
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      credential,
+      modelTag: azureDeployment,
+      fetchImpl,
+    });
+
+    await captureError(
+      transport.generateChat({
+        prompt: "Capture the defaulted Azure request.",
+      }),
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(
+      `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureDefaultApiVersion}`,
+    );
+  });
+
   it("lets the Google SDK produce the Gemini finding declaration without strict mode", async function () {
     let requestBody;
     const fetchImpl = vi.fn(async (_input, init) => {
@@ -313,7 +454,7 @@ describe("AI reviewer: native AI SDK provider transports", function () {
   );
 
   it.each(providers)(
-    "applies the shared strict non-stream envelope to $name",
+    "accepts bounded provider warnings from $name non-stream responses",
     async function ({ model: modelId, Transport }) {
       const secret = "PRIVATE_NATIVE_PROVIDER_WARNING";
       const fixture = nativeTransportFixture({ Transport, model: modelId });
@@ -323,18 +464,17 @@ describe("AI reviewer: native AI SDK provider transports", function () {
         }),
       );
 
-      const error = await captureError(
-        fixture.transport.generateChat({
-          prompt: "Return exactly COMPAT_OK and nothing else.",
-        }),
-      );
-      expect(error).toBeInstanceOf(AgentGatewayError);
-      expect(error).toMatchObject({
-        code: "AI_PROVIDER_SCHEMA_INVALID",
-        category: "schema",
-        retryable: false,
+      const result = await fixture.transport.generateChat({
+        prompt: "Return exactly COMPAT_OK and nothing else.",
       });
-      expect(String(error)).not.toContain(secret);
+      expect(result).toEqual({
+        type: "completed",
+        text: "COMPAT_OK",
+        toolCalls: [],
+        finishReason: "stop",
+        usage: { inputTokens: 12, outputTokens: 3 },
+      });
+      expect(String(result)).not.toContain(secret);
     },
   );
 

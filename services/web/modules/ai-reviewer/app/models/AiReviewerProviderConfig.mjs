@@ -23,6 +23,9 @@ export const AiReviewerProviderConnectionSchema = new mongoose.Schema(
     _id: { type: ObjectId, required: true },
     provider: { type: String, required: true },
     baseUrl: { type: String },
+    requestStyle: { type: String, enum: ["v1", "deployment"] },
+    apiVersion: { type: String },
+    deployments: { type: [String], default: undefined },
     // Only a name the user typed is stored. An absent one is derived on read,
     // so an existing connection gains a name without a migration.
     label: { type: String },
@@ -31,6 +34,19 @@ export const AiReviewerProviderConnectionSchema = new mongoose.Schema(
     // The escape hatch for a model whose advertised context length is wrong.
     // The effective value is resolved per review, not stored here.
     contextLengthOverride: contextLength,
+    // The parent document revision serializes all connection writes. This
+    // connection-local revision distinguishes a real edit/delete conflict
+    // from a harmless write to another connection in the same document.
+    revision: {
+      type: Number,
+      required: true,
+      default: 0,
+      min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "revision must be a non-negative safe integer.",
+      },
+    },
   },
   { strict: "throw", versionKey: false },
 );

@@ -39,6 +39,18 @@ function recordKey(scopedUserId, scopedProjectId) {
 function inMemoryModel() {
   const records = new Map();
   const model = {
+    find: vi.fn((filter) =>
+      fakeQuery(() => {
+        const connectionIds = new Set(
+          filter["workspace.selectedModel.connectionId"].$in,
+        );
+        return [...records.values()].filter(
+          (record) =>
+            record.userId === filter.userId &&
+            connectionIds.has(record.workspace.selectedModel?.connectionId),
+        );
+      }),
+    ),
     findOne: vi.fn((filter) =>
       fakeQuery(() => records.get(recordKey(filter.userId, filter.projectId))),
     ),
@@ -322,7 +334,12 @@ class FakeResponse {
 describe("AI reviewer workspace persistence", function () {
   it("uses MongoDB's always-enforced string _id for one record per user/project scope", function () {
     expect(AiReviewerWorkspaceModelSchema.path("_id").instance).toBe("String");
-    expect(AiReviewerWorkspaceModelSchema.indexes()).toEqual([]);
+    expect(AiReviewerWorkspaceModelSchema.indexes()).toEqual([
+      [
+        { userId: 1, "workspace.selectedModel.connectionId": 1 },
+        { background: true },
+      ],
+    ]);
   });
 
   it("persists, reloads, and deletes an open discussion without a source run", async function () {
@@ -396,6 +413,105 @@ describe("AI reviewer workspace persistence", function () {
       ...emptyWorkspace(),
       selectedModel,
     });
+  });
+
+  it("treats a deleted connection as no selection and drops its stale id on the next save", async function () {
+    const connectionId = "connection-workspace-deleted";
+    const selectedModel = { connectionId, model: "deterministic-v1" };
+    const liveConnectionIds = new Set([connectionId]);
+    const connectionStore = {
+      list: vi.fn(async () => [...liveConnectionIds].map((id) => ({ id }))),
+    };
+    const { model, records } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model, connectionStore });
+
+    expect(
+      await store.save(
+        userId,
+        projectId,
+        { ...emptyWorkspace(), selectedModel },
+        0,
+      ),
+    ).toEqual({
+      revision: 1,
+      workspace: { ...emptyWorkspace(), selectedModel },
+    });
+
+    liveConnectionIds.delete(connectionId);
+    expect(await store.load(userId, projectId)).toEqual({
+      revision: 1,
+      workspace: emptyWorkspace(),
+    });
+    // Loading resolves the selection for the panel without a fan-out write.
+    expect(records.get(recordKey(userId, projectId))).toMatchObject({
+      revision: 1,
+      workspace: { ...emptyWorkspace(), selectedModel },
+    });
+
+    const nextWorkspace = {
+      runs: [],
+      discussions: [openWorkspaceDiscussion()],
+      // A stale client cannot write the deleted destination back either.
+      selectedModel,
+    };
+    expect(await store.save(userId, projectId, nextWorkspace, 1)).toEqual({
+      revision: 2,
+      workspace: {
+        runs: [],
+        discussions: nextWorkspace.discussions,
+      },
+    });
+    expect(
+      records.get(recordKey(userId, projectId)).workspace,
+    ).not.toHaveProperty("selectedModel");
+  });
+
+  it("counts the user's projects that select each connection in one query", async function () {
+    const { model } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+    const firstConnectionId = "connection-workspace-0001";
+    const secondConnectionId = "connection-workspace-0002";
+
+    for (const [scopedProjectId, connectionId] of [
+      [projectId, firstConnectionId],
+      [otherProjectId, firstConnectionId],
+      ["project-workspace-0003", secondConnectionId],
+    ]) {
+      await store.save(
+        userId,
+        scopedProjectId,
+        {
+          ...emptyWorkspace(),
+          selectedModel: { connectionId, model: "deterministic-v1" },
+        },
+        0,
+      );
+    }
+    await store.save(
+      otherUserId,
+      "project-workspace-0004",
+      {
+        ...emptyWorkspace(),
+        selectedModel: {
+          connectionId: firstConnectionId,
+          model: "deterministic-v1",
+        },
+      },
+      0,
+    );
+
+    expect(
+      await store.countProjectsSelectingConnections(userId, [
+        firstConnectionId,
+        secondConnectionId,
+        "connection-workspace-unused",
+      ]),
+    ).toEqual({
+      [firstConnectionId]: 2,
+      [secondConnectionId]: 1,
+      "connection-workspace-unused": 0,
+    });
+    expect(model.find).toHaveBeenCalledOnce();
   });
 
   it("loads a workspace stored before the selected model existed", async function () {

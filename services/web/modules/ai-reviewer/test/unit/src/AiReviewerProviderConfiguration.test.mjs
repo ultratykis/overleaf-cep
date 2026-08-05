@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 
+import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
@@ -10,7 +11,10 @@ import {
   parseAiReviewerProviderConfig,
   publicAiReviewerProviderConnection,
 } from "../../../app/src/AiReviewerProviderConfig.mjs";
-import { createAiReviewerProviderConfigStore } from "../../../app/src/AiReviewerProviderConfigStore.mjs";
+import {
+  AiReviewerConnectionConflictError,
+  createAiReviewerProviderConfigStore,
+} from "../../../app/src/AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
 import { createAiReviewerProviderController } from "../../../app/src/AiReviewerProviderController.mjs";
 import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
@@ -41,6 +45,11 @@ const credentialUpdatedAt = "2026-07-25T00:01:00.000Z";
 const credential = "PRIVATE_PROVIDER_CREDENTIAL";
 const geminiModel = "gemini-2.5-pro";
 const claudeModel = "claude-sonnet-4-20250514";
+const azureResource = "reviewer-resource";
+const azureBaseUrl = `https://${azureResource}.openai.azure.com/openai`;
+const azureApiVersion = "2025-01-01-preview";
+const azureDeployment = "gpt-5.6-terra";
+const azurePortalEndpoint = `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
 const englishMessages = JSON.parse(
   fs.readFileSync(new URL("../../../../../locales/en.json", import.meta.url)),
 );
@@ -116,6 +125,21 @@ const claudeConnectionWrite = Object.freeze({
   provider: "claude",
   credential,
 });
+const azureConnectionWrite = Object.freeze({
+  provider: "azure",
+  baseUrl: azureResource,
+  requestStyle: "deployment",
+  apiVersion: azureApiVersion,
+  deployments: [azureDeployment],
+  credential,
+});
+const blankAzureConnectionWrite = Object.freeze({
+  provider: "azure",
+  baseUrl: azureResource,
+  requestStyle: "deployment",
+  deployments: [azureDeployment],
+  credential,
+});
 const storedConnectionId = "connection-provider-0001";
 const otherConnection = Object.freeze({
   id: storedConnectionId,
@@ -149,6 +173,8 @@ function selectionRequest() {
     action: "review",
     instruction: "Review this synthetic selection.",
     skill: "referee-review",
+    connectionId: storedConnectionId,
+    model: otherModel,
     scope: {
       kind: "selection",
       documentId: "document-provider-0001",
@@ -168,6 +194,8 @@ function projectRequest() {
     action: "review",
     instruction: "Review this synthetic project.",
     skill: "referee-review",
+    connectionId: storedConnectionId,
+    model: otherModel,
     scope: { kind: "project" },
   };
 }
@@ -210,6 +238,8 @@ function conversationRequest() {
     action: "review",
     instruction: "Explain this selection.",
     skill: null,
+    connectionId: storedConnectionId,
+    model: remoteModel,
     turns: [{ role: "user", text: "What did the review mean here?" }],
   };
 }
@@ -524,6 +554,129 @@ function providerControllerFixture({
 }
 
 describe("AI reviewer provider configuration", function () {
+  it("canonicalizes Azure parts and a pasted portal deployment endpoint", function () {
+    expect(parseAiReviewerConnectionUpdate(azureConnectionWrite)).toEqual({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      deployments: [azureDeployment],
+      label: null,
+      credential,
+    });
+    expect(
+      parseAiReviewerConnectionUpdate({
+        provider: "azure",
+        baseUrl: azurePortalEndpoint,
+        requestStyle: "deployment",
+        deployments: [],
+        credential,
+      }),
+    ).toEqual({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      deployments: [azureDeployment],
+      label: null,
+      credential,
+    });
+    expect(
+      parseAiReviewerProviderConfig({
+        provider: "azure",
+        baseUrl: azurePortalEndpoint,
+        model: azureDeployment,
+        contextLength,
+        credential,
+      }),
+    ).toEqual({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      model: azureDeployment,
+      contextLength,
+      credential,
+    });
+    expect(
+      publicAiReviewerProviderConnection({
+        id: storedConnectionId,
+        revision: 1,
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        requestStyle: "deployment",
+        apiVersion: azureApiVersion,
+        deployments: [azureDeployment],
+        credentialSet: true,
+      }),
+    ).toEqual({
+      id: storedConnectionId,
+      revision: 1,
+      label: `${azureResource}.openai.azure.com`,
+      classification: "remote",
+      config: {
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        requestStyle: "deployment",
+        apiVersion: azureApiVersion,
+        deployments: [azureDeployment],
+        contextLengthOverride: null,
+        credentialSet: true,
+        credentialUpdatedAt: null,
+      },
+    });
+  });
+
+  it("defaults new Azure writes to v1 but keeps pre-style records deployment-based", function () {
+    expect(
+      parseAiReviewerConnectionUpdate({
+        provider: "azure",
+        baseUrl: azurePortalEndpoint,
+        deployments: [],
+        credential,
+      }),
+    ).toMatchObject({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "v1",
+      deployments: [azureDeployment],
+    });
+    expect(
+      parseAiReviewerConnection({
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        apiVersion: azureApiVersion,
+        deployments: [azureDeployment],
+      }),
+    ).toMatchObject({
+      provider: "azure",
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+    });
+  });
+
+  it("keeps an unchosen Azure API version absent but rejects it on other kinds", function () {
+    const blankVersion = parseAiReviewerConnectionUpdate(
+      blankAzureConnectionWrite,
+    );
+    expect(blankVersion).not.toHaveProperty("apiVersion");
+    for (const invalid of [
+      { ...connectionWrite, apiVersion: azureApiVersion },
+      { ...connectionWrite, deployments: [azureDeployment] },
+      { ...geminiConnectionWrite, apiVersion: azureApiVersion },
+      { ...claudeConnectionWrite, deployments: [azureDeployment] },
+      {
+        provider: "azure",
+        baseUrl: azurePortalEndpoint,
+        apiVersion: "2025-04-01-preview",
+        deployments: [],
+        credential,
+      },
+    ]) {
+      expect(() => parseAiReviewerConnectionUpdate(invalid)).toThrow();
+    }
+  });
+
   it("stores a Gemini model without its listing prefix", function () {
     // Discovery reports the bare id, so keeping `models/` here would make a
     // saved configuration fail the per-run model check against that list.
@@ -561,6 +714,7 @@ describe("AI reviewer provider configuration", function () {
       englishMessages.ai_reviewer_provider_openai_compatible,
       englishMessages.ai_reviewer_provider_gemini,
       englishMessages.ai_reviewer_provider_claude,
+      englishMessages.ai_reviewer_provider_azure,
     ];
     const fieldNames = [
       providerFieldName,
@@ -591,9 +745,8 @@ describe("AI reviewer provider configuration", function () {
     expect(englishMessages.ai_reviewer_provider_claude).toBe(
       "Anthropic Claude",
     );
+    expect(englishMessages.ai_reviewer_provider_azure).toBe("Azure OpenAI");
     expect(englishMessages.ai_reviewer_provider_credential).toBe("API key");
-    expect(englishMessages.ai_reviewer_provider_local).toBe("Local endpoint");
-    expect(englishMessages.ai_reviewer_provider_remote).toBe("Remote endpoint");
     expect(englishMessages.ai_reviewer_integration_description).toBe(
       "Configure an AI provider, then review this LaTeX project and discuss the results.",
     );
@@ -694,11 +847,13 @@ describe("AI reviewer provider configuration", function () {
       });
       const response = publicAiReviewerProviderConnection({
         id: storedConnectionId,
+        revision: 1,
         credentialSet: true,
         ...stored,
       });
       expect(response).toEqual({
         id: storedConnectionId,
+        revision: 1,
         label,
         classification: "remote",
         config: {
@@ -783,6 +938,7 @@ describe("AI reviewer provider configuration", function () {
 
     expect(saved).toEqual({
       id: expect.any(String),
+      revision: 1,
       credentialSet: false,
       provider: "openai-compatible",
       baseUrl,
@@ -840,6 +996,7 @@ describe("AI reviewer provider configuration", function () {
       ),
     ).toEqual({
       id: userId,
+      revision: 0,
       label: "127.0.0.1:11434",
       classification: "local",
       config: {
@@ -886,6 +1043,7 @@ describe("AI reviewer provider configuration", function () {
     expect(JSON.stringify(records.get(userId))).not.toContain(credential);
     expect(publicAiReviewerProviderConnection(created)).toEqual({
       id: created.id,
+      revision: created.revision,
       label: "api.example.com",
       classification: "remote",
       config: {
@@ -927,10 +1085,15 @@ describe("AI reviewer provider configuration", function () {
       expect(storedConnection(records)).not.toHaveProperty("baseUrl");
 
       // Editing anything else about the connection keeps the credential.
-      await store.update(userId, created.id, {
-        provider: nativeWrite.provider,
-        contextLengthOverride: otherContextLength,
-      });
+      await store.update(
+        userId,
+        created.id,
+        {
+          provider: nativeWrite.provider,
+          contextLengthOverride: otherContextLength,
+        },
+        created.revision,
+      );
       expect(await store.get(userId)).toMatchObject({
         contextLengthOverride: otherContextLength,
         credential,
@@ -941,7 +1104,105 @@ describe("AI reviewer provider configuration", function () {
     },
   );
 
-  it("requires an effective credential for Gemini and Claude but not OpenAI-compatible", async function () {
+  it("stores Azure deployments and encrypts the credential for the canonical resource", async function () {
+    const { manager, encryptor } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+
+    const created = await store.create(userId, azureConnectionWrite);
+    expect(await store.get(userId)).toEqual({
+      id: created.id,
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      deployments: [azureDeployment],
+      label: `${azureResource}.openai.azure.com`,
+      credential,
+      credentialUpdatedAt,
+    });
+    expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      credential,
+    });
+    expect(storedConnection(records)).toMatchObject({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      deployments: [azureDeployment],
+      credentialEncrypted: "ciphertext-1",
+    });
+
+    const deploymentSaved = await store.update(
+      userId,
+      created.id,
+      {
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        requestStyle: "deployment",
+        apiVersion: "2025-04-01-preview",
+        deployments: [azureDeployment, "reviewer-secondary"],
+      },
+      created.revision,
+    );
+    expect(await store.get(userId)).toMatchObject({
+      requestStyle: "deployment",
+      apiVersion: "2025-04-01-preview",
+      deployments: [azureDeployment, "reviewer-secondary"],
+      credential,
+      credentialUpdatedAt,
+    });
+    expect(storedConnection(records).credentialEncrypted).toBe("ciphertext-1");
+
+    await store.update(
+      userId,
+      created.id,
+      {
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        requestStyle: "v1",
+        deployments: [azureDeployment],
+      },
+      deploymentSaved.revision,
+    );
+    const v1Connection = await store.get(userId);
+    expect(v1Connection).toMatchObject({
+      requestStyle: "v1",
+      deployments: [azureDeployment],
+      credential,
+      credentialUpdatedAt,
+    });
+    expect(v1Connection).not.toHaveProperty("apiVersion");
+    expect(storedConnection(records)).not.toHaveProperty("apiVersion");
+    expect(storedConnection(records).credentialEncrypted).toBe("ciphertext-1");
+  });
+
+  it("keeps a blank Azure API version absent through save and reload", async function () {
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+
+    const created = await store.create(userId, blankAzureConnectionWrite);
+    const reloaded = await store.get(userId);
+    const publicConnection = publicAiReviewerProviderConnection(created);
+
+    expect(created).not.toHaveProperty("apiVersion");
+    expect(reloaded).not.toHaveProperty("apiVersion");
+    expect(storedConnection(records)).not.toHaveProperty("apiVersion");
+    expect(publicConnection.config).not.toHaveProperty("apiVersion");
+  });
+
+  it("requires an effective credential for named providers but not OpenAI-compatible", async function () {
     const { manager } = credentialManagerFixture();
     const { modelDependency, records } = inMemoryModel();
     const store = createAiReviewerProviderConfigStore({
@@ -956,6 +1217,11 @@ describe("AI reviewer provider configuration", function () {
     for (const nativeWrite of [
       { provider: "gemini" },
       { provider: "claude" },
+      {
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        deployments: [azureDeployment],
+      },
     ]) {
       const error = await captureError(store.create(otherUserId, nativeWrite));
       expect(error).toBeInstanceOf(TypeError);
@@ -1002,7 +1268,12 @@ describe("AI reviewer provider configuration", function () {
       baseUrl: remoteBaseUrl,
       label: "Hosted reviewer",
     };
-    await store.update(userId, created.id, sameDestination);
+    const sameDestinationSaved = await store.update(
+      userId,
+      created.id,
+      sameDestination,
+      created.revision,
+    );
     expect(await store.get(userId)).toEqual({
       id: created.id,
       ...sameDestination,
@@ -1018,7 +1289,12 @@ describe("AI reviewer provider configuration", function () {
       ...sameDestination,
       baseUrl: "https://other.example.com/v1",
     };
-    await store.update(userId, created.id, changedDestination);
+    await store.update(
+      userId,
+      created.id,
+      changedDestination,
+      sameDestinationSaved.revision,
+    );
     expect(await store.get(userId)).toEqual({
       id: created.id,
       ...changedDestination,
@@ -1028,8 +1304,8 @@ describe("AI reviewer provider configuration", function () {
     expect(JSON.stringify(records.get(userId))).not.toContain(credential);
   });
 
-  it("retries a stale credential-preserving write without breaking the destination binding", async function () {
-    const replacementCredential = "PRIVATE_REPLACEMENT_CREDENTIAL";
+  it("refuses a stale API-key save when the same connection changed elsewhere", async function () {
+    const staleCredential = "PRIVATE_STALE_WRITER_CREDENTIAL";
     const replacementBaseUrl = "https://replacement.example.com/v1";
     const staleLabel = "Stale writer";
     const { manager } = credentialManagerFixture();
@@ -1059,50 +1335,129 @@ describe("AI reviewer provider configuration", function () {
       provider: "openai-compatible",
       baseUrl: remoteBaseUrl,
       label: staleLabel,
+      credential: staleCredential,
     };
-    const staleSave = store.update(userId, created.id, staleWrite);
+    const staleSave = store.update(
+      userId,
+      created.id,
+      staleWrite,
+      created.revision,
+    );
     await staleWriterEntered.promise;
 
     const replacement = {
       provider: "openai-compatible",
       baseUrl: replacementBaseUrl,
       label: "Replacement",
-      credential: replacementCredential,
     };
-    await store.update(userId, created.id, replacement);
+    const replacementSaved = await store.update(
+      userId,
+      created.id,
+      replacement,
+      created.revision,
+    );
     expect(await store.get(userId)).toEqual({
       id: created.id,
       provider: replacement.provider,
       baseUrl: replacementBaseUrl,
       label: "Replacement",
-      credential: replacementCredential,
       credentialUpdatedAt,
     });
 
     releaseStaleWriter.resolve();
-    await staleSave;
-    // The retry re-reads the replacement destination, so the stale write moves
-    // the connection back and drops a credential bound somewhere else.
+    const staleError = await captureError(staleSave);
+    expect(staleError).toBeInstanceOf(AiReviewerConnectionConflictError);
     expect(await store.get(userId)).toEqual({
       id: created.id,
-      ...staleWrite,
+      ...replacement,
       credentialUpdatedAt,
     });
-    expect(records.get(userId).revision).toBe(3);
+    expect(replacementSaved.revision).toBe(created.revision + 1);
+    expect(records.get(userId).revision).toBe(2);
     expect(storedConnection(records)).not.toHaveProperty("credentialEncrypted");
+    expect(JSON.stringify(records.get(userId))).not.toContain(staleCredential);
 
     const staleWrites = modelDependency.findOneAndUpdate.mock.calls.filter(
       ([, update]) => update.$set.connections[0].label === staleLabel,
     );
-    expect(staleWrites).toHaveLength(2);
+    expect(staleWrites).toHaveLength(1);
     expect(staleWrites[0][0]).toEqual({ _id: userId, revision: 1 });
     expect(staleWrites[0][1].$set.connections[0]).toMatchObject({
-      credentialEncrypted: "ciphertext-1",
+      credentialEncrypted: "ciphertext-2",
     });
-    expect(staleWrites[1][0]).toEqual({ _id: userId, revision: 2 });
-    expect(staleWrites[1][1].$set.connections[0]).not.toHaveProperty(
-      "credentialEncrypted",
+
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+    });
+    const response = new FakeResponse();
+    const updateRequest = httpRequest({
+      body: { ...staleWrite, expectedRevision: created.revision },
+    });
+    updateRequest.params.connection_id = created.id;
+    await controller.updateConnection(updateRequest, response);
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toEqual({
+      code: "AI_PROVIDER_CONNECTION_CONFLICT",
+      category: "configuration",
+      message:
+        "The AI provider connection changed elsewhere. Your change was not applied. Reload the settings and try again.",
+      retryable: false,
+    });
+    expect(JSON.stringify(response.body)).not.toContain(staleCredential);
+  });
+
+  it("retries a document conflict when two writers change different connections", async function () {
+    const firstWriterEntered = deferred();
+    const releaseFirstWriter = deferred();
+    const { hooks, modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+    });
+    const first = await store.create(userId, connectionWrite);
+    const second = await store.create(userId, otherConnectionWrite);
+    let firstWriterBlocked = false;
+    hooks.beforeFindOneAndUpdate = async ({ update }) => {
+      if (
+        !firstWriterBlocked &&
+        update.$set.connections.some(
+          (connection) => connection.label === "First updated",
+        )
+      ) {
+        firstWriterBlocked = true;
+        firstWriterEntered.resolve();
+        await releaseFirstWriter.promise;
+      }
+    };
+
+    const firstSave = store.update(
+      userId,
+      first.id,
+      { ...connectionWrite, label: "First updated" },
+      first.revision,
     );
+    await firstWriterEntered.promise;
+    const secondSaved = await store.update(
+      userId,
+      second.id,
+      { ...otherConnectionWrite, label: "Second updated" },
+      second.revision,
+    );
+    releaseFirstWriter.resolve();
+    const firstSaved = await firstSave;
+
+    expect(firstSaved).toMatchObject({
+      id: first.id,
+      revision: first.revision + 1,
+      label: "First updated",
+    });
+    expect(secondSaved).toMatchObject({
+      id: second.id,
+      revision: second.revision + 1,
+      label: "Second updated",
+    });
+    expect(await store.list(userId)).toEqual([firstSaved, secondSaved]);
+    expect(records.get(userId).revision).toBe(4);
   });
 
   it("retries a duplicate-key race when two writers observe no existing record", async function () {
@@ -1164,11 +1519,16 @@ describe("AI reviewer provider configuration", function () {
     });
     const created = await store.create(userId, credentialConnectionWrite);
 
-    await store.update(userId, created.id, {
-      provider: credentialConnectionWrite.provider,
-      baseUrl: credentialConnectionWrite.baseUrl,
-      credential: null,
-    });
+    await store.update(
+      userId,
+      created.id,
+      {
+        provider: credentialConnectionWrite.provider,
+        baseUrl: credentialConnectionWrite.baseUrl,
+        credential: null,
+      },
+      created.revision,
+    );
     const cleared = await store.get(userId);
     expect(cleared).toEqual({
       id: created.id,
@@ -1261,10 +1621,7 @@ describe("AI reviewer provider configuration", function () {
   });
 
   it("checks a connection by listing what it can run", async function () {
-    const modelFetchImpl = vi.fn(async (input) => {
-      if (String(input).endsWith("/api/tags")) {
-        return new Response("", { status: 404 });
-      }
+    const modelFetchImpl = vi.fn(async () => {
       return new Response(
         JSON.stringify({ data: [{ id: model }, { id: otherModel }] }),
         { headers: { "content-type": "application/json" } },
@@ -1285,6 +1642,7 @@ describe("AI reviewer provider configuration", function () {
       modelCount: 2,
       classification: "local",
     });
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
 
     const unreachable = createAiReviewerProviderService({
       modelFetchImpl: vi.fn(async () => new Response("", { status: 401 })),
@@ -1297,6 +1655,35 @@ describe("AI reviewer provider configuration", function () {
       code: "AI_PROVIDER_AUTHENTICATION_ERROR",
       category: "authentication",
     });
+  });
+
+  it("checks Azure by generating against the first entered deployment", async function () {
+    const generateChat = vi.fn(async () => ({ type: "completed" }));
+    const azureTransportFactory = vi.fn(() => ({ generateChat }));
+    const service = createAiReviewerProviderService({
+      azureTransportFactory,
+    });
+    const signal = new AbortController().signal;
+
+    expect(
+      await service.testConnection(azureConnectionWrite, { signal }),
+    ).toEqual({
+      ok: true,
+      provider: "azure",
+      modelCount: 1,
+      classification: "remote",
+    });
+    expect(azureTransportFactory).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      credential,
+      modelTag: azureDeployment,
+    });
+    expect(generateChat).toHaveBeenCalledExactlyOnceWith(
+      { prompt: "Reply with OK.", maxOutputTokens: 2_048 },
+      { signal },
+    );
   });
 
   it("resolves a context length from the connection and the selected model", async function () {
@@ -1492,17 +1879,11 @@ describe("AI reviewer provider configuration", function () {
       payload,
       expected,
     }) {
-      let capabilityProbes = 0;
       const modelFetchImpl = vi.fn(async (input, init) => {
-        // A non-Ollama endpoint answers 404 here, which must leave the
-        // pattern-based filter in charge rather than failing the listing.
-        if (String(input).endsWith("/api/tags")) {
-          capabilityProbes += 1;
-          return new Response("", { status: 404 });
-        }
         expect(String(input)).toBe(expectedUrl);
         expect(init.method).toBe("GET");
         expect(init.redirect).toBe("error");
+        expect(init.dispatcher).toBeInstanceOf(Agent);
         expect(new Headers(init.headers).get(expectedHeader[0])).toBe(
           expectedHeader[1],
         );
@@ -1518,20 +1899,42 @@ describe("AI reviewer provider configuration", function () {
       expect(await service.listModels(config, { cacheKey: userId })).toEqual(
         expected,
       );
+      expect(modelFetchImpl).toHaveBeenCalledOnce();
       expect(await service.listModels(config, { cacheKey: userId })).toEqual(
         expected,
       );
-      expect(capabilityProbes).toBe(
-        config.provider === "openai-compatible" ? 1 : 0,
-      );
+      expect(modelFetchImpl).toHaveBeenCalledOnce();
       expect(JSON.stringify(await service.listModels(config))).not.toContain(
         credential,
       );
     },
   );
 
+  it("uses user-entered Azure deployment names instead of fabricating a model catalogue", async function () {
+    const modelFetchImpl = vi.fn();
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+
+    expect(
+      await service.listModels({
+        ...azureConnectionWrite,
+        deployments: [azureDeployment, "reviewer-secondary"],
+      }),
+    ).toEqual([
+      { id: azureDeployment, displayName: azureDeployment },
+      { id: "reviewer-secondary", displayName: "reviewer-secondary" },
+    ]);
+    expect(modelFetchImpl).not.toHaveBeenCalled();
+  });
+
   it("keeps only tool-capable models when the endpoint declares capabilities", async function () {
-    const modelFetchImpl = vi.fn(async (input) => {
+    const requests = [];
+    const modelFetchImpl = vi.fn(async (input, init) => {
+      requests.push(String(input));
+      expect(init).toMatchObject({
+        method: "GET",
+        redirect: "error",
+        dispatcher: expect.any(Agent),
+      });
       if (String(input).endsWith("/api/tags")) {
         return new Response(
           JSON.stringify({
@@ -1546,10 +1949,23 @@ describe("AI reviewer provider configuration", function () {
       }
       return new Response(
         JSON.stringify({
+          object: "list",
           data: [
-            { id: "qwen3.5:4b" },
-            { id: "bge-m3:latest" },
-            { id: "plain:latest" },
+            {
+              id: "qwen3.5:4b",
+              object: "model",
+              owned_by: "library",
+            },
+            {
+              id: "bge-m3:latest",
+              object: "model",
+              owned_by: "library",
+            },
+            {
+              id: "plain:latest",
+              object: "model",
+              owned_by: "library",
+            },
           ],
         }),
         { headers: { "content-type": "application/json" } },
@@ -1568,13 +1984,22 @@ describe("AI reviewer provider configuration", function () {
         baseUrl: "http://127.0.0.1:11434/v1",
       }),
     ).toEqual([{ id: "qwen3.5:4b", displayName: "qwen3.5:4b" }]);
+    expect(requests).toEqual([
+      "http://127.0.0.1:11434/v1/models",
+      "http://127.0.0.1:11434/api/tags",
+    ]);
   });
 
-  it("falls back to the name filter when the endpoint declares nothing", async function () {
-    const modelFetchImpl = vi.fn(async (input) => {
-      if (String(input).endsWith("/api/tags")) {
-        return new Response("", { status: 404 });
-      }
+  it("uses only /v1/models for a compatible endpoint without Ollama markers", async function () {
+    const modelFetchImpl = vi.fn(async (input, init) => {
+      expect(String(input)).toBe(
+        "https://resource.openai.azure.com/openai/v1/models",
+      );
+      expect(init).toMatchObject({
+        method: "GET",
+        redirect: "error",
+        dispatcher: expect.any(Agent),
+      });
       return new Response(
         JSON.stringify({
           data: [{ id: "gpt-4o-mini" }, { id: "text-embedding-3-small" }],
@@ -1590,9 +2015,11 @@ describe("AI reviewer provider configuration", function () {
     expect(
       await service.listModels({
         provider: "openai-compatible",
-        baseUrl: "https://api.example.com/v1",
+        baseUrl: "https://resource.openai.azure.com/openai/v1",
+        credential,
       }),
     ).toEqual([{ id: "gpt-4o-mini", displayName: "gpt-4o-mini" }]);
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
   });
 
   it("rejects unsupported and oversized model-list responses without returning provider bodies", async function () {
@@ -1927,6 +2354,7 @@ describe("AI reviewer provider configuration", function () {
     const { modelDependency, records } = inMemoryModel();
     const configStore = createAiReviewerProviderConfigStore({
       model: modelDependency,
+      newConnectionId: () => storedConnectionId,
     });
     const reads = [];
     const transport = {
@@ -2423,7 +2851,9 @@ Cite \cite{missing}`;
     const response = new FakeResponse();
 
     await controller.stream(
-      httpRequest({ body: selectionRequest() }),
+      httpRequest({
+        body: { ...selectionRequest(), model: geminiModel },
+      }),
       response,
     );
 

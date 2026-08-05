@@ -30,6 +30,14 @@ export const AiReviewerWorkspaceSchema = new mongoose.Schema(
   },
 );
 
+// Connection deletion guidance counts a user's projects by their persisted
+// selection. Keep that settings read bounded to the relevant user and
+// connection instead of scanning every AI Reviewer workspace.
+AiReviewerWorkspaceSchema.index({
+  userId: 1,
+  "workspace.selectedModel.connectionId": 1,
+});
+
 export const AiReviewerWorkspace = mongoose.model(
   "AiReviewerWorkspace",
   AiReviewerWorkspaceSchema,

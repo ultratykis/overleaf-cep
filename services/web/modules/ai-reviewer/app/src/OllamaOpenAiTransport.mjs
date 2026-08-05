@@ -1,13 +1,18 @@
 // @ts-check
 
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createAzure } from "@ai-sdk/azure";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import Ajv from "ajv";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP, SocketAddress } from "node:net";
 import { Agent, buildConnector } from "undici";
 
+import {
+  DEFAULT_AZURE_OPENAI_API_VERSION,
+  deriveAiReviewerChatRequestUrl,
+} from "../../shared/provider-request-url.mjs";
 import { AgentGatewayError } from "./AgentGateway.mjs";
 import {
   AiSdkAgentGateway,
@@ -22,6 +27,7 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
+import { parseAzureOpenAiRunDestination } from "./AzureOpenAiEndpointPolicy.mjs";
 import {
   isValidModelContextLength,
   MAX_DETECTED_MODEL_CONTEXT_LENGTH,
@@ -46,13 +52,13 @@ const INTRINSIC_PROMISE_THEN = Promise.prototype.then;
 const LOCAL_TRANSPORT_ERRORS = new WeakSet();
 const EMPTY_PROVIDER_OPTIONS = Object.freeze({});
 const OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS = Object.freeze({
-  openai: Object.freeze({
+  openaiCompatible: Object.freeze({
     reasoningEffort: "none",
   }),
 });
 const OPENAI_COMPATIBLE_PROVIDER_OPTIONS = Object.freeze({
-  openai: Object.freeze({
-    parallelToolCalls: false,
+  openaiCompatible: Object.freeze({
+    parallel_tool_calls: false,
     reasoningEffort: "none",
     strictJsonSchema: true,
   }),
@@ -115,6 +121,8 @@ const UNSUPPORTED_STREAM_PART_PROPERTIES = Object.freeze({
     "dynamic",
   ]),
   file: Object.freeze(["mediaType", "data"]),
+  custom: Object.freeze(["kind", "providerMetadata"]),
+  "reasoning-file": Object.freeze(["data", "mediaType", "providerMetadata"]),
   raw: Object.freeze(["rawValue"]),
   source: Object.freeze([
     "sourceType",
@@ -881,7 +889,14 @@ function parseGenerateResultEnvelope(input, signal) {
     contentLength < 1 ||
     contentLength > MAX_NONSTREAM_CONTENT_PARTS ||
     !warningsIsArray ||
-    warningLength !== 0
+    typeof warningLength !== "number" ||
+    !Number.isSafeInteger(warningLength) ||
+    warningLength < 0 ||
+    // A warning is the provider telling us which of our settings it ignored,
+    // not a broken response. Refusing any answer that carries one made every
+    // reasoning model unusable here: they warn that temperature and topP do
+    // not apply, then answer correctly. Bound the list and read on.
+    warningLength > MAX_PROVIDER_WARNING_ENTRIES
   ) {
     throw invalidProviderResponse();
   }
@@ -2486,7 +2501,10 @@ export function createGuardedOpenAiCompatibleFetch({
 function createGuardedFetch({ baseUrl, fetchImpl }) {
   return createGuardedOpenAiCompatibleFetch({
     baseUrl,
-    allowedRequestUrl: `${baseUrl}/chat/completions`,
+    allowedRequestUrl: deriveAiReviewerChatRequestUrl({
+      provider: "openai-compatible",
+      baseUrl,
+    }),
     fetchImpl,
   });
 }
@@ -2708,7 +2726,7 @@ export async function detectOpenAiCompatibleContextLength({
 }
 
 /**
- * Shared hardening boundary for untrusted AI SDK LanguageModelV3 providers.
+ * Shared hardening boundary for untrusted AI SDK LanguageModelV3/V4 providers.
  * The concrete model remains private and can enter only the local gateway.
  */
 export class HardenedAiSdkProviderTransport {
@@ -2725,7 +2743,7 @@ export class HardenedAiSdkProviderTransport {
    * @param {{
    *   languageModel: unknown,
    *   modelTag: unknown,
-   *   provider: "openai-compatible" | "gemini" | "claude",
+   *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
    *   gatewayProviderOptions: Readonly<Record<string, unknown>>,
    *   providerOptions: Readonly<Record<string, unknown>>,
    *   invalidModelMessage: string,
@@ -2741,7 +2759,7 @@ export class HardenedAiSdkProviderTransport {
   }) {
     const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
     if (
-      !["openai-compatible", "gemini", "claude"].includes(provider) ||
+      !["openai-compatible", "gemini", "claude", "azure"].includes(provider) ||
       gatewayProviderOptions == null ||
       typeof gatewayProviderOptions !== "object" ||
       Array.isArray(gatewayProviderOptions) ||
@@ -2776,7 +2794,7 @@ export class HardenedAiSdkProviderTransport {
     if (
       languageModel == null ||
       typeof languageModel !== "object" ||
-      specificationVersion !== "v3" ||
+      (specificationVersion !== "v3" && specificationVersion !== "v4") ||
       typeof doGenerate !== "function" ||
       typeof doStream !== "function"
     ) {
@@ -3307,7 +3325,7 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
    *   credential?: unknown,
    *   modelTag: unknown,
    *   fetchImpl?: typeof fetch,
-   *   createProvider?: typeof createOpenAI,
+   *   createProvider?: typeof createOpenAICompatible,
    * }} options
    */
   constructor({
@@ -3315,12 +3333,12 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
     credential,
     modelTag,
     fetchImpl = globalThis.fetch,
-    createProvider = createOpenAI,
+    createProvider = createOpenAICompatible,
   }) {
     const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
     const parsedCredential =
       credential == null
-        ? "ollama"
+        ? undefined
         : parseAiReviewerProviderCredential(credential);
     const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
     if (typeof fetchImpl !== "function") {
@@ -3332,34 +3350,36 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
 
     const provider = runProviderConstruction(() =>
       createProvider({
-        apiKey: parsedCredential,
+        ...(parsedCredential === undefined ? {} : { apiKey: parsedCredential }),
         baseURL: endpoint.baseUrl,
         fetch: createGuardedFetch({
           baseUrl: endpoint.baseUrl,
           fetchImpl,
         }),
+        includeUsage: true,
         name: "openai-compatible",
+        supportsStructuredOutputs: true,
       }),
     );
     observeInvalidNativePromise(provider);
-    const chat =
+    const chatModel =
       provider == null ||
       (typeof provider !== "object" && typeof provider !== "function")
         ? undefined
-        : runProviderConstruction(() => Reflect.get(provider, "chat"));
-    observeInvalidNativePromise(chat);
+        : runProviderConstruction(() => Reflect.get(provider, "chatModel"));
+    observeInvalidNativePromise(chatModel);
     if (
       provider == null ||
       (typeof provider !== "object" && typeof provider !== "function") ||
-      typeof chat !== "function"
+      typeof chatModel !== "function"
     ) {
       throw new TypeError(
-        "createProvider must return a provider with a chat method.",
+        "createProvider must return a provider with a chatModel method.",
       );
     }
 
     const languageModel = runProviderConstruction(() =>
-      Reflect.apply(chat, provider, [parsedModelTag]),
+      Reflect.apply(chatModel, provider, [parsedModelTag]),
     );
     super({
       languageModel,
@@ -3369,6 +3389,89 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
       invalidModelMessage:
         "The OpenAI-compatible provider must return a concrete Chat Completions model.",
+    });
+  }
+}
+
+/**
+ * Azure OpenAI uses the Chat Completions dialect through either its current v1
+ * route or its older deployment-based route. The shared request URL contract
+ * supplies the exact destination to the guarded fetch.
+ */
+export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
+  /**
+   * @param {{
+   *   baseUrl: unknown,
+   *   requestStyle?: unknown,
+   *   apiVersion?: unknown,
+   *   credential: unknown,
+   *   modelTag: unknown,
+   *   fetchImpl?: typeof fetch,
+   *   createProvider?: typeof createAzure,
+   * }} options
+   */
+  constructor({
+    baseUrl,
+    requestStyle,
+    apiVersion,
+    credential,
+    modelTag,
+    fetchImpl = globalThis.fetch,
+    createProvider = createAzure,
+  }) {
+    const destination = parseAzureOpenAiRunDestination({
+      baseUrl,
+      requestStyle,
+      apiVersion,
+      model: modelTag,
+    });
+    const parsedCredential = parseAiReviewerProviderCredential(credential);
+    if (typeof fetchImpl !== "function") {
+      throw new TypeError("fetchImpl must be a function.");
+    }
+    if (typeof createProvider !== "function") {
+      throw new TypeError("createProvider must be a function.");
+    }
+    const effectiveApiVersion =
+      destination.apiVersion ?? DEFAULT_AZURE_OPENAI_API_VERSION;
+    const useDeploymentBasedUrls = destination.requestStyle === "deployment";
+    const allowedRequestUrl = deriveAiReviewerChatRequestUrl(destination);
+    const sdkProvider = runProviderConstruction(() =>
+      createProvider({
+        apiKey: parsedCredential,
+        apiVersion: effectiveApiVersion,
+        baseURL: destination.baseUrl,
+        fetch: createGuardedOpenAiCompatibleFetch({
+          baseUrl: destination.baseUrl,
+          allowedRequestUrl,
+          fetchImpl,
+        }),
+        useDeploymentBasedUrls,
+      }),
+    );
+    observeInvalidNativePromise(sdkProvider);
+    const chat =
+      sdkProvider == null ||
+      (typeof sdkProvider !== "object" && typeof sdkProvider !== "function")
+        ? undefined
+        : runProviderConstruction(() => Reflect.get(sdkProvider, "chat"));
+    observeInvalidNativePromise(chat);
+    if (typeof chat !== "function") {
+      throw new TypeError(
+        "createProvider must return an Azure provider with a chat method.",
+      );
+    }
+    const languageModel = runProviderConstruction(() =>
+      Reflect.apply(chat, sdkProvider, [destination.model]),
+    );
+    super({
+      languageModel,
+      provider: "azure",
+      modelTag: destination.model,
+      gatewayProviderOptions: EMPTY_PROVIDER_OPTIONS,
+      providerOptions: EMPTY_PROVIDER_OPTIONS,
+      invalidModelMessage:
+        "The Azure provider must return a concrete Chat Completions model.",
     });
   }
 }

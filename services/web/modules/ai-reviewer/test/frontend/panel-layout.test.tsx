@@ -22,6 +22,7 @@ const projectId = "panel-layout-project";
 const createdAt = "2026-07-26T00:00:00.000Z";
 const localConnection: AiProviderConnection = {
   id: "connection-local",
+  revision: 1,
   label: "127.0.0.1:11434",
   classification: "local",
   config: {
@@ -34,6 +35,7 @@ const localConnection: AiProviderConnection = {
 };
 const claudeConnection: AiProviderConnection = {
   id: "connection-claude",
+  revision: 1,
   label: "Anthropic Claude",
   classification: "remote",
   config: {

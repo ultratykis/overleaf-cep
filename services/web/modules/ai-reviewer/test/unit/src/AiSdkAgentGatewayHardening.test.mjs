@@ -229,6 +229,26 @@ function strictStreamModel(results) {
   return { model, consumed: () => index };
 }
 
+function strictV4StreamModel(results) {
+  let index = 0;
+  const model = {
+    specificationVersion: "v4",
+    provider: "fixture",
+    modelId: "fixture-model",
+    supportedUrls: {},
+    doGenerate: vi.fn(),
+    doStream: vi.fn(async () => {
+      if (index >= results.length) {
+        throw new Error("Unexpected extra model step.");
+      }
+      const result = results[index];
+      index += 1;
+      return result;
+    }),
+  };
+  return { model, consumed: () => index };
+}
+
 function throwingModel(error) {
   return new MockLanguageModelV3({
     provider: "fixture",
@@ -320,6 +340,100 @@ async function flushProviderPromiseObservation() {
 }
 
 describe("AI reviewer: AI SDK v6 adapter hardening", function () {
+  it("accepts a complete V4 model without widening the model slot checks", async function () {
+    const { model, consumed } = strictV4StreamModel([
+      outputStep(validOutput()),
+    ]);
+
+    const events = await collect(createGateway(model).stream(projectRequest()));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
+    expect(consumed()).toBe(1);
+  });
+
+  it.each(["v2", "v5"])(
+    "rejects a complete model with specificationVersion %s",
+    async function (specificationVersion) {
+      const model = {
+        specificationVersion,
+        provider: "fixture",
+        modelId: "fixture-model",
+        supportedUrls: {},
+        doGenerate: vi.fn(),
+        doStream: vi.fn(),
+      };
+
+      const error = await captureError(
+        collect(createGateway(model).stream(projectRequest())),
+      );
+
+      expect(error).toMatchObject({
+        code: "AI_PROVIDER_FAILED",
+        category: "provider",
+      });
+      expect(model.doStream).not.toHaveBeenCalled();
+    },
+  );
+
+  it("inspects the installed V4 custom and reasoning-file stream fields", async function () {
+    const reads = {
+      customKind: 0,
+      customMetadata: 0,
+      reasoningData: 0,
+      reasoningMediaType: 0,
+      reasoningMetadata: 0,
+    };
+    const custom = { type: "custom" };
+    Object.defineProperties(custom, {
+      kind: {
+        get() {
+          reads.customKind += 1;
+          return "azure.synthetic";
+        },
+      },
+      providerMetadata: {
+        get() {
+          reads.customMetadata += 1;
+          return {};
+        },
+      },
+    });
+    const reasoningFile = { type: "reasoning-file" };
+    Object.defineProperties(reasoningFile, {
+      data: {
+        get() {
+          reads.reasoningData += 1;
+          return { type: "data", data: "c3ludGhldGlj" };
+        },
+      },
+      mediaType: {
+        get() {
+          reads.reasoningMediaType += 1;
+          return "application/octet-stream";
+        },
+      },
+      providerMetadata: {
+        get() {
+          reads.reasoningMetadata += 1;
+          return {};
+        },
+      },
+    });
+    const { model } = strictV4StreamModel([
+      streamResult([custom, reasoningFile, ...outputChunks(validOutput())]),
+    ]);
+
+    const events = await collect(createGateway(model).stream(projectRequest()));
+
+    expect(events.at(-1)).toMatchObject({ type: "completed" });
+    for (const count of Object.values(reads)) {
+      expect(count).toBeGreaterThan(0);
+    }
+  });
+
   it.each([
     {
       label: "specificationVersion presence check",
@@ -523,25 +637,17 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       let pipeAbortCount = 0;
       let pipeSignal;
       const providerStream = {
-        pipeThrough() {
-          return {
-            pipeThrough() {
-              return {
-                pipeTo(_destination, options) {
-                  pipeSignal = options?.signal;
-                  pipeSignal?.addEventListener(
-                    "abort",
-                    () => {
-                      pipeAbortCount += 1;
-                    },
-                    { once: true },
-                  );
-                  observePipeStart();
-                  return pipeWork;
-                },
-              };
+        pipeTo(_destination, options) {
+          pipeSignal = options?.signal;
+          pipeSignal?.addEventListener(
+            "abort",
+            () => {
+              pipeAbortCount += 1;
             },
-          };
+            { once: true },
+          );
+          observePipeStart();
+          return pipeWork;
         },
       };
       const { model } = strictStreamModel([{ stream: providerStream }]);
@@ -1496,21 +1602,21 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       },
     },
     {
-      label: "pipeThrough method",
+      label: "pipeTo method",
       result(rejected) {
         return {
           stream: {
-            pipeThrough: rejected,
+            pipeTo: rejected,
           },
         };
       },
     },
     {
-      label: "pipeThrough result",
+      label: "pipeTo work",
       result(rejected) {
         return {
           stream: {
-            pipeThrough() {
+            pipeTo() {
               return rejected;
             },
           },
@@ -1879,10 +1985,10 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       label: "result stream getter",
       result(controller, nextProviderReads, baseStream) {
         const stream = {};
-        Object.defineProperty(stream, "pipeThrough", {
+        Object.defineProperty(stream, "pipeTo", {
           get() {
             nextProviderReads.count += 1;
-            return baseStream.pipeThrough.bind(baseStream);
+            return baseStream.pipeTo.bind(baseStream);
           },
         });
         const result = {};
@@ -1901,20 +2007,20 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       },
     },
     {
-      label: "pipeThrough getter",
+      label: "pipeTo getter",
       result(controller, nextProviderReads, baseStream) {
         return {
           stream: {
-            get pipeThrough() {
+            get pipeTo() {
               controller.abort(
                 new DOMException(
                   "PROVIDER_PIPE_GETTER_ABORT_PRIVATE",
                   "AbortError",
                 ),
               );
-              return () => {
+              return (...args) => {
                 nextProviderReads.count += 1;
-                return baseStream;
+                return baseStream.pipeTo(...args);
               };
             },
           },
@@ -1922,25 +2028,26 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       },
     },
     {
-      label: "pipeThrough call",
+      label: "pipeTo call",
       result(controller, nextProviderReads, baseStream) {
-        const filteredStream = {};
-        Object.defineProperty(filteredStream, "pipeThrough", {
-          get() {
-            nextProviderReads.count += 1;
-            return baseStream.pipeThrough.bind(baseStream);
-          },
-        });
         return {
           stream: {
-            pipeThrough() {
+            pipeTo(destination, options) {
               controller.abort(
                 new DOMException(
                   "PROVIDER_PIPE_CALL_ABORT_PRIVATE",
                   "AbortError",
                 ),
               );
-              return filteredStream;
+              const work = baseStream.pipeTo(destination, options);
+              Object.defineProperty(work, "then", {
+                configurable: true,
+                get() {
+                  nextProviderReads.count += 1;
+                  return Promise.prototype.then;
+                },
+              });
+              return work;
             },
           },
         };
@@ -2085,26 +2192,16 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     let ownThenReads = 0;
     const baseStream = streamResult(outputChunks(validOutput())).stream;
     const providerStream = {
-      pipeThrough(providerTransform) {
-        const filtered = baseStream.pipeThrough(providerTransform);
-        return {
-          pipeThrough(sdkTransform) {
-            const piped = filtered.pipeThrough(sdkTransform);
-            return {
-              pipeTo(destination) {
-                const work = piped.pipeTo(destination);
-                Object.defineProperty(work, "then", {
-                  configurable: true,
-                  get() {
-                    ownThenReads += 1;
-                    throw new Error(sentinel);
-                  },
-                });
-                return work;
-              },
-            };
+      pipeTo(destination, options) {
+        const work = baseStream.pipeTo(destination, options);
+        Object.defineProperty(work, "then", {
+          configurable: true,
+          get() {
+            ownThenReads += 1;
+            throw new Error(sentinel);
           },
-        };
+        });
+        return work;
       },
     };
     const { model } = strictStreamModel([{ stream: providerStream }]);
@@ -2132,23 +2229,13 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
     const baseStream = streamResult(outputChunks(validOutput())).stream;
     const providerStream = {
-      pipeThrough(providerTransform) {
-        const filtered = baseStream.pipeThrough(providerTransform);
-        return {
-          pipeThrough(sdkTransform) {
-            const piped = filtered.pipeThrough(sdkTransform);
-            return {
-              pipeTo(destination) {
-                const pipeWork = piped.pipeTo(destination);
-                void Reflect.apply(Promise.prototype.then, pipeWork, [
-                  () => {},
-                  () => {},
-                ]);
-                return providerWork;
-              },
-            };
-          },
-        };
+      pipeTo(destination, options) {
+        const pipeWork = baseStream.pipeTo(destination, options);
+        void Reflect.apply(Promise.prototype.then, pipeWork, [
+          () => {},
+          () => {},
+        ]);
+        return providerWork;
       },
     };
     const { model } = strictStreamModel([{ stream: providerStream }]);

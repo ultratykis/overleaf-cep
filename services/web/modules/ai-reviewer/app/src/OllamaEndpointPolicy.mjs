@@ -3,11 +3,10 @@
 import { isIP } from "node:net";
 
 import { AgentGatewayError } from "./AgentGateway.mjs";
+import { parseCanonicalAiProviderBaseUrl } from "../../shared/provider-request-url.mjs";
 
 export const OPENAI_COMPATIBLE_FETCH_REDIRECT = "error";
 
-const CANONICAL_ENDPOINT =
-  /^(https?):\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([1-9][0-9]{0,4}))?((?:\/[A-Za-z0-9._~-]+)*)$/u;
 const CANONICAL_DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const CANONICAL_IPV4_OCTET = /^(?:0|[1-9][0-9]{0,2})$/u;
 const IPV4_NUMBER_LIKE_HOST =
@@ -199,27 +198,13 @@ function parseCanonicalIpv6(host) {
  * }>}
  */
 export function parseOpenAiCompatibleBaseUrl(input) {
-  if (typeof input !== "string") {
+  let parsed;
+  try {
+    parsed = parseCanonicalAiProviderBaseUrl(input);
+  } catch {
     throw new OpenAiCompatibleEndpointPolicyError();
   }
-
-  const match = CANONICAL_ENDPOINT.exec(input);
-  if (match == null || match[0] !== input) {
-    throw new OpenAiCompatibleEndpointPolicyError();
-  }
-
-  const [, scheme, host, portText, path] = match;
-  const port = portText === undefined ? null : Number(portText);
-  if (
-    (port !== null &&
-      (!Number.isSafeInteger(port) || port < 1 || port > 65_535)) ||
-    path
-      .split("/")
-      .slice(1)
-      .some((segment) => segment === "." || segment === "..")
-  ) {
-    throw new OpenAiCompatibleEndpointPolicyError();
-  }
+  const { scheme, hostname: host, port } = parsed;
 
   const ipv6 = parseCanonicalIpv6(host);
   const ipv4 = ipv6 === null ? parseCanonicalIpv4(host) : null;
@@ -236,7 +221,7 @@ export function parseOpenAiCompatibleBaseUrl(input) {
   }
 
   return Object.freeze({
-    baseUrl: input,
+    baseUrl: parsed.baseUrl,
     classification: LOCAL_HOSTS.has(host) ? "local" : "remote",
     host,
     port,

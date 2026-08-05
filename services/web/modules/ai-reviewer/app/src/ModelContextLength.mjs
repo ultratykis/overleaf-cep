@@ -70,7 +70,7 @@ export function deriveNativeModelContextLength(provider, model) {
 
 /**
  * @param {{
- *   provider: "openai-compatible" | "gemini" | "claude",
+ *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
  *   baseUrl?: string,
  *   model: string,
  *   credential?: unknown,

@@ -374,15 +374,32 @@ export const WorkspaceDiscussionSchema = z
   });
 
 // The client keeps its model choice here so a reload, a discussion, and a
-// rewrite all run against the same destination. The server only stores what
-// was chosen; resolving a stale or absent choice against the current
-// connections stays in ConfiguredAiReviewerController.
+// rewrite all run against the same destination. An absent choice stays absent:
+// neither the client nor the server may silently choose another destination.
 export const WorkspaceModelSelectionSchema = z
   .object({
     connectionId: IdentifierSchema,
     model: IdentifierSchema,
   })
   .strict();
+
+/**
+ * Resolve a stored choice only against the user's live connections. Returning
+ * null deliberately means no selection; there is no destination fallback.
+ *
+ * @param {import("./contract-types").WorkspaceModelSelection | null | undefined} selection
+ * @param {readonly { id: string }[]} connections
+ */
+export function resolveWorkspaceModelSelection(selection, connections) {
+  if (selection == null) {
+    return null;
+  }
+  return connections.some(
+    (connection) => connection.id === selection.connectionId,
+  )
+    ? selection
+    : null;
+}
 
 export const AiReviewerWorkspaceSchema = z
   .object({

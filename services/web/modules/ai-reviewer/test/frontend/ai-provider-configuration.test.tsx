@@ -17,7 +17,6 @@ import AiIntegrationDetails, {
   AiIntegrationDetailsView,
 } from "../../frontend/js/components/ai-integration-details";
 import {
-  AiProviderConfigurationClientError,
   type AiProviderConfiguration,
   type AiProviderConfigurationWrite,
   type AiProviderConnection,
@@ -67,6 +66,38 @@ const claudeConfiguration: AiProviderConfiguration = {
   credentialSet: true,
   credentialUpdatedAt,
 };
+const azureBaseUrl = "https://reviewer.openai.azure.com/openai";
+const azureApiVersion = "2025-01-01-preview";
+const azureDeployment = "gpt-5.6-terra";
+const azurePortalEndpoint = `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
+const azureConfiguration: AiProviderConfiguration = {
+  provider: "azure",
+  baseUrl: azureBaseUrl,
+  requestStyle: "deployment",
+  apiVersion: azureApiVersion,
+  deployments: [azureDeployment],
+  contextLengthOverride: null,
+  credentialSet: true,
+  credentialUpdatedAt,
+};
+const v1AzureConfiguration: AiProviderConfiguration = {
+  provider: "azure",
+  baseUrl: azureBaseUrl,
+  requestStyle: "v1",
+  deployments: [azureDeployment],
+  contextLengthOverride: null,
+  credentialSet: true,
+  credentialUpdatedAt,
+};
+const blankAzureConfiguration: AiProviderConfiguration = {
+  provider: "azure",
+  baseUrl: azureBaseUrl,
+  requestStyle: "deployment",
+  deployments: [azureDeployment],
+  contextLengthOverride: null,
+  credentialSet: true,
+  credentialUpdatedAt,
+};
 const connectionId = "connection-primary";
 const secondConnectionId = "connection-secondary";
 const unconfigured = null;
@@ -74,27 +105,46 @@ const unconfigured = null;
 // listed connection always carries one.
 const configured: AiProviderConnection = {
   id: connectionId,
+  revision: 1,
   label: "127.0.0.1:11434",
   classification: "local",
   config: configuration,
 };
 const otherConfigured: AiProviderConnection = {
   id: connectionId,
+  revision: 2,
   label: "api.example.com",
   classification: "remote",
   config: otherConfiguration,
 };
 const geminiConfigured: AiProviderConnection = {
   id: connectionId,
+  revision: 1,
   label: "Google Gemini",
   classification: "remote",
   config: geminiConfiguration,
 };
 const claudeConfigured: AiProviderConnection = {
   id: secondConnectionId,
+  revision: 1,
   label: "Anthropic Claude",
   classification: "remote",
   config: claudeConfiguration,
+};
+const azureConfigured: AiProviderConnection = {
+  id: connectionId,
+  revision: 1,
+  label: "reviewer.openai.azure.com",
+  classification: "remote",
+  config: azureConfiguration,
+};
+const v1AzureConfigured: AiProviderConnection = {
+  ...azureConfigured,
+  config: v1AzureConfiguration,
+};
+const blankAzureConfigured: AiProviderConnection = {
+  ...azureConfigured,
+  config: blankAzureConfiguration,
 };
 const configurationWrite: AiProviderConfigurationWrite = {
   provider: "openai-compatible",
@@ -115,6 +165,15 @@ const geminiConfigurationWrite: AiProviderConfigurationWrite = {
 };
 const claudeConfigurationWrite: AiProviderConfigurationWrite = {
   provider: "claude",
+  label: "",
+  contextLengthOverride: null,
+};
+const azureConfigurationWrite: AiProviderConfigurationWrite = {
+  provider: "azure",
+  baseUrl: azurePortalEndpoint,
+  requestStyle: "deployment",
+  apiVersion: azureApiVersion,
+  deployments: [azureDeployment],
   label: "",
   contextLengthOverride: null,
 };
@@ -166,6 +225,18 @@ function providerSelect() {
   }) as HTMLSelectElement;
 }
 
+function requestStyleSelect() {
+  return screen.getByRole("combobox", {
+    name: "Request style",
+  }) as HTMLSelectElement;
+}
+
+function requestUrlValues() {
+  return [
+    ...document.querySelectorAll(".ai-reviewer-provider-request-url"),
+  ].map((element) => element.textContent);
+}
+
 // The dialog speaks the connections API, but most cases still describe one
 // connection. These adapters keep those cases expressed as a single saved
 // connection instead of restating the listing shape everywhere.
@@ -194,6 +265,7 @@ function renderDetails({
       (
         id: string,
         _connectionId: string,
+        _expectedRevision: number,
         config: AiProviderConfigurationWrite,
         signal: AbortSignal,
       ) => saveConfiguration(id, config, signal),
@@ -223,6 +295,7 @@ function renderDetails({
 // Cases about the listing itself drive the real props rather than the
 // single-connection adapters above.
 function renderConnections({
+  onHide = sinon.stub(),
   listConnections = sinon.stub().resolves({ connections: [] }),
   createConnection = sinon.stub().resolves(configured),
   updateConnection = sinon.stub().resolves(configured),
@@ -235,7 +308,7 @@ function renderConnections({
   return render(
     <AiIntegrationDetailsView
       projectId={projectId}
-      onHide={sinon.stub()}
+      onHide={onHide}
       listConnections={listConnections}
       createConnection={createConnection}
       updateConnection={updateConnection}
@@ -252,8 +325,42 @@ function connectionRows() {
   return screen.queryAllByTestId("ai-reviewer-connection-row");
 }
 
-async function waitUntilLoaded() {
-  await waitFor(() => expect(providerSelect().disabled).to.equal(false));
+function editConnection(connection: AiProviderConnection) {
+  fireEvent.click(button(`Edit ${connection.label}`));
+}
+
+function testConnectionButton(connection: AiProviderConnection) {
+  return button(`Test ${connection.label}`);
+}
+
+function deleteConnectionButton(connection: AiProviderConnection) {
+  return button(`Delete ${connection.label}`);
+}
+
+function closeSettingsButton() {
+  return within(document.querySelector(".modal-footer")!).getByRole("button", {
+    name: "Close",
+  });
+}
+
+function credentialUpdateTime(updatedAt: string) {
+  return screen.getByTitle(updatedAt) as HTMLTimeElement;
+}
+
+async function waitUntilLoaded({ openEmptyForm = true } = {}) {
+  await waitFor(() =>
+    expect(
+      document.querySelector(".ai-reviewer-connection-footer"),
+    ).not.to.equal(null),
+  );
+  if (openEmptyForm && connectionRows().length === 0) {
+    fireEvent.click(button("Add connection"));
+    await waitFor(() =>
+      expect(
+        document.querySelector(".ai-reviewer-provider-settings-form"),
+      ).not.to.equal(null),
+    );
+  }
 }
 
 describe("AI reviewer: provider configuration", function () {
@@ -334,6 +441,41 @@ describe("AI reviewer: provider configuration", function () {
     );
   });
 
+  it("serializes only the Azure request style, endpoint, version, deployments, and common fields", async function () {
+    const route = fetchMock.post(
+      `/project/${projectId}/ai-reviewer/connections`,
+      azureConfigured,
+    );
+    const signal = new AbortController().signal;
+    const candidate = {
+      ...azureConfigurationWrite,
+      credential,
+      model: "must-not-be-sent",
+      token: "must-not-be-sent",
+    } as AiProviderConfigurationWrite;
+
+    expect(
+      await createAiProviderConnection(projectId, candidate, signal),
+    ).to.deep.equal(azureConfigured);
+
+    const body = JSON.parse(String(route.callHistory.calls()[0].options.body));
+    expect(Object.keys(body)).to.deep.equal([
+      "provider",
+      "baseUrl",
+      "requestStyle",
+      "apiVersion",
+      "deployments",
+      "label",
+      "contextLengthOverride",
+      "credential",
+    ]);
+    expect(body).to.deep.equal({
+      ...azureConfigurationWrite,
+      credential,
+    });
+    expect(JSON.stringify(body)).not.to.include("must-not-be-sent");
+  });
+
   it("deletes a connection through its own route", async function () {
     const remaining = { connections: [claudeConfigured] };
     const deleteRoute = fetchMock.delete(
@@ -343,12 +485,19 @@ describe("AI reviewer: provider configuration", function () {
     const signal = new AbortController().signal;
 
     expect(
-      await deleteAiProviderConnection(projectId, connectionId, signal),
+      await deleteAiProviderConnection(
+        projectId,
+        connectionId,
+        configured.revision,
+        signal,
+      ),
     ).to.deep.equal(remaining);
 
     const [removal] = deleteRoute.callHistory.calls();
     expect(removal.options.method?.toUpperCase()).to.equal("DELETE");
-    expect(removal.options.body).to.equal(undefined);
+    expect(JSON.parse(String(removal.options.body))).to.deep.equal({
+      expectedRevision: configured.revision,
+    });
   });
 
   it("sends only an explicitly entered credential as the fifth write field", async function () {
@@ -369,6 +518,7 @@ describe("AI reviewer: provider configuration", function () {
       await updateAiProviderConnection(
         projectId,
         connectionId,
+        configured.revision,
         candidate,
         signal,
       ),
@@ -382,10 +532,12 @@ describe("AI reviewer: provider configuration", function () {
       "label",
       "contextLengthOverride",
       "credential",
+      "expectedRevision",
     ]);
     expect(body).to.deep.equal({
       ...otherConfigurationWrite,
       credential,
+      expectedRevision: configured.revision,
     });
     expect(JSON.stringify(body)).not.to.include("must-not-be-sent");
   });
@@ -491,6 +643,7 @@ describe("AI reviewer: provider configuration", function () {
       "OpenAI-compatible (Ollama, LM Studio, vLLM)",
       "Google Gemini",
       "Anthropic Claude",
+      "Azure OpenAI",
     ]);
     expect(new Set(providerLabels).size).to.equal(providerLabels.length);
     expect(providerLabels[0]).to.include("Ollama");
@@ -517,14 +670,83 @@ describe("AI reviewer: provider configuration", function () {
       projectId,
       configurationWrite,
     ]);
-    await screen.findByText("Local endpoint");
+    await screen.findByText("OpenAI-compatible");
     await screen.findByText("No API key set");
 
-    fireEvent.click(button("Test connection"));
+    fireEvent.click(testConnectionButton(configured));
     await waitFor(() => expect(testConnection).to.have.been.calledOnce);
     expect(testConnection.firstCall.args).to.have.length(3);
     expect(testConnection.firstCall.args[0]).to.equal(projectId);
     await screen.findByText("Connection successful");
+  });
+
+  it("explains the API base URL and rejects a chat completions endpoint", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    const baseUrlInput = input("Base URL");
+    expect(baseUrlInput.placeholder).to.equal("http://127.0.0.1:11434/v1");
+    expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-baseUrl-help",
+    );
+    const help = screen.getByText(
+      /Enter the API base through its version prefix/,
+    );
+    for (const example of [
+      "http://127.0.0.1:11434/v1",
+      "http://127.0.0.1:8000/v1",
+      "http://127.0.0.1:1234/v1",
+      "https://api.example.com/v1",
+    ]) {
+      expect(help.textContent).to.include(example);
+    }
+
+    fireEvent.change(baseUrlInput, {
+      target: {
+        value: "http://127.0.0.1:11434/v1/chat/completions",
+      },
+    });
+    expect(baseUrlInput.getAttribute("aria-invalid")).to.equal("true");
+    expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-error",
+    );
+    expect(
+      screen.getByText(
+        "Remove /chat/completions. The SDK adds that path for requests and adds /models for model discovery.",
+      ),
+    ).to.exist;
+    expect(button("Save").disabled).to.equal(true);
+  });
+
+  it("previews the OpenAI-compatible request URL and omits native destinations", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    expect(screen.getByText("Requests will go to")).to.exist;
+    expect(requestUrlValues()).to.deep.equal([
+      "Enter a valid endpoint and any route fields shown above to see the request URL.",
+    ]);
+
+    fireEvent.change(input("Base URL"), {
+      target: { value: configuration.baseUrl },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      `${configuration.baseUrl}/chat/completions`,
+    ]);
+
+    fireEvent.change(input("Base URL"), {
+      target: { value: `${configuration.baseUrl}/chat/completions` },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      "Enter a valid endpoint and any route fields shown above to see the request URL.",
+    ]);
+    expect(document.body.textContent).not.to.include(
+      "/chat/completions/chat/completions",
+    );
+
+    fireEvent.change(providerSelect(), { target: { value: "gemini" } });
+    expect(screen.queryByText("Requests will go to")).to.equal(null);
+    expect(requestUrlValues()).to.deep.equal([]);
   });
 
   it("names a connection on request and hands the naming back to the server", async function () {
@@ -539,6 +761,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     await waitUntilLoaded();
 
+    editConnection(otherConfigured);
     // A derived label is shown so the field always matches the listing.
     expect(input("Display name").value).to.equal(otherConfigured.label);
     fireEvent.change(input("Display name"), { target: { value: named.label } });
@@ -550,9 +773,9 @@ describe("AI reviewer: provider configuration", function () {
       label: named.label,
     });
 
-    await waitFor(() =>
-      expect(input("Display name").value).to.equal("Lab GPU box"),
-    );
+    await waitFor(() => expect(button(`Edit ${named.label}`)).to.exist);
+    editConnection(named);
+    expect(input("Display name").value).to.equal("Lab GPU box");
     fireEvent.change(input("Display name"), { target: { value: "  " } });
     fireEvent.click(button("Save"));
 
@@ -563,6 +786,236 @@ describe("AI reviewer: provider configuration", function () {
     });
   });
 
+  it("defaults a new Azure connection to the v1 route and hides API version", async function () {
+    const saveConfiguration = sinon.stub().resolves(v1AzureConfigured);
+    renderDetails({ saveConfiguration });
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "azure" } });
+
+    expect(requestStyleSelect().value).to.equal("v1");
+    expect(
+      screen.getByRole("option", {
+        name: "v1 route — shown in the Azure portal today",
+      }),
+    ).to.exist;
+    expect(
+      screen.getByRole("option", {
+        name: "Deployment route — for older Azure-compatible platforms",
+      }),
+    ).to.exist;
+    expect(screen.queryByLabelText("API version (Optional)")).to.equal(null);
+
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: azurePortalEndpoint },
+    });
+    expect(input("Deployment names (one per line)").value).to.equal(
+      azureDeployment,
+    );
+    expect(requestUrlValues()).to.deep.equal([
+      `${azureBaseUrl}/v1/chat/completions?api-version=v1`,
+    ]);
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
+      provider: "azure",
+      baseUrl: azurePortalEndpoint,
+      requestStyle: "v1",
+      deployments: [azureDeployment],
+      label: "",
+      contextLengthOverride: null,
+      credential,
+    });
+  });
+
+  it("updates Azure request URLs across both request styles", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "azure" } });
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: `${azureBaseUrl}/v1` },
+    });
+    fireEvent.change(input("Deployment names (one per line)"), {
+      target: { value: azureDeployment },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      `${azureBaseUrl}/v1/chat/completions?api-version=v1`,
+    ]);
+
+    fireEvent.change(requestStyleSelect(), {
+      target: { value: "deployment" },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=v1`,
+    ]);
+
+    fireEvent.change(input("API version (Optional)"), {
+      target: { value: azureApiVersion },
+    });
+    fireEvent.change(input("Deployment names (one per line)"), {
+      target: { value: `${azureDeployment}\ngpt-4.1-reviewer` },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`,
+      `${azureBaseUrl}/deployments/gpt-4.1-reviewer/chat/completions?api-version=${azureApiVersion}`,
+    ]);
+
+    fireEvent.change(input("Deployment names (one per line)"), {
+      target: { value: "invalid deployment name" },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      "Enter a valid endpoint and any route fields shown above to see the request URL.",
+    ]);
+
+    fireEvent.change(input("Deployment names (one per line)"), {
+      target: { value: azureDeployment },
+    });
+    fireEvent.change(requestStyleSelect(), { target: { value: "v1" } });
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: "https://azure-compatible.example/openai/v1" },
+    });
+    expect(requestUrlValues()).to.deep.equal([
+      "https://azure-compatible.example/openai/v1/chat/completions",
+    ]);
+  });
+
+  it("accepts the full Azure deployment endpoint and fills its route fields", async function () {
+    const saveConfiguration = sinon.stub().resolves(azureConfigured);
+    renderDetails({ saveConfiguration });
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "azure" } });
+    fireEvent.change(requestStyleSelect(), {
+      target: { value: "deployment" },
+    });
+    expect(input("API version (Optional)").value).to.equal("");
+    expect(input("API key").required).to.equal(true);
+    expect(button("Save").disabled).to.equal(true);
+
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: azurePortalEndpoint },
+    });
+    expect(input("Deployment names (one per line)").value).to.equal(
+      azureDeployment,
+    );
+    expect(input("API version (Optional)").value).to.equal(azureApiVersion);
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    expect(button("Save").disabled).to.equal(false);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args.slice(0, 2)).to.deep.equal([
+      projectId,
+      { ...azureConfigurationWrite, credential },
+    ]);
+  });
+
+  it("keeps the optional deployment API version blank and explains endpoint normalization", async function () {
+    const saveConfiguration = sinon.stub().resolves(blankAzureConfigured);
+    renderDetails({ saveConfiguration });
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "azure" } });
+    fireEvent.change(requestStyleSelect(), {
+      target: { value: "deployment" },
+    });
+
+    const apiVersionInput = input("API version (Optional)");
+    const endpointInput = input("Azure OpenAI resource name or endpoint");
+    expect(apiVersionInput.value).to.equal("");
+    expect(apiVersionInput.required).to.equal(false);
+    expect(apiVersionInput.getAttribute("aria-required")).to.equal(null);
+    expect(apiVersionInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-apiVersion-help",
+    );
+    expect(
+      screen.getByText(
+        "The deployment route sends this as ?api-version=. Leave blank to use the SDK default, v1.",
+      ),
+    ).to.exist;
+    expect(endpointInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-azure-endpoint-help",
+    );
+    expect(
+      screen.getByText(
+        "An endpoint ending in /openai/v1 is stored as /openai. The SDK adds the path for the request style selected above.",
+      ),
+    ).to.exist;
+    expect(providerSelect().getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-azure-provider-help",
+    );
+    expect(
+      screen.getByText(
+        "Connects to Azure OpenAI Service. Enter its resource name or endpoint, then choose the request style that endpoint supports.",
+      ),
+    ).to.exist;
+
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: azureBaseUrl },
+    });
+    fireEvent.change(input("Deployment names (one per line)"), {
+      target: { value: azureDeployment },
+    });
+    fireEvent.change(apiVersionInput, { target: { value: "" } });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    expect(button("Save").disabled).to.equal(false);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
+      provider: "azure",
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      deployments: [azureDeployment],
+      label: "",
+      contextLengthOverride: null,
+      credential,
+    });
+    await waitFor(
+      () => expect(button(`Edit ${blankAzureConfigured.label}`)).to.exist,
+    );
+    editConnection(blankAzureConfigured);
+    expect(requestStyleSelect().value).to.equal("deployment");
+    expect(input("API version (Optional)").value).to.equal("");
+  });
+
+  it("lets a saved Azure connection switch explicitly from deployment to v1", async function () {
+    const updateConnection = sinon.stub().resolves(v1AzureConfigured);
+    renderConnections({
+      listConnections: sinon
+        .stub()
+        .resolves({ connections: [azureConfigured] }),
+      updateConnection,
+    });
+    await waitUntilLoaded();
+
+    editConnection(azureConfigured);
+    expect(requestStyleSelect().value).to.equal("deployment");
+    expect(input("API version (Optional)").value).to.equal(azureApiVersion);
+
+    fireEvent.change(requestStyleSelect(), { target: { value: "v1" } });
+    expect(screen.queryByLabelText("API version (Optional)")).to.equal(null);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(updateConnection).to.have.been.calledOnce);
+    expect(updateConnection.firstCall.args.slice(0, 4)).to.deep.equal([
+      projectId,
+      connectionId,
+      azureConfigured.revision,
+      {
+        provider: "azure",
+        baseUrl: azureBaseUrl,
+        requestStyle: "v1",
+        deployments: [azureDeployment],
+        label: azureConfigured.label,
+        contextLengthOverride: null,
+      },
+    ]);
+  });
+
   it("communicates API key requiredness through field state without changing the label", async function () {
     renderDetails();
     await waitUntilLoaded();
@@ -571,7 +1024,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(apiKeyInput.required).to.equal(false);
     expect(apiKeyInput.getAttribute("aria-required")).to.equal("false");
 
-    for (const provider of ["gemini", "claude"]) {
+    for (const provider of ["gemini", "claude", "azure"]) {
       fireEvent.change(providerSelect(), { target: { value: provider } });
       expect(input("API key").required).to.equal(true);
       expect(input("API key").getAttribute("aria-required")).to.equal("true");
@@ -630,6 +1083,7 @@ describe("AI reviewer: provider configuration", function () {
       });
       await waitUntilLoaded();
 
+      editConnection(native.response);
       expect(providerSelect().value).to.equal(native.configuration.provider);
       expect(screen.queryByLabelText("Base URL")).not.to.exist;
       const apiKeyInput = input("API key");
@@ -668,8 +1122,8 @@ describe("AI reviewer: provider configuration", function () {
       });
       await waitUntilLoaded();
 
-      expect(button("Test connection").disabled).to.equal(false);
-      fireEvent.click(button("Test connection"));
+      expect(testConnectionButton(native.response).disabled).to.equal(false);
+      fireEvent.click(testConnectionButton(native.response));
 
       await waitFor(() => expect(testConnection).to.have.been.calledOnce);
       expect(testConnection.firstCall.args).to.have.length(3);
@@ -678,21 +1132,38 @@ describe("AI reviewer: provider configuration", function () {
     });
   }
 
-  it("does not reuse a credential after switching providers", async function () {
-    renderDetails({
-      getConfiguration: sinon.stub().resolves(otherConfigured),
+  it("keeps a selected saved connection untouched when a provider switch is attempted", async function () {
+    const updateConnection = sinon.stub().resolves(geminiConfigured);
+    const createConnection = sinon.stub().resolves(geminiConfigured);
+    renderConnections({
+      listConnections: sinon
+        .stub()
+        .resolves({ connections: [azureConfigured] }),
+      updateConnection,
+      createConnection,
     });
     await waitUntilLoaded();
 
+    editConnection(azureConfigured);
+    expect(providerSelect().value).to.equal("azure");
+    expect(providerSelect().disabled).to.equal(true);
+    expect(input("Azure OpenAI resource name or endpoint").value).to.equal(
+      azureBaseUrl,
+    );
     expect(screen.getByText("API key set")).to.exist;
     fireEvent.change(providerSelect(), { target: { value: "gemini" } });
+    fireEvent.submit(
+      document.querySelector(".ai-reviewer-provider-settings-form")!,
+    );
 
-    expect(screen.queryByLabelText("Base URL")).not.to.exist;
-    const apiKeyInput = input("API key");
-    expect(apiKeyInput.value).to.equal("");
-    expect(apiKeyInput.required).to.equal(true);
-    expect(apiKeyInput.getAttribute("aria-required")).to.equal("true");
-    expect(button("Save").disabled).to.equal(true);
+    expect(providerSelect().value).to.equal("azure");
+    expect(input("Azure OpenAI resource name or endpoint").value).to.equal(
+      azureBaseUrl,
+    );
+    expect(input("API key").value).to.equal("");
+    expect(updateConnection).not.to.have.been.called;
+    expect(createConnection).not.to.have.been.called;
+    expect(connectionRows()).to.have.length(1);
   });
 
   it("shows only remote credential metadata and never renders a returned secret", async function () {
@@ -708,15 +1179,18 @@ describe("AI reviewer: provider configuration", function () {
     });
 
     await waitUntilLoaded();
+    editConnection(otherConfigured);
     const credentialInput = input("API key");
     expect(credentialInput.type).to.equal("password");
     expect(credentialInput.value).to.equal("");
     expect(credentialInput.autocomplete).to.equal("new-password");
     expect(credentialInput.required).to.equal(false);
     expect(credentialInput.getAttribute("aria-required")).to.equal("false");
-    expect(screen.getByText("Remote endpoint")).to.exist;
+    expect(screen.getByText("OpenAI-compatible")).to.exist;
     expect(screen.getByText("API key set")).to.exist;
-    expect(screen.getByText(`Last updated: ${credentialUpdatedAt}`)).to.exist;
+    expect(credentialUpdateTime(credentialUpdatedAt).dateTime).to.equal(
+      credentialUpdatedAt,
+    );
     expect(document.body.textContent).not.to.include(credential);
   });
 
@@ -734,15 +1208,21 @@ describe("AI reviewer: provider configuration", function () {
     });
 
     await waitUntilLoaded();
+    editConnection(geminiConfigured);
     expect(providerSelect().value).to.equal("gemini");
     expect(screen.queryByLabelText("Base URL")).not.to.exist;
     const apiKeyInput = input("API key");
     expect(apiKeyInput.value).to.equal("");
     expect(apiKeyInput.required).to.equal(false);
     expect(apiKeyInput.getAttribute("aria-required")).to.equal("false");
-    expect(screen.getByText("Remote endpoint")).to.exist;
+    expect(
+      connectionRows()[0].querySelector(".ai-reviewer-connection-provider")
+        ?.textContent,
+    ).to.equal("Google Gemini");
     expect(screen.getByText("API key set")).to.exist;
-    expect(screen.getByText(`Last updated: ${credentialUpdatedAt}`)).to.exist;
+    expect(credentialUpdateTime(credentialUpdatedAt).dateTime).to.equal(
+      credentialUpdatedAt,
+    );
     expect(document.body.textContent).not.to.include(credential);
     expect(document.body.textContent).not.to.include(
       "must-not-be-rendered.example",
@@ -764,11 +1244,12 @@ describe("AI reviewer: provider configuration", function () {
     });
     await waitUntilLoaded();
 
+    editConnection(otherConfigured);
     fireEvent.change(input("API key"), {
       target: { value: credential },
     });
     expect(button("Save").disabled).to.equal(false);
-    expect(button("Test connection").disabled).to.equal(true);
+    expect(testConnectionButton(otherConfigured).disabled).to.equal(true);
     fireEvent.click(button("Save"));
 
     await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
@@ -779,10 +1260,14 @@ describe("AI reviewer: provider configuration", function () {
         credential,
       },
     ]);
-    await waitFor(() => expect(input("API key").value).to.equal(""));
-    expect(button("Test connection").disabled).to.equal(false);
-    expect(screen.getByText(`Last updated: ${replacementCredentialUpdatedAt}`))
-      .to.exist;
+    await waitFor(() =>
+      expect(testConnectionButton(replacementResponse).disabled).to.equal(
+        false,
+      ),
+    );
+    expect(
+      credentialUpdateTime(replacementCredentialUpdatedAt).dateTime,
+    ).to.equal(replacementCredentialUpdatedAt);
   });
 
   it("keeps the optional context override in a closed advanced area and validates it", async function () {
@@ -833,6 +1318,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     await waitUntilLoaded();
 
+    editConnection(overridden);
     const advanced = screen.getByText("Advanced settings").closest("details");
     expect(advanced?.open).to.equal(false);
     fireEvent.click(screen.getByText("Advanced settings"));
@@ -857,21 +1343,21 @@ describe("AI reviewer: provider configuration", function () {
       saveConfiguration,
     });
     await waitUntilLoaded();
-    expect(button("Test connection").disabled).to.equal(false);
+    expect(testConnectionButton(configured).disabled).to.equal(false);
 
+    editConnection(configured);
     fireEvent.change(input("Base URL"), {
       target: { value: otherConfiguration.baseUrl },
     });
-    expect(button("Test connection").disabled).to.equal(true);
+    expect(testConnectionButton(configured).disabled).to.equal(true);
     fireEvent.click(button("Save"));
-    expect(button("Test connection").disabled).to.equal(true);
+    expect(testConnectionButton(configured).disabled).to.equal(true);
 
     pendingSave.resolve(otherConfigured);
     await waitFor(() =>
-      expect(button("Test connection").disabled).to.equal(false),
+      expect(testConnectionButton(otherConfigured).disabled).to.equal(false),
     );
-    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
-    expect(screen.getByText("Remote endpoint")).to.exist;
+    expect(screen.getByText("OpenAI-compatible")).to.exist;
   });
 
   it("aborts and ignores a stale load after the project changes", async function () {
@@ -891,12 +1377,12 @@ describe("AI reviewer: provider configuration", function () {
     );
 
     await waitFor(() => expect(oldSignal.aborted).to.equal(true));
-    await waitFor(() =>
-      expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl),
-    );
+    await waitFor(() => expect(connectionRows()).to.have.length(1));
+    editConnection(otherConfigured);
+    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
     await act(async () => firstLoad.resolve(configured));
     expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
-    expect(screen.getByText("Remote endpoint")).to.exist;
+    expect(screen.getByText("OpenAI-compatible")).to.exist;
   });
 
   it("aborts the active request when the view unmounts", async function () {
@@ -911,7 +1397,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(signal.aborted).to.equal(true);
   });
 
-  it("lists every registered connection by name and edits the one it is asked for", async function () {
+  it("shows connection metadata without a form and edits only from the row action", async function () {
     const listConnections = sinon
       .stub()
       .resolves({ connections: [otherConfigured, claudeConfigured] });
@@ -919,24 +1405,74 @@ describe("AI reviewer: provider configuration", function () {
     await waitUntilLoaded();
 
     expect(connectionRows()).to.have.length(2);
+    expect(within(connectionRows()[0]).getByText(otherConfigured.label)).to
+      .exist;
+    expect(within(connectionRows()[0]).getByText("OpenAI-compatible")).to.exist;
+    expect(within(connectionRows()[0]).getByText("API key set")).to.exist;
     expect(
-      connectionRows().map(
-        (row) => within(row).getAllByRole("button")[0].textContent,
-      ),
-    ).to.deep.equal([otherConfigured.label, claudeConfigured.label]);
-    // The first connection opens, because none is more default than another.
-    expect(providerSelect().value).to.equal("openai-compatible");
-    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+      within(connectionRows()[0]).getByTitle(credentialUpdatedAt).textContent,
+    ).not.to.equal(`Last updated: ${credentialUpdatedAt}`);
+    expect(
+      connectionRows()[1].querySelector(".ai-reviewer-connection-name-cell")
+        ?.textContent,
+    ).to.include("Anthropic Claude");
+    expect(
+      document.querySelector(".ai-reviewer-provider-settings-form"),
+    ).to.equal(null);
 
-    fireEvent.click(
-      within(connectionRows()[1]).getByRole("button", {
-        name: claudeConfigured.label,
-      }),
-    );
-
-    expect(providerSelect().value).to.equal("claude");
+    editConnection(claudeConfigured);
+    expect(providerSelect().disabled).to.equal(true);
+    expect(input("Display name").disabled).to.equal(false);
     expect(input("Display name").value).to.equal(claudeConfigured.label);
+    expect(
+      screen.getByRole("heading", {
+        name: `Edit connection: ${claudeConfigured.label}`,
+      }),
+    ).to.exist;
     expect(document.body.textContent).not.to.include(credential);
+  });
+
+  it("uses named icon actions and a danger treatment before the Skills section", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured] });
+    renderConnections({ listConnections });
+    await waitUntilLoaded();
+
+    const row = connectionRows()[0];
+    expect(within(row).getByText(otherConfigured.label)).to.exist;
+    expect(testConnectionButton(otherConfigured)).to.exist;
+    const edit = button(`Edit ${otherConfigured.label}`);
+    const remove = deleteConnectionButton(otherConfigured);
+    expect(edit.classList.contains("btn-secondary")).to.equal(true);
+    expect(remove.classList.contains("btn-danger")).to.equal(true);
+
+    const skillsHeading = screen.getByRole("heading", { name: "Skills" });
+    expect(
+      row.compareDocumentPosition(skillsHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).to.equal(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("hides the form until Add is chosen and confirms a dirty Cancel", async function () {
+    renderConnections();
+    await waitUntilLoaded({ openEmptyForm: false });
+
+    expect(screen.getByText("0 of 10 connections")).to.exist;
+    expect(screen.queryByLabelText("Provider")).not.to.exist;
+    fireEvent.click(button("Add connection"));
+    expect(screen.getByRole("heading", { name: "Add connection" })).to.exist;
+    fireEvent.change(input("Display name"), {
+      target: { value: "Unsaved connection" },
+    });
+    fireEvent.click(button("Cancel"));
+
+    expect(screen.getByText("Discard unsaved changes?")).to.exist;
+    expect(screen.getByLabelText("Provider")).to.exist;
+    fireEvent.click(button("Discard changes"));
+    await waitFor(
+      () => expect(screen.queryByLabelText("Provider")).not.to.exist,
+    );
   });
 
   it("adds a second connection without disturbing the first", async function () {
@@ -965,7 +1501,43 @@ describe("AI reviewer: provider configuration", function () {
     expect(document.body.textContent).not.to.include(credential);
   });
 
-  it("updates the selected connection through its own identifier", async function () {
+  it("confirms before discarding edits when switching rows or closing", async function () {
+    const onHide = sinon.stub();
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured, claudeConfigured] });
+    renderConnections({ onHide, listConnections });
+    await waitUntilLoaded();
+
+    editConnection(otherConfigured);
+    fireEvent.change(input("Display name"), {
+      target: { value: "Unsaved first connection" },
+    });
+    editConnection(claudeConfigured);
+
+    expect(screen.getByText("Discard unsaved changes?")).to.exist;
+    expect(providerSelect().value).to.equal("openai-compatible");
+    fireEvent.click(button("Discard changes"));
+    await waitFor(
+      () => expect(screen.queryByText("Discard unsaved changes?")).not.to.exist,
+    );
+    expect(providerSelect().value).to.equal("claude");
+    expect(input("Display name").disabled).to.equal(false);
+
+    fireEvent.change(input("Display name"), {
+      target: { value: "Unsaved second connection" },
+    });
+    fireEvent.click(closeSettingsButton());
+    expect(onHide).not.to.have.been.called;
+    expect(screen.getByText("Discard unsaved changes?")).to.exist;
+    fireEvent.click(button("Discard changes"));
+    await waitFor(
+      () => expect(screen.queryByText("Discard unsaved changes?")).not.to.exist,
+    );
+    expect(onHide).to.have.been.calledOnce;
+  });
+
+  it("updates a connection only after its explicit edit action", async function () {
     const listConnections = sinon
       .stub()
       .resolves({ connections: [claudeConfigured, otherConfigured] });
@@ -973,15 +1545,18 @@ describe("AI reviewer: provider configuration", function () {
     renderConnections({ listConnections, updateConnection });
     await waitUntilLoaded();
 
+    expect(screen.queryByLabelText("Display name")).not.to.exist;
+    editConnection(claudeConfigured);
     fireEvent.change(input("Display name"), {
       target: { value: "Renamed connection" },
     });
     fireEvent.click(button("Save"));
 
     await waitFor(() => expect(updateConnection).to.have.been.calledOnce);
-    expect(updateConnection.firstCall.args.slice(0, 3)).to.deep.equal([
+    expect(updateConnection.firstCall.args.slice(0, 4)).to.deep.equal([
       projectId,
       secondConnectionId,
+      claudeConfigured.revision,
       {
         ...claudeConfigurationWrite,
         label: "Renamed connection",
@@ -989,58 +1564,65 @@ describe("AI reviewer: provider configuration", function () {
     ]);
   });
 
-  it("deletes a connection and falls back to the one that is left", async function () {
+  it("confirms deletion with the number of projects using the connection", async function () {
+    const usedClaudeConnection = {
+      ...claudeConfigured,
+      projectUseCount: 3,
+    };
     const listConnections = sinon
       .stub()
-      .resolves({ connections: [claudeConfigured, otherConfigured] });
+      .resolves({ connections: [usedClaudeConnection, otherConfigured] });
     const deleteConnection = sinon
       .stub()
       .resolves({ connections: [otherConfigured] });
     renderConnections({ listConnections, deleteConnection });
     await waitUntilLoaded();
-    expect(providerSelect().value).to.equal("claude");
 
-    fireEvent.click(
-      within(connectionRows()[0]).getByRole("button", {
-        name: "Delete connection",
-      }),
-    );
+    fireEvent.click(deleteConnectionButton(usedClaudeConnection));
+
+    expect(deleteConnection).not.to.have.been.called;
+    expect(
+      screen.getByText(
+        "This permanently deletes this connection and its saved API key. Projects currently selecting it: 3. Those projects will require a new connection selection before review.",
+      ),
+    ).to.exist;
+    fireEvent.click(button("Delete"));
 
     await waitFor(() => expect(deleteConnection).to.have.been.calledOnce);
-    expect(deleteConnection.firstCall.args.slice(0, 2)).to.deep.equal([
+    expect(deleteConnection.firstCall.args.slice(0, 3)).to.deep.equal([
       projectId,
       secondConnectionId,
+      usedClaudeConnection.revision,
     ]);
     await waitFor(() => expect(connectionRows()).to.have.length(1));
-    expect(providerSelect().value).to.equal("openai-compatible");
-    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+    expect(within(connectionRows()[0]).getByText(otherConfigured.label)).to
+      .exist;
+    expect(screen.queryByLabelText("Provider")).not.to.exist;
   });
 
-  it("reports a rejected eleventh connection without losing the draft", async function () {
+  it("disables the add control when ten connections already exist", async function () {
+    const tenConnections = Array.from({ length: 10 }, (_, index) => ({
+      ...otherConfigured,
+      id: `connection-${index}`,
+      label: `Connection ${index}`,
+    }));
     const listConnections = sinon
       .stub()
-      .resolves({ connections: [otherConfigured] });
-    const createConnection = sinon
-      .stub()
-      .rejects(
-        new AiProviderConfigurationClientError(
-          "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
-        ),
-      );
+      .resolves({ connections: tenConnections });
+    const createConnection = sinon.stub();
     renderConnections({ listConnections, createConnection });
     await waitUntilLoaded();
 
-    fireEvent.click(button("Add connection"));
-    fireEvent.change(providerSelect(), { target: { value: "claude" } });
-    fireEvent.change(input("Display name"), { target: { value: "Eleventh" } });
-    fireEvent.change(input("API key"), { target: { value: credential } });
-    fireEvent.click(button("Save"));
-
-    await screen.findByText(
-      "No more connections can be added. Delete one first.",
+    expect(button("Add connection").disabled).to.equal(true);
+    expect(button("Add connection").getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-connection-limit-help",
     );
-    expect(input("Display name").value).to.equal("Eleventh");
-    expect(connectionRows()).to.have.length(1);
+    expect(
+      screen.getByText("No more connections can be added. Delete one first."),
+    ).to.exist;
+    fireEvent.click(button("Add connection"));
+    expect(createConnection).not.to.have.been.called;
+    expect(connectionRows()).to.have.length(10);
   });
 
   it("shows a bounded non-2xx error without exposing the raw payload", async function () {
@@ -1062,12 +1644,86 @@ describe("AI reviewer: provider configuration", function () {
       </ProjectProvider>,
     );
     await waitUntilLoaded();
-    fireEvent.click(button("Test connection"));
+    fireEvent.click(testConnectionButton(configured));
 
     await screen.findByText(
       "The AI provider could not be reached. Check the provider settings and network connection, then try again.",
     );
     expect(document.body.textContent).not.to.include(rawPayload);
+  });
+
+  it("surfaces an invalid configuration response as field guidance", async function () {
+    fetchMock.get(`/project/${projectId}/ai-reviewer/connections`, {
+      connections: [],
+    });
+    fetchMock.post(`/project/${projectId}/ai-reviewer/connections`, {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+      body: {
+        error: {
+          code: "AI_PROVIDER_CONFIGURATION_INVALID",
+          category: "configuration",
+          message: rawPayload,
+          retryable: false,
+        },
+      },
+    });
+    render(
+      <ProjectProvider>
+        <AiIntegrationDetails onHide={sinon.stub()} />
+      </ProjectProvider>,
+    );
+    await waitUntilLoaded();
+    fireEvent.change(input("Base URL"), {
+      target: { value: configuration.baseUrl },
+    });
+    fireEvent.click(button("Save"));
+
+    await screen.findByText(
+      "The connection settings are invalid. Check the request style, endpoint format, deployment names, API version when shown, and required API key.",
+    );
+    expect(document.body.textContent).not.to.include(rawPayload);
+    expect(document.body.textContent).not.to.include(
+      "Something went wrong. Check the settings and try again.",
+    );
+  });
+
+  it("tells the user when an edit was refused because the connection changed elsewhere", async function () {
+    fetchMock.get(`/project/${projectId}/ai-reviewer/connections`, {
+      connections: [configured],
+    });
+    fetchMock.put(
+      `/project/${projectId}/ai-reviewer/connections/${connectionId}`,
+      {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+        body: {
+          error: {
+            code: "AI_PROVIDER_CONNECTION_CONFLICT",
+            category: "configuration",
+            message: rawPayload,
+            retryable: false,
+          },
+        },
+      },
+    );
+    render(
+      <ProjectProvider>
+        <AiIntegrationDetails onHide={sinon.stub()} />
+      </ProjectProvider>,
+    );
+    await waitUntilLoaded();
+    editConnection(configured);
+    fireEvent.change(input("API key"), {
+      target: { value: credential },
+    });
+    fireEvent.click(button("Save"));
+
+    await screen.findByText(
+      "This connection changed elsewhere. Your change was not applied. Reload the settings and try again.",
+    );
+    expect(document.body.textContent).not.to.include(rawPayload);
+    expect(document.body.textContent).not.to.include(credential);
   });
 
   it("routes a configuration persistence failure to server-storage guidance", async function () {
@@ -1129,7 +1785,7 @@ describe("AI reviewer: provider configuration", function () {
       </ProjectProvider>,
     );
     await waitUntilLoaded();
-    fireEvent.click(button("Test connection"));
+    fireEvent.click(testConnectionButton(otherConfigured));
 
     await screen.findByText("The AI provider rejected its credentials.");
     expect(document.body.textContent).not.to.include(rawPayload);

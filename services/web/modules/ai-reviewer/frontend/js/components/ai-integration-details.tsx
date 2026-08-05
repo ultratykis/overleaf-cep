@@ -1,10 +1,14 @@
 import { useProjectContext } from "@/shared/context/project-context";
+import OLBadge from "@/shared/components/ol/ol-badge";
 import OLButton from "@/shared/components/ol/ol-button";
+import OLButtonGroup from "@/shared/components/ol/ol-button-group";
+import OLCard from "@/shared/components/ol/ol-card";
 import OLForm from "@/shared/components/ol/ol-form";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormGroup from "@/shared/components/ol/ol-form-group";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
 import OLFormSelect from "@/shared/components/ol/ol-form-select";
+import OLIconButton from "@/shared/components/ol/ol-icon-button";
 import {
   OLModal,
   OLModalBody,
@@ -13,6 +17,9 @@ import {
   OLModalTitle,
 } from "@/shared/components/ol/ol-modal";
 import OLNotification from "@/shared/components/ol/ol-notification";
+import OLTable from "@/shared/components/ol/ol-table";
+import GenericConfirmModal from "@/features/ide-react/components/modals/generic-confirm-modal";
+import { formatTimeBasedOnYear } from "@/features/utils/format-date";
 import type { TFunction } from "i18next";
 import {
   type FormEvent,
@@ -24,6 +31,10 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import {
+  deriveAiReviewerChatRequestUrl,
+  normalizeAzureOpenAiEndpoint,
+} from "../../../shared/provider-request-url.mjs";
 import "../../stylesheets/ai-reviewer.scss";
 import {
   AiProviderConfigurationClientError,
@@ -32,6 +43,7 @@ import {
   type AiProviderConfigurationClientErrorCode,
   type AiProviderConnection,
   type AiProviderConfigurationWrite,
+  type AzureOpenAiRequestStyle,
   createAiProviderConnection,
   deleteAiProviderConnection,
   getAiProviderConnections,
@@ -49,6 +61,12 @@ import {
 
 type OperationKind = "save" | "test" | "connections";
 type Operation = { generation: number; controller: AbortController };
+type ConnectionFormMode = "create" | "edit" | "idle";
+type PendingNavigation =
+  | { kind: "add" }
+  | { kind: "cancel" }
+  | { kind: "close" }
+  | { kind: "edit"; connectionId: string };
 type Notice =
   | { type: "success"; kind: "connectionSuccessful" }
   | {
@@ -59,12 +77,17 @@ type ConfigurationDraft = {
   provider: AiProviderConfiguration["provider"];
   label: string;
   baseUrl: string;
+  requestStyle: AzureOpenAiRequestStyle;
+  apiVersion: string;
+  deployments: string;
   contextLengthOverride: string;
   credential: string;
 };
 type ConfigurationField =
   | "label"
   | "baseUrl"
+  | "apiVersion"
+  | "deployments"
   | "contextLengthOverride"
   | "credential";
 
@@ -85,19 +108,37 @@ const emptyConfiguration: ConfigurationDraft = {
   provider: "openai-compatible",
   label: "",
   baseUrl: "",
+  requestStyle: "v1",
+  apiVersion: "",
+  deployments: "",
   contextLengthOverride: "",
   credential: "",
 };
 
-const fields: ConfigurationField[] = ["label", "baseUrl", "credential"];
+const fields: ConfigurationField[] = [
+  "label",
+  "baseUrl",
+  "apiVersion",
+  "deployments",
+  "credential",
+];
 
-const providers: AiProvider[] = ["openai-compatible", "gemini", "claude"];
+const providers: AiProvider[] = [
+  "openai-compatible",
+  "gemini",
+  "claude",
+  "azure",
+];
+const connectionLimit = 10;
+const azureDeploymentName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const azureApiVersion = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/u;
 
 function providerFromValue(value: string): AiProvider | null {
   switch (value) {
     case "openai-compatible":
     case "gemini":
     case "claude":
+    case "azure":
       return value;
     default:
       return null;
@@ -129,6 +170,17 @@ function copyPublicConfiguration(
         provider: configuration.provider,
         ...common,
       };
+    case "azure":
+      return {
+        provider: configuration.provider,
+        baseUrl: configuration.baseUrl,
+        requestStyle: configuration.requestStyle,
+        ...(configuration.apiVersion === undefined
+          ? {}
+          : { apiVersion: configuration.apiVersion }),
+        deployments: [...configuration.deployments],
+        ...common,
+      };
   }
 }
 
@@ -137,8 +189,12 @@ function copyPublicConnection(
 ): AiProviderConnection {
   return {
     id: connection.id,
+    revision: connection.revision,
     label: connection.label,
     classification: connection.classification,
+    ...(connection.projectUseCount == null
+      ? {}
+      : { projectUseCount: connection.projectUseCount }),
     config: copyPublicConfiguration(connection.config),
   };
 }
@@ -163,18 +219,36 @@ function draftFromConnection(
       return {
         provider: connection.config.provider,
         baseUrl: connection.config.baseUrl,
+        requestStyle: "v1",
+        apiVersion: "",
+        deployments: "",
         ...common,
       };
     case "gemini":
       return {
         provider: connection.config.provider,
         baseUrl: "",
+        requestStyle: "v1",
+        apiVersion: "",
+        deployments: "",
         ...common,
       };
     case "claude":
       return {
         provider: connection.config.provider,
         baseUrl: "",
+        requestStyle: "v1",
+        apiVersion: "",
+        deployments: "",
+        ...common,
+      };
+    case "azure":
+      return {
+        provider: connection.config.provider,
+        baseUrl: connection.config.baseUrl,
+        requestStyle: connection.config.requestStyle,
+        apiVersion: connection.config.apiVersion ?? "",
+        deployments: connection.config.deployments.join("\n"),
         ...common,
       };
   }
@@ -188,7 +262,16 @@ function providerLabel(provider: AiProvider, t: TFunction): string {
       return t("ai_reviewer_provider_gemini");
     case "claude":
       return t("ai_reviewer_provider_claude");
+    case "azure":
+      return t("ai_reviewer_provider_azure");
   }
+}
+
+function providerTableLabel(provider: AiProvider, t: TFunction): string {
+  if (provider === "openai-compatible") {
+    return t("ai_reviewer_provider_openai_compatible_short");
+  }
+  return providerLabel(provider, t);
 }
 
 function fieldLabel(field: ConfigurationField, t: TFunction): string {
@@ -197,10 +280,93 @@ function fieldLabel(field: ConfigurationField, t: TFunction): string {
       return t("ai_reviewer_provider_label");
     case "baseUrl":
       return t("ai_reviewer_provider_base_url");
+    case "apiVersion":
+      return t("ai_reviewer_provider_azure_api_version");
+    case "deployments":
+      return t("ai_reviewer_provider_azure_deployments");
     case "contextLengthOverride":
       return t("ai_reviewer_provider_context_length_override");
     case "credential":
       return t("ai_reviewer_provider_credential");
+  }
+}
+
+function deploymentNames(value: string): string[] {
+  return value
+    .split(/\r?\n/u)
+    .map((deployment) => deployment.trim())
+    .filter((deployment) => deployment.length > 0);
+}
+
+function azurePortalEndpointFields(value: string) {
+  try {
+    const endpoint = normalizeAzureOpenAiEndpoint(value);
+    return endpoint.deployment == null || endpoint.apiVersion == null
+      ? null
+      : endpoint;
+  } catch {
+    return null;
+  }
+}
+
+function validDeploymentNames(deployments: string[]): boolean {
+  return (
+    deployments.length > 0 &&
+    deployments.length <= 100 &&
+    new Set(deployments).size === deployments.length &&
+    deployments.every((deployment) => azureDeploymentName.test(deployment))
+  );
+}
+
+function requestUrlsForDraft(
+  draft: ConfigurationDraft,
+  parsedDeployments: string[],
+  openAiBaseUrlHasCompletionPath: boolean,
+): string[] | null {
+  try {
+    if (draft.provider === "openai-compatible") {
+      if (openAiBaseUrlHasCompletionPath) return null;
+      return [
+        deriveAiReviewerChatRequestUrl({
+          provider: draft.provider,
+          baseUrl: draft.baseUrl,
+        }),
+      ];
+    }
+    if (
+      draft.provider !== "azure" ||
+      !validDeploymentNames(parsedDeployments)
+    ) {
+      return null;
+    }
+
+    const endpoint = normalizeAzureOpenAiEndpoint(draft.baseUrl);
+    const deployments =
+      endpoint.deployment == null
+        ? parsedDeployments
+        : [
+            endpoint.deployment,
+            ...parsedDeployments.filter(
+              (deployment) => deployment !== endpoint.deployment,
+            ),
+          ];
+    if (!validDeploymentNames(deployments)) return null;
+
+    const requestDeployments =
+      draft.requestStyle === "deployment"
+        ? deployments
+        : deployments.slice(0, 1);
+    return requestDeployments.map((model) =>
+      deriveAiReviewerChatRequestUrl({
+        provider: draft.provider,
+        baseUrl: draft.baseUrl,
+        requestStyle: draft.requestStyle,
+        apiVersion: draft.apiVersion,
+        model,
+      }),
+    );
+  } catch {
+    return null;
   }
 }
 
@@ -224,8 +390,12 @@ function noticeContent(notice: Notice, t: TFunction): string {
   switch (notice.kind) {
     case "AI_PROVIDER_AUTHENTICATION_ERROR":
       return t("ai_reviewer_error_provider_credentials_rejected");
+    case "AI_PROVIDER_CONFIGURATION_INVALID":
+      return t("ai_reviewer_provider_configuration_invalid");
     case "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED":
       return t("ai_reviewer_provider_configuration_persistence_failed");
+    case "AI_PROVIDER_CONNECTION_CONFLICT":
+      return t("ai_reviewer_provider_connection_conflict");
     case "AI_PROVIDER_CONNECTION_LIMIT_REACHED":
       return t("ai_reviewer_connection_limit_reached");
     case "AI_PROVIDER_CONNECTION_NOT_FOUND":
@@ -265,10 +435,13 @@ export function AiIntegrationDetailsView({
   const [connections, setConnections] = useState<
     AiProviderConnection[] | undefined
   >();
-  // A null selection is the draft for a connection that does not exist yet,
-  // which is also what a user with no connection at all starts from.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [formMode, setFormMode] = useState<ConnectionFormMode>("idle");
   const [draft, setDraft] = useState({ ...emptyConfiguration });
+  const [pendingNavigation, setPendingNavigation] =
+    useState<PendingNavigation | null>(null);
+  const [pendingDeletion, setPendingDeletion] =
+    useState<AiProviderConnection | null>(null);
   const [busy, setBusy] = useState<OperationKind | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [skills, setSkills] = useState<AiReviewerSkill[] | undefined>();
@@ -308,41 +481,30 @@ export function AiIntegrationDetailsView({
     return true;
   }, []);
 
-  /**
-   * Adopt a server listing wholesale. `nextId` names the connection the form
-   * should edit afterwards; an unknown one falls back to the new-connection
-   * draft, which is what deleting the edited connection has to do.
-   */
-  const applyConnections = useCallback(
-    (list: AiProviderConnection[], nextId: string | null) => {
-      const copied = list.map(copyPublicConnection);
-      const selected = copied.find((entry) => entry.id === nextId) ?? null;
-      setConnections(copied);
-      setSelectedId(selected?.id ?? null);
-      setDraft(
-        selected ? draftFromConnection(selected) : { ...emptyConfiguration },
-      );
-      setBusy(null);
-      setNotice(null);
-    },
-    [],
-  );
+  const applyConnections = useCallback((list: AiProviderConnection[]) => {
+    setConnections(list.map(copyPublicConnection));
+    setSelectedId(null);
+    setFormMode("idle");
+    setDraft({ ...emptyConfiguration });
+    setBusy(null);
+    setNotice(null);
+  }, []);
 
   useEffect(() => {
     const operation = begin();
     setConnections(undefined);
     setSelectedId(null);
+    setFormMode("idle");
     setDraft({ ...emptyConfiguration });
+    setPendingNavigation(null);
+    setPendingDeletion(null);
     setBusy(null);
     setNotice(null);
 
     void listConnections(projectId, operation.controller.signal).then(
       (response) => {
         if (!complete(operation)) return;
-        applyConnections(
-          response.connections,
-          response.connections[0]?.id ?? null,
-        );
+        applyConnections(response.connections);
       },
       (error) => {
         if (complete(operation)) {
@@ -390,8 +552,8 @@ export function AiIntegrationDetailsView({
     connections?.find((entry) => entry.id === selectedId) ?? null;
   const saved =
     connections === undefined ? undefined : (selected?.config ?? null);
-  const classification = selected?.classification ?? null;
-  const dirty =
+  const parsedDeployments = deploymentNames(draft.deployments);
+  const editedDraftDirty =
     saved?.provider !== draft.provider ||
     (selected?.label ?? "") !== draft.label ||
     (saved?.contextLengthOverride == null
@@ -400,7 +562,21 @@ export function AiIntegrationDetailsView({
     (draft.provider === "openai-compatible" &&
       (saved?.provider !== "openai-compatible" ||
         saved.baseUrl !== draft.baseUrl)) ||
+    (draft.provider === "azure" &&
+      (saved?.provider !== "azure" ||
+        saved.baseUrl !== draft.baseUrl ||
+        saved.requestStyle !== draft.requestStyle ||
+        (draft.requestStyle === "deployment" &&
+          (saved.apiVersion ?? "") !== draft.apiVersion) ||
+        saved.deployments.join("\n") !== parsedDeployments.join("\n"))) ||
     draft.credential !== "";
+  const newDraftDirty =
+    draft.provider !== emptyConfiguration.provider ||
+    fields.some((field) => draft[field] !== "") ||
+    draft.contextLengthOverride !== "";
+  const dirty =
+    (formMode === "edit" && editedDraftDirty) ||
+    (formMode === "create" && newDraftDirty);
   const overrideText = draft.contextLengthOverride.trim();
   const parsedContextLengthOverride =
     overrideText === "" ? null : Number(overrideText);
@@ -415,21 +591,75 @@ export function AiIntegrationDetailsView({
   const credentialRequired =
     draft.provider !== "openai-compatible" &&
     !(saved?.provider === draft.provider && saved.credentialSet);
+  const validAzureDeployments = validDeploymentNames(parsedDeployments);
+  const openAiBaseUrlHasCompletionPath =
+    draft.provider === "openai-compatible" &&
+    /\/chat\/completions\/?$/u.test(draft.baseUrl.trim());
+  const requestUrls = requestUrlsForDraft(
+    draft,
+    parsedDeployments,
+    openAiBaseUrlHasCompletionPath,
+  );
   const valid =
-    (draft.provider !== "openai-compatible" || draft.baseUrl.trim() !== "") &&
+    ((draft.provider !== "openai-compatible" && draft.provider !== "azure") ||
+      draft.baseUrl.trim() !== "") &&
+    (draft.provider !== "azure" ||
+      (validAzureDeployments &&
+        (draft.requestStyle === "v1" ||
+          draft.apiVersion === "" ||
+          azureApiVersion.test(draft.apiVersion)))) &&
+    !openAiBaseUrlHasCompletionPath &&
     validContextLengthOverride &&
     credentialAvailable;
-  const canSave = saved !== undefined && busy === null && dirty && valid;
-  const canTest =
-    saved != null && busy === null && !dirty && credentialAvailable;
+  const formEditable = formMode === "create" || formMode === "edit";
+  const canSave =
+    saved !== undefined && formEditable && busy === null && dirty && valid;
+  const connectionLimitReached = (connections?.length ?? 0) >= connectionLimit;
   const updateDraft = (field: ConfigurationField, value: string) => {
+    if (!formEditable) return;
     if (busy) cancel();
-    setDraft((current) => ({ ...current, [field]: value }));
+    setDraft((current) => {
+      if (field === "baseUrl" && current.provider === "azure") {
+        const portal = azurePortalEndpointFields(value);
+        if (portal != null) {
+          return {
+            ...current,
+            baseUrl: value,
+            deployments: portal.deployment,
+            ...(current.requestStyle === "deployment"
+              ? { apiVersion: portal.apiVersion }
+              : {}),
+          };
+        }
+      }
+      return { ...current, [field]: value };
+    });
+    setBusy(null);
+    setNotice(null);
+  };
+
+  const updateAzureRequestStyle = (value: string) => {
+    if (!formEditable || (value !== "v1" && value !== "deployment")) {
+      return;
+    }
+    if (busy) cancel();
+    setDraft((current) => ({
+      ...current,
+      requestStyle: value,
+      ...(value === "v1"
+        ? { apiVersion: "" }
+        : {
+            apiVersion:
+              azurePortalEndpointFields(current.baseUrl)?.apiVersion ??
+              current.apiVersion,
+          }),
+    }));
     setBusy(null);
     setNotice(null);
   };
 
   const updateProvider = (value: string) => {
+    if (formMode !== "create") return;
     const provider = providerFromValue(value);
     if (provider == null) return;
     if (busy) cancel();
@@ -495,12 +725,34 @@ export function AiIntegrationDetailsView({
           ...credential,
         };
         break;
+      case "azure":
+        requested = {
+          provider: draft.provider,
+          baseUrl: draft.baseUrl,
+          requestStyle: draft.requestStyle,
+          ...(draft.requestStyle === "deployment" && draft.apiVersion !== ""
+            ? { apiVersion: draft.apiVersion }
+            : {}),
+          deployments: parsedDeployments,
+          label,
+          contextLengthOverride: parsedContextLengthOverride,
+          ...credential,
+        };
+        break;
     }
     const editedId = selectedId;
+    const editedRevision = selected?.revision;
+    if (editedId != null && editedRevision == null) return;
     void run("save", (signal) =>
       editedId == null
         ? createConnection(projectId, requested, signal)
-        : updateConnection(projectId, editedId, requested, signal),
+        : updateConnection(
+            projectId,
+            editedId,
+            editedRevision as number,
+            requested,
+            signal,
+          ),
     ).then((connection) => {
       if (!connection) return;
       if (connection.config == null) {
@@ -508,23 +760,34 @@ export function AiIntegrationDetailsView({
         setNotice(genericErrorNotice());
         return;
       }
-      // A write returns only the written connection, so splice it into the
-      // listing instead of paying for another round trip.
+      // A write returns only the written connection, so retain the usage count
+      // from the listing while splicing it into place.
+      const connectionWithUsage = {
+        ...connection,
+        projectUseCount:
+          connection.projectUseCount ??
+          (editedId == null ? 0 : selected?.projectUseCount),
+      };
       applyConnections(
         editedId == null
-          ? [...(connections ?? []), connection]
+          ? [...(connections ?? []), connectionWithUsage]
           : (connections ?? []).map((entry) =>
-              entry.id === connection.id ? connection : entry,
+              entry.id === connection.id ? connectionWithUsage : entry,
             ),
-        connection.id,
       );
     });
   };
 
-  const handleTest = () => {
-    if (!canTest) return;
+  const canTestConnection = (connection: AiProviderConnection) =>
+    !formEditable &&
+    busy === null &&
+    (connection.config.provider === "openai-compatible" ||
+      connection.config.credentialSet);
+
+  const handleTest = (connection: AiProviderConnection) => {
+    if (!canTestConnection(connection)) return;
     void run("test", (signal) =>
-      testConnection(projectId, selectedId, signal),
+      testConnection(projectId, connection.id, signal),
     ).then((response) => {
       if (!response) return;
       setBusy(null);
@@ -535,36 +798,74 @@ export function AiIntegrationDetailsView({
     });
   };
 
-  const handleAdd = () => {
-    if (busy) cancel();
-    setSelectedId(null);
-    setDraft({ ...emptyConfiguration });
-    setBusy(null);
-    setNotice(null);
-  };
-
-  const handleSelect = (connection: AiProviderConnection) => {
-    if (connection.id === selectedId) return;
+  const performNavigation = (navigation: PendingNavigation) => {
+    if (navigation.kind === "close") {
+      cancel();
+      skillOperationRef.current?.abort();
+      skillOperationRef.current = null;
+      onHide();
+      return;
+    }
+    if (navigation.kind === "cancel") {
+      if (busy) cancel();
+      setSelectedId(null);
+      setFormMode("idle");
+      setDraft({ ...emptyConfiguration });
+      setBusy(null);
+      setNotice(null);
+      return;
+    }
+    if (navigation.kind === "add") {
+      if (connectionLimitReached) return;
+      if (busy) cancel();
+      setSelectedId(null);
+      setFormMode("create");
+      setDraft({ ...emptyConfiguration });
+      setBusy(null);
+      setNotice(null);
+      return;
+    }
+    const connection = connections?.find(
+      (entry) => entry.id === navigation.connectionId,
+    );
+    if (connection == null) return;
     if (busy) cancel();
     setSelectedId(connection.id);
+    setFormMode("edit");
     setDraft(draftFromConnection(connection));
     setBusy(null);
     setNotice(null);
   };
 
+  const requestNavigation = (navigation: PendingNavigation) => {
+    if (
+      navigation.kind === "edit" &&
+      navigation.connectionId === selectedId &&
+      formMode === "edit"
+    ) {
+      return;
+    }
+    if (dirty) {
+      setPendingNavigation(navigation);
+      return;
+    }
+    performNavigation(navigation);
+  };
+
   const handleDelete = (connection: AiProviderConnection) => {
     if (busy !== null) return;
+    setPendingDeletion(connection);
+  };
+
+  const confirmDelete = () => {
+    const connection = pendingDeletion;
+    if (connection == null || busy !== null) return;
+    setPendingDeletion(null);
     void run("connections", (signal) =>
-      deleteConnection(projectId, connection.id, signal),
+      deleteConnection(projectId, connection.id, connection.revision, signal),
     ).then((response) => {
       if (!response) return;
-      // Deleting the edited connection falls back to whichever connection is
-      // left, so the form never points at something that no longer exists.
-      const nextId =
-        connection.id === selectedId
-          ? (response.connections[0]?.id ?? null)
-          : selectedId;
-      applyConnections(response.connections, nextId);
+      applyConnections(response.connections);
     });
   };
 
@@ -662,15 +963,20 @@ export function AiIntegrationDetailsView({
   };
 
   const handleHide = () => {
-    cancel();
-    skillOperationRef.current?.abort();
-    skillOperationRef.current = null;
-    onHide();
+    requestNavigation({ kind: "close" });
   };
 
-  return (
+  const providerHelp = [
+    formMode === "edit" ? "ai-reviewer-connection-form-help" : null,
+    draft.provider === "azure" ? "ai-reviewer-azure-provider-help" : null,
+  ]
+    .filter((value): value is string => value != null)
+    .join(" ");
+
+  const settingsModal = (
     <OLModal
       show
+      scrollable
       onHide={handleHide}
       dialogClassName="ai-reviewer-provider-settings"
     >
@@ -681,251 +987,556 @@ export function AiIntegrationDetailsView({
       >
         <OLModalTitle>{t("ai_reviewer_title")}</OLModalTitle>
       </OLModalHeader>
-      <OLForm
-        onSubmit={handleSave}
-        className="ai-reviewer-provider-settings-form"
-      >
-        <OLModalBody className="ai-reviewer-provider-settings-body">
-          <section
-            className="ai-reviewer-skills mb-3"
-            aria-labelledby="ai-reviewer-skills-heading"
-          >
-            <h3 id="ai-reviewer-skills-heading" className="h5 mt-0">
-              {t("ai_reviewer_skills", "Skills")}
-            </h3>
-            {skills != null && skills.length > 0 && (
-              <ul
-                className="ai-reviewer-skill-list"
-                aria-label={t("ai_reviewer_skills", "Skills")}
-              >
-                {skills.map((skill) => (
-                  <li
-                    key={skill.id}
-                    className="ai-reviewer-skill-row"
-                    data-testid="ai-reviewer-skill-row"
-                  >
-                    <div className="ai-reviewer-skill-summary">
-                      <strong>{skill.name}</strong>
-                      <p className="mb-0">{skill.description}</p>
-                    </div>
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      className="btn-inline-link ai-reviewer-skill-delete"
-                      disabled={skillBusy}
-                      aria-label={`${t("delete")} ${skill.name}`}
-                      onClick={() => handleSkillDelete(skill)}
-                    >
-                      {t("delete")}
-                    </OLButton>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <OLFormGroup
-              controlId="ai-reviewer-skill-files"
-              className="ai-reviewer-skill-upload mt-2"
-            >
-              <OLFormLabel>
-                {t(
-                  "ai_reviewer_skill_upload_label",
-                  "Upload SKILL.md and optional reference Markdown files",
-                )}
-              </OLFormLabel>
-              <OLFormControl
-                type="file"
-                accept=".md,text/markdown"
-                multiple
-                disabled={skills === undefined || skillBusy}
-                onChange={handleSkillUpload}
-              />
-            </OLFormGroup>
-            {skillNotice && (
-              <OLNotification type="error" content={skillNotice} />
-            )}
-          </section>
+      <OLModalBody className="ai-reviewer-provider-settings-body">
+        <section
+          className="ai-reviewer-connections"
+          aria-labelledby="ai-reviewer-connections-heading"
+        >
+          <h3 id="ai-reviewer-connections-heading" className="h5">
+            {t("ai_reviewer_connections")}
+          </h3>
           {connections != null && connections.length > 0 && (
-            <div className="ai-reviewer-connections mb-3">
-              <ul
-                className="ai-reviewer-connection-list"
+            <div className="ai-reviewer-connection-table-scroll">
+              <OLTable
+                container={false}
+                className="ai-reviewer-connection-table"
                 aria-label={t("ai_reviewer_connections")}
               >
-                {connections.map((connection) => (
-                  <li
-                    key={connection.id}
-                    className="ai-reviewer-connection-row"
-                    data-testid="ai-reviewer-connection-row"
-                  >
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      className="btn-inline-link ai-reviewer-connection-name"
-                      aria-pressed={connection.id === selectedId}
-                      onClick={() => handleSelect(connection)}
+                <colgroup>
+                  <col className="ai-reviewer-connection-name-column" />
+                  <col className="ai-reviewer-connection-credential-column" />
+                  <col className="ai-reviewer-connection-actions-column" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    {/* "Display name" is what the form calls the field the user
+                        types into. As a column heading it names the wrong thing:
+                        this column identifies the destination. */}
+                    <th scope="col">{t("ai_reviewer_provider")}</th>
+                    <th scope="col">{t("ai_reviewer_provider_credential")}</th>
+                    <th scope="col">
+                      <span className="visually-hidden">{t("actions")}</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {connections.map((connection) => (
+                    <tr
+                      key={connection.id}
+                      className="ai-reviewer-connection-row"
+                      data-testid="ai-reviewer-connection-row"
                     >
-                      {connection.label}
-                    </OLButton>
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      className="btn-inline-link ai-reviewer-connection-action"
-                      disabled={busy !== null}
-                      onClick={() => handleDelete(connection)}
-                    >
-                      {t("ai_reviewer_connection_delete")}
-                    </OLButton>
-                  </li>
-                ))}
-              </ul>
+                      {/* The name and its provider are one fact about one
+                          destination, so they share a column. Whether the
+                          endpoint is loopback or not still drives policy, but
+                          it means nothing to a reader: both are reached over
+                          the network. */}
+                      <th
+                        scope="row"
+                        className="ai-reviewer-connection-name-cell"
+                      >
+                        <span
+                          className="ai-reviewer-connection-name"
+                          title={connection.label}
+                        >
+                          {connection.label}
+                        </span>
+                        <span className="ai-reviewer-connection-provider">
+                          {providerTableLabel(connection.config.provider, t)}
+                        </span>
+                      </th>
+                      <td className="ai-reviewer-connection-credential-cell">
+                        <OLBadge
+                          bg={
+                            connection.config.credentialSet
+                              ? "success"
+                              : "secondary"
+                          }
+                        >
+                          {connection.config.credentialSet
+                            ? t("ai_reviewer_provider_credential_set")
+                            : t("ai_reviewer_provider_credential_not_set")}
+                        </OLBadge>
+                        {connection.config.credentialUpdatedAt && (
+                          <time
+                            dateTime={connection.config.credentialUpdatedAt}
+                            title={connection.config.credentialUpdatedAt}
+                          >
+                            {t("ai_reviewer_last_updated", {
+                              updatedAt: formatTimeBasedOnYear(
+                                connection.config.credentialUpdatedAt,
+                              ),
+                            })}
+                          </time>
+                        )}
+                      </td>
+                      <td className="ai-reviewer-connection-actions-cell">
+                        <OLButtonGroup aria-label={t("actions")}>
+                          <OLIconButton
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            icon="network_check"
+                            accessibilityLabel={t(
+                              "ai_reviewer_connection_test_named",
+                              { connection: connection.label },
+                            )}
+                            disabled={!canTestConnection(connection)}
+                            onClick={() => handleTest(connection)}
+                          />
+                          <OLIconButton
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            icon="edit"
+                            accessibilityLabel={t(
+                              "ai_reviewer_connection_edit_named",
+                              { connection: connection.label },
+                            )}
+                            disabled={busy !== null}
+                            onClick={() =>
+                              requestNavigation({
+                                kind: "edit",
+                                connectionId: connection.id,
+                              })
+                            }
+                          />
+                          <OLIconButton
+                            type="button"
+                            size="sm"
+                            variant="danger"
+                            icon="delete"
+                            accessibilityLabel={t(
+                              "ai_reviewer_connection_delete_named",
+                              { connection: connection.label },
+                            )}
+                            disabled={busy !== null}
+                            onClick={() => handleDelete(connection)}
+                          />
+                        </OLButtonGroup>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </OLTable>
+            </div>
+          )}
+          {connections != null && (
+            <div className="ai-reviewer-connection-footer">
+              <span>
+                {t("ai_reviewer_connection_count", {
+                  count: connections.length,
+                  limit: connectionLimit,
+                })}
+              </span>
               <OLButton
                 type="button"
-                variant="secondary"
-                className="ai-reviewer-connection-add mt-2"
-                disabled={busy !== null || selectedId == null}
-                onClick={handleAdd}
+                variant="link"
+                className="btn-inline-link ai-reviewer-connection-add"
+                disabled={busy !== null || connectionLimitReached}
+                aria-describedby={
+                  connectionLimitReached
+                    ? "ai-reviewer-connection-limit-help"
+                    : undefined
+                }
+                onClick={() => requestNavigation({ kind: "add" })}
               >
                 {t("ai_reviewer_connection_add")}
               </OLButton>
             </div>
           )}
-          <OLFormGroup
-            controlId="ai-reviewer-provider"
-            className="ai-reviewer-provider-settings-field"
-          >
-            <OLFormLabel>{t("ai_reviewer_provider")}</OLFormLabel>
-            <OLFormSelect
-              value={draft.provider}
-              onChange={(event) => updateProvider(event.target.value)}
-              disabled={saved === undefined}
-              className="ai-reviewer-provider-settings-control"
+          {connectionLimitReached && (
+            <p
+              id="ai-reviewer-connection-limit-help"
+              className="ai-reviewer-provider-settings-hint"
             >
-              {providers.map((provider) => (
-                <option key={provider} value={provider}>
-                  {providerLabel(provider, t)}
-                </option>
-              ))}
-            </OLFormSelect>
-          </OLFormGroup>
-          {fields
-            .filter(
-              (field) =>
-                field !== "baseUrl" || draft.provider === "openai-compatible",
-            )
-            .map((field) => (
-              <OLFormGroup
-                key={field}
-                controlId={`ai-reviewer-${field}`}
-                className="ai-reviewer-provider-settings-field mt-3"
-              >
-                <OLFormLabel>{fieldLabel(field, t)}</OLFormLabel>
-                <OLFormControl
-                  type={field === "credential" ? "password" : "text"}
-                  value={draft[field]}
-                  onChange={(event) => updateDraft(field, event.target.value)}
-                  disabled={saved === undefined}
-                  autoComplete={field === "credential" ? "new-password" : "off"}
-                  required={field === "credential" && credentialRequired}
-                  aria-required={
-                    field === "credential" ? credentialRequired : undefined
-                  }
-                  className="ai-reviewer-provider-settings-control"
-                />
-              </OLFormGroup>
-            ))}
-          <details className="ai-reviewer-provider-advanced mt-3">
-            <summary className="ai-reviewer-provider-advanced-summary">
-              {t("ai_reviewer_provider_advanced_settings")}
-            </summary>
-            <div className="ai-reviewer-provider-advanced-content mt-2">
-              <OLFormGroup
-                controlId="ai-reviewer-contextLengthOverride"
-                className="ai-reviewer-provider-settings-field"
-              >
-                <OLFormLabel>
-                  {fieldLabel("contextLengthOverride", t)}
-                </OLFormLabel>
-                <OLFormControl
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={draft.contextLengthOverride}
-                  onChange={(event) =>
-                    updateDraft("contextLengthOverride", event.target.value)
-                  }
-                  disabled={saved === undefined}
-                  autoComplete="off"
-                  aria-describedby="ai-reviewer-contextLengthOverride-help"
-                  className="ai-reviewer-provider-settings-control"
-                />
-                <p
-                  id="ai-reviewer-contextLengthOverride-help"
-                  className="ai-reviewer-provider-advanced-help mt-1 mb-0"
-                >
-                  {t("ai_reviewer_provider_context_length_override_help")}
-                </p>
-              </OLFormGroup>
-            </div>
-          </details>
-          {saved && (
-            <div className="ai-reviewer-provider-settings-details mt-3">
-              {classification && (
-                <p className="ai-reviewer-provider-endpoint mb-0">
-                  {classification === "local"
-                    ? t("ai_reviewer_provider_local")
-                    : t("ai_reviewer_provider_remote")}
-                </p>
-              )}
-              <p className="mt-1 mb-0">
-                {saved.credentialSet
-                  ? t("ai_reviewer_provider_credential_set")
-                  : t("ai_reviewer_provider_credential_not_set")}
-              </p>
-              {saved.credentialUpdatedAt && (
-                <time
-                  className="d-block mt-1"
-                  dateTime={saved.credentialUpdatedAt}
-                  title={saved.credentialUpdatedAt}
-                >
-                  {t("ai_reviewer_last_updated", {
-                    updatedAt: saved.credentialUpdatedAt,
-                  })}
-                </time>
-              )}
-            </div>
+              {t("ai_reviewer_connection_limit_reached")}
+            </p>
           )}
-          {notice && (
+          {!formEditable && notice && (
             <OLNotification
               type={notice.type}
               content={noticeContent(notice, t)}
             />
           )}
-        </OLModalBody>
-        <OLModalFooter className="ai-reviewer-provider-settings-footer">
-          {busy === null && !canTest && (saved == null || dirty) && (
-            <span
-              className="ai-reviewer-provider-settings-hint"
-              data-testid="ai-reviewer-unsaved-hint"
+        </section>
+
+        {formEditable && (
+          <OLCard className="ai-reviewer-provider-form-card">
+            <OLForm
+              onSubmit={handleSave}
+              className="ai-reviewer-provider-settings-form"
             >
-              {t(
-                "ai_reviewer_provider_save_before_checking",
-                "Save your changes before checking the connection.",
+              <h3 className="h5 ai-reviewer-provider-form-heading">
+                {formMode === "create"
+                  ? t("ai_reviewer_connection_add")
+                  : t("ai_reviewer_connection_edit_heading", {
+                      connection: selected?.label ?? "",
+                    })}
+              </h3>
+              <p
+                id="ai-reviewer-connection-form-help"
+                className="ai-reviewer-provider-settings-state"
+              >
+                {formMode === "create"
+                  ? t("ai_reviewer_connection_create_help")
+                  : t("ai_reviewer_connection_edit_help")}
+              </p>
+              <OLFormGroup
+                controlId="ai-reviewer-provider"
+                className="ai-reviewer-provider-settings-field"
+              >
+                <OLFormLabel>{t("ai_reviewer_provider")}</OLFormLabel>
+                <OLFormSelect
+                  value={draft.provider}
+                  onChange={(event) => updateProvider(event.target.value)}
+                  disabled={saved === undefined || formMode !== "create"}
+                  aria-describedby={providerHelp || undefined}
+                  className="ai-reviewer-provider-settings-control"
+                >
+                  {providers.map((provider) => (
+                    <option key={provider} value={provider}>
+                      {providerLabel(provider, t)}
+                    </option>
+                  ))}
+                </OLFormSelect>
+                {draft.provider === "azure" && (
+                  <p
+                    id="ai-reviewer-azure-provider-help"
+                    className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                  >
+                    {t("ai_reviewer_provider_azure_help")}
+                  </p>
+                )}
+              </OLFormGroup>
+              {draft.provider === "azure" && (
+                <OLFormGroup
+                  controlId="ai-reviewer-requestStyle"
+                  className="ai-reviewer-provider-settings-field mt-3"
+                >
+                  <OLFormLabel>
+                    {t("ai_reviewer_provider_azure_request_style")}
+                  </OLFormLabel>
+                  <OLFormSelect
+                    value={draft.requestStyle}
+                    onChange={(event) =>
+                      updateAzureRequestStyle(event.target.value)
+                    }
+                    disabled={saved === undefined || !formEditable}
+                    className="ai-reviewer-provider-settings-control"
+                  >
+                    <option value="v1">
+                      {t("ai_reviewer_provider_azure_request_style_v1")}
+                    </option>
+                    <option value="deployment">
+                      {t("ai_reviewer_provider_azure_request_style_deployment")}
+                    </option>
+                  </OLFormSelect>
+                </OLFormGroup>
               )}
-            </span>
+              {fields
+                .filter(
+                  (field) =>
+                    (field !== "baseUrl" ||
+                      draft.provider === "openai-compatible" ||
+                      draft.provider === "azure") &&
+                    (field !== "apiVersion" ||
+                      (draft.provider === "azure" &&
+                        draft.requestStyle === "deployment")) &&
+                    (field !== "deployments" || draft.provider === "azure"),
+                )
+                .map((field) => (
+                  <OLFormGroup
+                    key={field}
+                    controlId={`ai-reviewer-${field}`}
+                    className="ai-reviewer-provider-settings-field mt-3"
+                  >
+                    <OLFormLabel>
+                      {field === "baseUrl" && draft.provider === "azure"
+                        ? t("ai_reviewer_provider_azure_endpoint")
+                        : fieldLabel(field, t)}
+                      {field === "apiVersion" && (
+                        <>
+                          {" "}
+                          <span className="fw-normal">({t("optional")})</span>
+                        </>
+                      )}
+                    </OLFormLabel>
+                    <OLFormControl
+                      as={field === "deployments" ? "textarea" : undefined}
+                      type={field === "credential" ? "password" : "text"}
+                      value={draft[field]}
+                      onChange={(event) =>
+                        updateDraft(field, event.target.value)
+                      }
+                      disabled={saved === undefined || !formEditable}
+                      autoComplete={
+                        field === "credential" ? "new-password" : "off"
+                      }
+                      placeholder={
+                        field === "baseUrl" &&
+                        draft.provider === "openai-compatible"
+                          ? "http://127.0.0.1:11434/v1"
+                          : undefined
+                      }
+                      aria-describedby={
+                        field === "apiVersion"
+                          ? "ai-reviewer-apiVersion-help"
+                          : field === "baseUrl" &&
+                              draft.provider === "openai-compatible"
+                            ? `ai-reviewer-baseUrl-help${
+                                openAiBaseUrlHasCompletionPath
+                                  ? " ai-reviewer-baseUrl-error"
+                                  : ""
+                              }`
+                            : field === "baseUrl" && draft.provider === "azure"
+                              ? "ai-reviewer-azure-endpoint-help"
+                              : undefined
+                      }
+                      aria-invalid={
+                        field === "baseUrl" && openAiBaseUrlHasCompletionPath
+                          ? true
+                          : undefined
+                      }
+                      required={field === "credential" && credentialRequired}
+                      aria-required={
+                        field === "credential" ? credentialRequired : undefined
+                      }
+                      className="ai-reviewer-provider-settings-control"
+                    />
+                    {field === "apiVersion" && (
+                      <p
+                        id="ai-reviewer-apiVersion-help"
+                        className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                      >
+                        {t("ai_reviewer_provider_azure_api_version_help")}
+                      </p>
+                    )}
+                    {field === "baseUrl" &&
+                      draft.provider === "openai-compatible" && (
+                        <>
+                          <p
+                            id="ai-reviewer-baseUrl-help"
+                            className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                          >
+                            {t("ai_reviewer_provider_base_url_help")}
+                          </p>
+                          {openAiBaseUrlHasCompletionPath && (
+                            <p
+                              id="ai-reviewer-baseUrl-error"
+                              className="form-text text-danger mt-1 mb-0"
+                              role="alert"
+                            >
+                              {t(
+                                "ai_reviewer_provider_base_url_chat_completions_error",
+                              )}
+                            </p>
+                          )}
+                        </>
+                      )}
+                    {field === "baseUrl" && draft.provider === "azure" && (
+                      <p
+                        id="ai-reviewer-azure-endpoint-help"
+                        className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                      >
+                        {t("ai_reviewer_provider_azure_endpoint_help")}
+                      </p>
+                    )}
+                  </OLFormGroup>
+                ))}
+              {(draft.provider === "openai-compatible" ||
+                draft.provider === "azure") && (
+                <p
+                  className="ai-reviewer-provider-request-preview mt-3 mb-0"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <span>{t("ai_reviewer_provider_request_url")}</span>
+                  {requestUrls == null ? (
+                    <span className="ai-reviewer-provider-request-url">
+                      {t("ai_reviewer_provider_request_url_unavailable")}
+                    </span>
+                  ) : (
+                    requestUrls.map((requestUrl) => (
+                      <span
+                        key={requestUrl}
+                        className="ai-reviewer-provider-request-url"
+                        title={requestUrl}
+                      >
+                        {requestUrl}
+                      </span>
+                    ))
+                  )}
+                </p>
+              )}
+              <details className="ai-reviewer-provider-advanced mt-3">
+                <summary className="ai-reviewer-provider-advanced-summary">
+                  {t("ai_reviewer_provider_advanced_settings")}
+                </summary>
+                <div className="ai-reviewer-provider-advanced-content mt-2">
+                  <OLFormGroup
+                    controlId="ai-reviewer-contextLengthOverride"
+                    className="ai-reviewer-provider-settings-field"
+                  >
+                    <OLFormLabel>
+                      {fieldLabel("contextLengthOverride", t)}
+                    </OLFormLabel>
+                    <OLFormControl
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={draft.contextLengthOverride}
+                      onChange={(event) =>
+                        updateDraft("contextLengthOverride", event.target.value)
+                      }
+                      disabled={saved === undefined || !formEditable}
+                      autoComplete="off"
+                      aria-describedby="ai-reviewer-contextLengthOverride-help"
+                      className="ai-reviewer-provider-settings-control"
+                    />
+                    <p
+                      id="ai-reviewer-contextLengthOverride-help"
+                      className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                    >
+                      {t("ai_reviewer_provider_context_length_override_help")}
+                    </p>
+                  </OLFormGroup>
+                </div>
+              </details>
+              {notice && (
+                <OLNotification
+                  type={notice.type}
+                  content={noticeContent(notice, t)}
+                />
+              )}
+              <div className="ai-reviewer-provider-form-actions">
+                {busy === null && (
+                  <span
+                    className="ai-reviewer-provider-settings-hint"
+                    data-testid="ai-reviewer-unsaved-hint"
+                  >
+                    {t("ai_reviewer_provider_save_before_checking")}
+                  </span>
+                )}
+                <OLButtonGroup>
+                  <OLButton
+                    type="button"
+                    variant="secondary"
+                    onClick={() => requestNavigation({ kind: "cancel" })}
+                  >
+                    {t("cancel")}
+                  </OLButton>
+                  <OLButton type="submit" variant="primary" disabled={!canSave}>
+                    {t("ai_reviewer_provider_save")}
+                  </OLButton>
+                </OLButtonGroup>
+              </div>
+            </OLForm>
+          </OLCard>
+        )}
+
+        <section
+          className="ai-reviewer-skills"
+          aria-labelledby="ai-reviewer-skills-heading"
+        >
+          <h3 id="ai-reviewer-skills-heading" className="h5">
+            {t("ai_reviewer_skills", "Skills")}
+          </h3>
+          {skills != null && skills.length > 0 && (
+            <ul
+              className="ai-reviewer-skill-list"
+              aria-label={t("ai_reviewer_skills", "Skills")}
+            >
+              {skills.map((skill) => (
+                <li
+                  key={skill.id}
+                  className="ai-reviewer-skill-row"
+                  data-testid="ai-reviewer-skill-row"
+                >
+                  <div className="ai-reviewer-skill-summary">
+                    <strong>{skill.name}</strong>
+                    <p className="mb-0">{skill.description}</p>
+                  </div>
+                  <OLButton
+                    type="button"
+                    variant="link"
+                    className="btn-inline-link ai-reviewer-skill-delete"
+                    disabled={skillBusy}
+                    aria-label={`${t("delete")} ${skill.name}`}
+                    onClick={() => handleSkillDelete(skill)}
+                  >
+                    {t("delete")}
+                  </OLButton>
+                </li>
+              ))}
+            </ul>
           )}
-          <OLButton
-            type="button"
-            variant="secondary"
-            onClick={handleTest}
-            disabled={!canTest}
+          <OLFormGroup
+            controlId="ai-reviewer-skill-files"
+            className="ai-reviewer-skill-upload mt-2"
           >
-            {t("ai_reviewer_provider_test_connection")}
-          </OLButton>
-          <OLButton type="submit" variant="primary" disabled={!canSave}>
-            {t("ai_reviewer_provider_save")}
-          </OLButton>
-        </OLModalFooter>
-      </OLForm>
+            <OLFormLabel>
+              {t(
+                "ai_reviewer_skill_upload_label",
+                "Upload SKILL.md and optional reference Markdown files",
+              )}
+            </OLFormLabel>
+            <OLFormControl
+              type="file"
+              accept=".md,text/markdown"
+              multiple
+              disabled={skills === undefined || skillBusy}
+              onChange={handleSkillUpload}
+            />
+          </OLFormGroup>
+          {skillNotice && <OLNotification type="error" content={skillNotice} />}
+        </section>
+      </OLModalBody>
+      <OLModalFooter className="ai-reviewer-provider-settings-footer">
+        <OLButton type="button" variant="secondary" onClick={handleHide}>
+          {t("ai_reviewer_provider_settings_close")}
+        </OLButton>
+      </OLModalFooter>
     </OLModal>
+  );
+
+  return (
+    <>
+      {settingsModal}
+      {pendingNavigation != null && (
+        <GenericConfirmModal
+          show
+          title={t("ai_reviewer_discard_connection_changes_title")}
+          message={t("ai_reviewer_discard_connection_changes_message")}
+          confirmLabel={t("ai_reviewer_discard_connection_changes")}
+          primaryVariant="danger"
+          onHide={() => setPendingNavigation(null)}
+          onConfirm={() => {
+            const navigation = pendingNavigation;
+            setPendingNavigation(null);
+            performNavigation(navigation);
+          }}
+        />
+      )}
+      {pendingDeletion != null && (
+        <GenericConfirmModal
+          show
+          title={t("ai_reviewer_connection_delete_confirmation_title")}
+          message={
+            pendingDeletion.projectUseCount == null
+              ? t("ai_reviewer_connection_delete_confirmation_message")
+              : t(
+                  "ai_reviewer_connection_delete_confirmation_message_with_count",
+                  { count: pendingDeletion.projectUseCount },
+                )
+          }
+          confirmLabel={t("delete")}
+          primaryVariant="danger"
+          onHide={() => setPendingDeletion(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </>
   );
 }
 

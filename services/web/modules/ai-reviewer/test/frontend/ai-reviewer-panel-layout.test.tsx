@@ -78,13 +78,16 @@ const discussionLayoutSelectors = [
 const settingsLayoutSelectors = [
   ".modal-content",
   ".focus-trap-container",
+  ".ai-reviewer-connections",
+  ".ai-reviewer-connection-footer",
+  ".ai-reviewer-connection-table-scroll",
+  ".ai-reviewer-provider-form-card",
+  ".ai-reviewer-provider-form-actions",
   ".ai-reviewer-provider-settings-form",
   ".ai-reviewer-provider-settings-header",
   ".ai-reviewer-provider-settings-body",
   ".ai-reviewer-provider-settings-footer",
   ".ai-reviewer-provider-settings-field",
-  ".ai-reviewer-provider-settings-details",
-  ".ai-reviewer-provider-settings-details > *",
   ".ai-reviewer-provider-advanced",
   ".ai-reviewer-provider-advanced-summary",
   ".ai-reviewer-provider-advanced-content",
@@ -95,14 +98,13 @@ const settingsLayoutSelectors = [
 const settingsWrapSelectors = [
   ".modal-title",
   ".form-label",
-  ".ai-reviewer-provider-settings-details",
-  ".ai-reviewer-provider-settings-details > *",
   ".ai-reviewer-provider-advanced-summary",
   ".ai-reviewer-provider-advanced-help",
   ".ai-reviewer-provider-settings-footer .button-content",
 ];
 const settingsConnection: AiProviderConnection = {
   id: "layout-connection",
+  revision: 1,
   label: "api.example.com",
   classification: "remote",
   config: {
@@ -292,11 +294,29 @@ function assertSettingsNarrowLayoutContract(
     "OpenAI-compatible (Ollama, LM Studio, vLLM)",
     "Google Gemini",
     "Anthropic Claude",
+    "Azure OpenAI",
   ]);
   const providerStyle = getComputedStyle(provider);
   expect(providerStyle.overflow).to.equal("hidden");
   expect(providerStyle.textOverflow).to.equal("ellipsis");
   expect(providerStyle.whiteSpace).to.equal("nowrap");
+
+  expect(settings.classList.contains("modal-dialog-scrollable")).to.equal(true);
+  const tableScroller = settings.querySelector<HTMLElement>(
+    ".ai-reviewer-connection-table-scroll",
+  );
+  expect(tableScroller).not.to.equal(null);
+  expect(getComputedStyle(tableScroller!).overflowX).to.equal("auto");
+  assertEllipsis(
+    settings.querySelector<HTMLElement>(".ai-reviewer-connection-name")!,
+  );
+  expect(
+    getComputedStyle(
+      settings.querySelector<HTMLElement>(
+        ".ai-reviewer-connection-actions-cell",
+      )!,
+    ).whiteSpace,
+  ).to.equal("nowrap");
 }
 
 function assertEllipsis(element: HTMLElement) {
@@ -482,6 +502,38 @@ describe("AI reviewer panel width", function () {
     expect(composer.get("background")).to.equal("var(--bg-primary-themed)");
   });
 
+  it("keeps the connection table, form card, and dialog footer themed", function () {
+    const body = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-body",
+    );
+    expect(body.get("color")).to.equal("var(--content-primary-themed)");
+    expect(body.get("background")).to.equal("var(--bg-primary-themed)");
+
+    const table = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-connection-table",
+    );
+    expect(table.get("--bs-table-color")).to.equal(
+      "var(--content-primary-themed)",
+    );
+    expect(table.get("--bs-table-bg")).to.equal("var(--bg-primary-themed)");
+    expect(table.get("--bs-border-color")).to.equal(
+      "var(--border-divider-themed)",
+    );
+
+    const card = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-provider-form-card",
+    );
+    expect(card.get("--bs-card-bg")).to.equal("var(--bg-secondary-themed)");
+    expect(card.get("--bs-card-border-color")).to.equal(
+      "var(--border-divider-themed)",
+    );
+
+    const footer = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-footer",
+    );
+    expect(footer.get("background")).to.equal("var(--bg-primary-themed)");
+  });
+
   for (const width of widths) {
     it(`keeps provider settings within ${width}px with recognisable option labels`, async function () {
       render(
@@ -508,11 +560,10 @@ describe("AI reviewer panel width", function () {
         />,
       );
 
-      const provider = await screen.findByRole("combobox", {
-        name: "Provider",
-      });
       await waitFor(() =>
-        expect((provider as HTMLSelectElement).disabled).to.equal(false),
+        expect(
+          document.querySelector(".ai-reviewer-connection-footer"),
+        ).not.to.equal(null),
       );
       const settings = document.querySelector<HTMLElement>(
         ".ai-reviewer-provider-settings",
@@ -522,6 +573,9 @@ describe("AI reviewer panel width", function () {
         throw new Error("The provider settings dialog must render.");
       }
       settings.style.width = `${width}px`;
+      fireEvent.click(
+        screen.getByRole("button", { name: "Edit api.example.com" }),
+      );
       fireEvent.click(screen.getByText("Advanced settings"));
 
       assertSettingsNarrowLayoutContract(settings, width);

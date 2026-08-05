@@ -79,8 +79,8 @@ function concreteModel() {
 
 function transportFixture(overrides = {}) {
   const model = concreteModel();
-  const chat = vi.fn(() => model);
-  const provider = { chat };
+  const chatModel = vi.fn(() => model);
+  const provider = { chatModel };
   const createProvider = vi.fn(() => provider);
   const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
   const transport = new OllamaOpenAiTransport({
@@ -91,7 +91,7 @@ function transportFixture(overrides = {}) {
     ...overrides,
   });
   return {
-    chat,
+    chatModel,
     createProvider,
     fetchImpl,
     model,
@@ -304,10 +304,10 @@ function providerConstructionThrower(boundary, thrownValue) {
       throw thrownValue;
     };
   }
-  if (boundary === "chat getter") {
+  if (boundary === "chatModel getter") {
     return function createProvider() {
       const provider = {};
-      Object.defineProperty(provider, "chat", {
+      Object.defineProperty(provider, "chatModel", {
         get() {
           throw thrownValue;
         },
@@ -315,10 +315,10 @@ function providerConstructionThrower(boundary, thrownValue) {
       return provider;
     };
   }
-  if (boundary === "chat invocation") {
+  if (boundary === "chatModel invocation") {
     return function createProvider() {
       return {
-        chat() {
+        chatModel() {
           throw thrownValue;
         },
       };
@@ -332,7 +332,7 @@ function providerConstructionThrower(boundary, thrownValue) {
       },
     });
     return {
-      chat() {
+      chatModel() {
         return model;
       },
     };
@@ -402,12 +402,13 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
     expect(fixture.createProvider).toHaveBeenCalledOnce();
     expect(fixture.createProvider).toHaveBeenCalledWith({
-      apiKey: "ollama",
       baseURL: baseUrl,
       fetch: expect.any(Function),
+      includeUsage: true,
       name: "openai-compatible",
+      supportsStructuredOutputs: true,
     });
-    expect(fixture.chat).toHaveBeenCalledExactlyOnceWith(modelTag);
+    expect(fixture.chatModel).toHaveBeenCalledExactlyOnceWith(modelTag);
     expect(fixture.fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -438,7 +439,18 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
   it("keeps the Ollama grammar projection and strict finding declaration", async function () {
     let requestBody;
-    const fetchImpl = vi.fn(async (_input, init) => {
+    const fetchImpl = vi.fn(async (input, init) => {
+      expect(String(input)).toBe(`${baseUrl}/chat/completions`);
+      expect(init).toMatchObject({
+        method: "POST",
+        redirect: "error",
+        dispatcher: expect.any(Agent),
+      });
+      const headers = new Headers(init.headers);
+      expect(headers.get("authorization")).toBeNull();
+      expect(headers.get("user-agent")).toContain(
+        "ai-sdk/openai-compatible/2.0.42",
+      );
       requestBody = JSON.parse(init.body);
       return new Response(JSON.stringify({ error: { message: "synthetic" } }), {
         status: 400,
@@ -508,7 +520,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       provider: "openai-compatible",
       modelId: modelTag,
       providerOptions: {
-        openai: {
+        openaiCompatible: {
           reasoningEffort: "none",
         },
       },
@@ -556,7 +568,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         body: "AI_REVIEWER_RESPONSE_BODY_SECRET",
       },
       providerMetadata: {
-        openai: {
+        openaiCompatible: {
           raw: "AI_REVIEWER_PROVIDER_METADATA_SECRET",
         },
       },
@@ -590,8 +602,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         type: "text",
       },
       providerOptions: {
-        openai: {
-          parallelToolCalls: false,
+        openaiCompatible: {
+          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -653,8 +665,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         schema: structuredSchema,
       },
       providerOptions: {
-        openai: {
-          parallelToolCalls: false,
+        openaiCompatible: {
+          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -736,6 +748,28 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(Object.isFrozen(result.value.record.items[0])).toBe(true);
   });
 
+  it("accepts a structured response carrying bounded provider warnings", async function () {
+    const fixture = transportFixture();
+    const secret = "AI_REVIEWER_WARNING_SECRET";
+    fixture.model.doGenerate.mockResolvedValue(
+      plainStructuredResult({
+        warnings: [{ type: "other", message: secret }],
+      }),
+    );
+
+    const result = await fixture.transport.generateStructuredChat({
+      prompt: "Return one synthetic record.",
+      maxOutputTokens: 48,
+      schema: structuredSchema,
+    });
+
+    expect(result).toMatchObject({
+      type: "structured.completed",
+      value: { status: "ok", id: "SYNTH-001", count: 3 },
+    });
+    expect(String(result)).not.toContain(secret);
+  });
+
   it.each([
     {
       name: "malformed JSON",
@@ -801,12 +835,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           { type: "text", text: '{"status":"ok",' },
           { type: "text", text: '"id":"SYNTH-001","count":3}' },
         ],
-      }),
-    },
-    {
-      name: "provider warning",
-      result: plainStructuredResult({
-        warnings: [{ type: "other", message: "AI_REVIEWER_WARNING_SECRET" }],
       }),
     },
     {
@@ -911,8 +939,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         toolName: "lookup_synthetic_record",
       },
       providerOptions: {
-        openai: {
-          parallelToolCalls: false,
+        openaiCompatible: {
+          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -1351,8 +1379,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         type: "text",
       },
       providerOptions: {
-        openai: {
-          parallelToolCalls: false,
+        openaiCompatible: {
+          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -2312,7 +2340,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     },
   );
 
-  it("rejects provider warnings without exposing their content", async function () {
+  it("accepts provider warnings without exposing their content", async function () {
     const fixture = transportFixture();
     fixture.model.doGenerate.mockResolvedValue({
       content: [{ type: "text", text: "COMPAT_OK" }],
@@ -2336,19 +2364,13 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       ],
     });
 
-    const error = await captureError(
-      fixture.transport.generateChat({
-        prompt: "Return exactly COMPAT_OK and nothing else.",
-        maxOutputTokens: 32,
-      }),
-    );
-
-    expect(error).toMatchObject({
-      code: "AI_PROVIDER_SCHEMA_INVALID",
-      category: "schema",
-      retryable: false,
+    const result = await fixture.transport.generateChat({
+      prompt: "Return exactly COMPAT_OK and nothing else.",
+      maxOutputTokens: 32,
     });
-    expect(error.message).not.toContain("AI_REVIEWER_PROVIDER_WARNING_SECRET");
+
+    expect(result).toMatchObject({ type: "completed", text: "COMPAT_OK" });
+    expect(String(result)).not.toContain("AI_REVIEWER_PROVIDER_WARNING_SECRET");
   });
 
   it.each([1, 32, 48, 64, 96, 512, 513, Number.MAX_SAFE_INTEGER])(
@@ -3096,8 +3118,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         type: "text",
       },
       providerOptions: {
-        openai: {
-          parallelToolCalls: false,
+        openaiCompatible: {
+          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -5536,7 +5558,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       modelTag,
       createProvider() {
         return {
-          chat() {
+          chatModel() {
             return model;
           },
         };
@@ -5715,7 +5737,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     function (tag) {
       const fixture = transportFixture({ modelTag: tag });
 
-      expect(fixture.chat).toHaveBeenCalledExactlyOnceWith(tag);
+      expect(fixture.chatModel).toHaveBeenCalledExactlyOnceWith(tag);
       expect(fixture.fetchImpl).not.toHaveBeenCalled();
     },
   );
@@ -5785,14 +5807,14 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           createProvider: vi.fn(() => ({})),
           fetchImpl: vi.fn(),
         }),
-    ).toThrow("provider with a chat method");
+    ).toThrow("provider with a chatModel method");
     expect(
       () =>
         new OllamaOpenAiTransport({
           baseUrl,
           modelTag,
           createProvider: vi.fn(() => ({
-            chat: () => "hosted:model",
+            chatModel: () => "hosted:model",
           })),
           fetchImpl: vi.fn(),
         }),
@@ -5801,7 +5823,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
   it.each([
     {
-      name: "provider object with valid chat",
+      name: "provider object with valid chatModel",
       shouldConstruct: true,
       createProvider() {
         const model = {
@@ -5814,7 +5836,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
             new Error("AI_REVIEWER_PROVIDER_PROMISE_OBJECT_SECRET"),
           ),
           {
-            chat() {
+            chatModel() {
               return model;
             },
           },
@@ -5822,7 +5844,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
     },
     {
-      name: "provider object without chat",
+      name: "provider object without chatModel",
       shouldConstruct: false,
       createProvider() {
         return Promise.reject(
@@ -5831,11 +5853,11 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
     },
     {
-      name: "provider chat",
+      name: "provider chatModel",
       shouldConstruct: false,
       createProvider() {
         return {
-          chat: Promise.reject(
+          chatModel: Promise.reject(
             new Error("AI_REVIEWER_PROVIDER_CHAT_PROMISE_SECRET"),
           ),
         };
@@ -5854,7 +5876,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           },
         );
         return {
-          chat() {
+          chatModel() {
             return model;
           },
         };
@@ -5865,7 +5887,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       shouldConstruct: false,
       createProvider() {
         return {
-          chat() {
+          chatModel() {
             return {
               specificationVersion: Promise.reject(
                 new Error("AI_REVIEWER_MODEL_SPECIFICATION_PROMISE_SECRET"),
@@ -5882,7 +5904,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       shouldConstruct: false,
       createProvider() {
         return {
-          chat() {
+          chatModel() {
             return {
               specificationVersion: "v3",
               doGenerate: Promise.reject(
@@ -5899,7 +5921,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       shouldConstruct: false,
       createProvider() {
         return {
-          chat() {
+          chatModel() {
             return {
               specificationVersion: "v3",
               doGenerate() {},
@@ -5983,7 +6005,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           modelTag,
           createProvider() {
             return {
-              chat() {
+              chatModel() {
                 return createModel(rejected);
               },
             };
@@ -6005,8 +6027,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
   it.each([
     "factory invocation",
-    "chat getter",
-    "chat invocation",
+    "chatModel getter",
+    "chatModel invocation",
     "model shape getter",
   ])(
     "redacts a provider-owned AgentGatewayError from constructor %s",
@@ -6037,8 +6059,8 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
   it.each([
     "factory invocation",
-    "chat getter",
-    "chat invocation",
+    "chatModel getter",
+    "chatModel invocation",
     "model shape getter",
   ])(
     "observes a rejected native Promise thrown by constructor %s",
@@ -6076,10 +6098,10 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
     },
     {
-      name: "chat getter",
+      name: "chatModel getter",
       createProvider() {
         const provider = {};
-        Object.defineProperty(provider, "chat", {
+        Object.defineProperty(provider, "chatModel", {
           get() {
             throw new Error("AI_REVIEWER_PROVIDER_CONSTRUCTION_SECRET");
           },
@@ -6088,10 +6110,10 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
     },
     {
-      name: "chat invocation",
+      name: "chatModel invocation",
       createProvider() {
         return {
-          chat() {
+          chatModel() {
             throw new Error("AI_REVIEWER_PROVIDER_CONSTRUCTION_SECRET");
           },
         };
@@ -6107,7 +6129,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           },
         });
         return {
-          chat() {
+          chatModel() {
             return model;
           },
         };
@@ -6144,7 +6166,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           baseUrl,
           modelTag,
           createProvider: vi.fn(() => ({
-            chat: () => ({
+            chatModel: () => ({
               doGenerate: vi.fn(),
               doStream: vi.fn(),
             }),
@@ -6154,23 +6176,26 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     ).toThrow("concrete Chat Completions model");
   });
 
-  it("rejects a chat model with a non-v3 specificationVersion", function () {
-    expect(
-      () =>
-        new OllamaOpenAiTransport({
-          baseUrl,
-          modelTag,
-          createProvider: vi.fn(() => ({
-            chat: () => ({
-              specificationVersion: "v2",
-              doGenerate: vi.fn(),
-              doStream: vi.fn(),
-            }),
-          })),
-          fetchImpl: vi.fn(),
-        }),
-    ).toThrow("concrete Chat Completions model");
-  });
+  it.each(["v2", "v5"])(
+    "rejects a chat model with specificationVersion %s",
+    function (specificationVersion) {
+      expect(
+        () =>
+          new OllamaOpenAiTransport({
+            baseUrl,
+            modelTag,
+            createProvider: vi.fn(() => ({
+              chatModel: () => ({
+                specificationVersion,
+                doGenerate: vi.fn(),
+                doStream: vi.fn(),
+              }),
+            })),
+            fetchImpl: vi.fn(),
+          }),
+      ).toThrow("concrete Chat Completions model");
+    },
+  );
 
   it("rejects a chat model missing doGenerate", function () {
     expect(
@@ -6179,7 +6204,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           baseUrl,
           modelTag,
           createProvider: vi.fn(() => ({
-            chat: () => ({
+            chatModel: () => ({
               specificationVersion: "v3",
               doStream: vi.fn(),
             }),
@@ -6196,7 +6221,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           baseUrl,
           modelTag,
           createProvider: vi.fn(() => ({
-            chat: () => ({
+            chatModel: () => ({
               specificationVersion: "v3",
               doGenerate: vi.fn(),
             }),
@@ -6259,7 +6284,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       createProvider(options) {
         guardedFetch = options.fetch;
         return {
-          chat() {
+          chatModel() {
             return model;
           },
         };
@@ -6353,13 +6378,15 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     },
   );
 
-  it("keeps the OpenAI SDK import inside the transport adapter", function () {
+  it("keeps the OpenAI-compatible SDK import inside the transport adapter", function () {
     const productionImports = listProductionSourceFiles(appSourceDirectory)
       .flatMap((absolutePath) => {
         const source = fs.readFileSync(absolutePath, {
           encoding: "utf8",
         });
-        return source.includes("@ai-sdk/openai") ? [absolutePath] : [];
+        return source.includes("@ai-sdk/openai-compatible")
+          ? [absolutePath]
+          : [];
       })
       .map((absolutePath) =>
         path
@@ -6448,7 +6475,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     },
   );
 
-  it("observes bounded non-stream warning entries before rejection", async function () {
+  it("observes bounded non-stream warning entries while accepting the response", async function () {
     const fixture = transportFixture();
     const rejected = Promise.reject(
       new Error("AI_REVIEWER_NONSTREAM_WARNING_ENTRY_PRIVATE"),
@@ -6459,18 +6486,12 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       }),
     );
 
-    const error = await captureError(
-      fixture.transport.generateChat({
-        prompt: "Return exactly COMPAT_OK and nothing else.",
-        maxOutputTokens: 32,
-      }),
-    );
-
-    expect(error).toMatchObject({
-      code: "AI_PROVIDER_SCHEMA_INVALID",
-      category: "schema",
-      retryable: false,
+    const result = await fixture.transport.generateChat({
+      prompt: "Return exactly COMPAT_OK and nothing else.",
+      maxOutputTokens: 32,
     });
+
+    expect(result).toMatchObject({ type: "completed", text: "COMPAT_OK" });
     await flushProviderPromiseObservation();
   });
 
@@ -7050,7 +7071,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           modelTag,
           createProvider() {
             return {
-              chat() {
+              chatModel() {
                 return model;
               },
             };

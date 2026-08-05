@@ -453,7 +453,7 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
     expect(Buffer.byteLength(requests[0].body, "utf8")).toBe(3_453);
     expect(
       crypto.createHash("sha256").update(requests[0].body).digest("hex"),
-    ).toBe("4a6f14972a840332d55ad20943eb42c7b6a72bbaa7d34de090dee45d2a829ac6");
+    ).toBe("d445f5a19d0cfe4d9a938b017230f8e563a5f4f9c28c52f98e87a6aef7a981a0");
     expect(JSON.parse(requests[0].body)).toEqual({
       model: modelTag,
       parallel_tool_calls: false,
@@ -775,10 +775,13 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
             .split(path.sep)
             .join("/"),
           importsAi: hasAiPackageReference(source),
-          importsOpenAi: source.includes("@ai-sdk/openai"),
+          importsOpenAiCompatible: source.includes("@ai-sdk/openai-compatible"),
         };
       })
-      .filter(({ importsAi, importsOpenAi }) => importsAi || importsOpenAi)
+      .filter(
+        ({ importsAi, importsOpenAiCompatible }) =>
+          importsAi || importsOpenAiCompatible,
+      )
       .sort(({ path: left }, { path: right }) =>
         left < right ? -1 : left > right ? 1 : 0,
       );
@@ -787,12 +790,12 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
       {
         path: "AiSdkAgentGateway.mjs",
         importsAi: true,
-        importsOpenAi: false,
+        importsOpenAiCompatible: false,
       },
       {
         path: "OllamaOpenAiTransport.mjs",
         importsAi: false,
-        importsOpenAi: true,
+        importsOpenAiCompatible: true,
       },
     ]);
   });

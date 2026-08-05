@@ -6,7 +6,8 @@ import {
   putJSON,
 } from "@/infrastructure/fetch-json";
 
-export type AiProvider = "openai-compatible" | "gemini" | "claude";
+export type AiProvider = "openai-compatible" | "gemini" | "claude" | "azure";
+export type AzureOpenAiRequestStyle = "v1" | "deployment";
 
 // A connection is a destination and how to reach it. The model is chosen per
 // review instead, so it is not part of this shape.
@@ -26,6 +27,13 @@ export type AiProviderConfiguration =
     })
   | (AiProviderConfigurationCommon & {
       provider: "claude";
+    })
+  | (AiProviderConfigurationCommon & {
+      provider: "azure";
+      baseUrl: string;
+      requestStyle: AzureOpenAiRequestStyle;
+      apiVersion?: string;
+      deployments: string[];
     });
 
 type AiProviderConfigurationWriteCommon = {
@@ -45,12 +53,21 @@ export type AiProviderConfigurationWrite =
     })
   | (AiProviderConfigurationWriteCommon & {
       provider: "claude";
+    })
+  | (AiProviderConfigurationWriteCommon & {
+      provider: "azure";
+      baseUrl: string;
+      requestStyle: AzureOpenAiRequestStyle;
+      apiVersion?: string;
+      deployments: string[];
     });
 
 export type AiProviderConnection = {
   id: string;
+  revision: number;
   label: string;
   classification: "local" | "remote";
+  projectUseCount?: number;
   config: AiProviderConfiguration;
 };
 
@@ -90,7 +107,9 @@ export type AiProviderModelCatalog = {
 
 const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
   "AI_PROVIDER_AUTHENTICATION_ERROR",
+  "AI_PROVIDER_CONFIGURATION_INVALID",
   "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
+  "AI_PROVIDER_CONNECTION_CONFLICT",
   "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
   "AI_PROVIDER_CONNECTION_NOT_FOUND",
   "AI_PROVIDER_NETWORK_FAILED",
@@ -104,7 +123,9 @@ const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
 
 export type AiProviderConfigurationClientErrorCode =
   | "AI_PROVIDER_AUTHENTICATION_ERROR"
+  | "AI_PROVIDER_CONFIGURATION_INVALID"
   | "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED"
+  | "AI_PROVIDER_CONNECTION_CONFLICT"
   | "AI_PROVIDER_CONNECTION_LIMIT_REACHED"
   | "AI_PROVIDER_CONNECTION_NOT_FOUND"
   | "AI_PROVIDER_NETWORK_FAILED"
@@ -177,6 +198,19 @@ function connectionBody(config: AiProviderConfigurationWrite) {
         contextLengthOverride: config.contextLengthOverride,
         ...credential,
       };
+    case "azure":
+      return {
+        provider: config.provider,
+        baseUrl: config.baseUrl,
+        requestStyle: config.requestStyle,
+        ...(config.apiVersion === undefined
+          ? {}
+          : { apiVersion: config.apiVersion }),
+        deployments: [...config.deployments],
+        label: config.label,
+        contextLengthOverride: config.contextLengthOverride,
+        ...credential,
+      };
   }
 }
 
@@ -209,13 +243,18 @@ export function createAiProviderConnection(
 export function updateAiProviderConnection(
   projectId: string,
   connectionId: string,
+  expectedRevision: number,
   config: AiProviderConfigurationWrite,
   signal: AbortSignal,
 ) {
   return request(signal, () =>
     putJSON<AiProviderConnection>(
       `${connectionsPath(projectId)}/${connectionId}`,
-      { body: connectionBody(config), signal, swallowAbortError: false },
+      {
+        body: { ...connectionBody(config), expectedRevision },
+        signal,
+        swallowAbortError: false,
+      },
     ),
   );
 }
@@ -223,12 +262,17 @@ export function updateAiProviderConnection(
 export function deleteAiProviderConnection(
   projectId: string,
   connectionId: string,
+  expectedRevision: number,
   signal: AbortSignal,
 ) {
   return request(signal, () =>
     deleteJSON<AiProviderConnectionList>(
       `${connectionsPath(projectId)}/${connectionId}`,
-      { signal, swallowAbortError: false },
+      {
+        body: { expectedRevision },
+        signal,
+        swallowAbortError: false,
+      },
     ),
   );
 }
