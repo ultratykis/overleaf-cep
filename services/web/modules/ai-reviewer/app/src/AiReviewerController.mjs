@@ -146,6 +146,14 @@ const PUBLIC_MODEL_SELECTION_ERROR = Object.freeze({
   retryable: false,
 });
 
+const PUBLIC_CONNECTION_SELECTION_ERROR = Object.freeze({
+  code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+  category: "configuration",
+  message:
+    "The selected AI provider connection could not be found. Choose a model again.",
+  retryable: false,
+});
+
 // A busy model and a withdrawn model both arrive as "the provider failed",
 // but only one of them clears by waiting. Split them so the panel can name the
 // action instead of offering the same generic advice for both.
@@ -412,6 +420,9 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
     }
     if (error.code === PUBLIC_MODEL_SELECTION_ERROR.code) {
       return { ...PUBLIC_MODEL_SELECTION_ERROR };
+    }
+    if (error.code === PUBLIC_CONNECTION_SELECTION_ERROR.code) {
+      return { ...PUBLIC_CONNECTION_SELECTION_ERROR };
     }
     return (
       publicModelActionError(error) ?? publicErrorForCategory(error.category)

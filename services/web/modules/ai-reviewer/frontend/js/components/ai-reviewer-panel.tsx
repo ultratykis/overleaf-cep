@@ -26,6 +26,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type ComponentType,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -469,6 +470,10 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_authentication");
     case "configuration:AI_PROVIDER_NOT_CONFIGURED":
       return t("ai_reviewer_error_guidance_configuration");
+    case "configuration:AI_PROVIDER_CONNECTION_NOT_FOUND":
+      return t("ai_reviewer_error_guidance_connection_not_found");
+    case "configuration:AI_PROVIDER_MODEL_NOT_SELECTED":
+      return t("ai_reviewer_error_guidance_model_not_selected");
     case "configuration:AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED":
       return t("ai_reviewer_provider_plaintext_credential_blocked");
     case "network:AI_PROVIDER_NETWORK_ERROR":
@@ -1352,6 +1357,7 @@ export function AiReviewerPanelView({
   modeInstructionPersistence,
   loadProviderConnections,
   loadProviderModels,
+  providerSettingsComponent: ProviderSettings = AiIntegrationDetails,
 }: {
   projectId: string;
   createRequestId?: () => string;
@@ -1373,6 +1379,9 @@ export function AiReviewerPanelView({
   modeInstructionPersistence?: AiReviewerModeInstructionPersistence;
   loadProviderConnections?: typeof getAiProviderConnections;
   loadProviderModels?: typeof getAiProviderModels;
+  providerSettingsComponent?: ComponentType<{
+    onHide: (connectionsChanged: boolean) => void;
+  }>;
 }) {
   const { t } = useTranslation();
   const translationRef = useRef(t);
@@ -1392,6 +1401,7 @@ export function AiReviewerPanelView({
   const selectedModelRef = useRef<WorkspaceModelSelection | null>(null);
   const [connections, setConnections] = useState<AiProviderConnection[]>([]);
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
+  const [providerCatalogRevision, setProviderCatalogRevision] = useState(0);
   const [showProviderSettings, setShowProviderSettings] = useState(false);
   const [showModeInstructionSettings, setShowModeInstructionSettings] =
     useState(false);
@@ -1414,8 +1424,16 @@ export function AiReviewerPanelView({
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
     [],
   );
+  const modelCatalogProjectId = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
+  const connectedModels = useMemo(() => {
+    if (!connectionsLoaded) return models;
+    const connectionIds = new Set(
+      connections.map((connection) => connection.id),
+    );
+    return models.filter((model) => connectionIds.has(model.connectionId));
+  }, [connections, connectionsLoaded, models]);
   const resolvedSelectedModel = useMemo(
     () =>
       connectionsLoaded
@@ -1424,6 +1442,17 @@ export function AiReviewerPanelView({
     [connections, connectionsLoaded, selectedModel],
   );
   selectedModelRef.current = resolvedSelectedModel;
+  const refreshProviderCatalog = useCallback(() => {
+    setProviderCatalogRevision((revision) => revision + 1);
+  }, []);
+  const retryProviderCatalog = useCallback(() => {
+    setModelCatalogError(false);
+    refreshProviderCatalog();
+  }, [refreshProviderCatalog]);
+  const recoverMissingProviderConnection = useCallback(() => {
+    setSelectedModel(null);
+    refreshProviderCatalog();
+  }, [refreshProviderCatalog]);
   const [selectedMode, setSelectedMode] = useState<ReviewMode>(null);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
@@ -1507,7 +1536,7 @@ export function AiReviewerPanelView({
         // Without an override a document review is simply not split.
       });
     return () => controller.abort();
-  }, [loadProviderConnections, projectId]);
+  }, [loadProviderConnections, projectId, providerCatalogRevision]);
 
   useEffect(() => {
     if (loadProviderModels == null) {
@@ -1522,16 +1551,29 @@ export function AiReviewerPanelView({
         setModels(catalog.models);
         setModelFailures(catalog.failures);
         setModelCatalogError(false);
+        modelCatalogProjectId.current = projectId;
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setModels([]);
-          setModelFailures([]);
+          if (modelCatalogProjectId.current !== projectId) {
+            setModels([]);
+            setModelFailures([]);
+          }
           setModelCatalogError(true);
         }
       });
     return () => controller.abort();
-  }, [loadProviderModels, projectId]);
+  }, [loadProviderModels, projectId, providerCatalogRevision]);
+
+  useEffect(() => {
+    if (
+      connectionsLoaded &&
+      selectedModel != null &&
+      resolvedSelectedModel == null
+    ) {
+      setSelectedModel(null);
+    }
+  }, [connectionsLoaded, resolvedSelectedModel, selectedModel]);
 
   useEffect(() => {
     modeInstructionGeneration.current += 1;
@@ -1601,17 +1643,17 @@ export function AiReviewerPanelView({
 
   const runModel = useMemo(
     () =>
-      models.find(
+      connectedModels.find(
         (model) =>
           resolvedSelectedModel != null &&
           model.connectionId === resolvedSelectedModel.connectionId &&
           model.id === resolvedSelectedModel.model,
       ) ?? null,
-    [models, resolvedSelectedModel],
+    [connectedModels, resolvedSelectedModel],
   );
   const duplicateModelNames = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const model of models) {
+    for (const model of connectedModels) {
       const key = model.displayName.trim().toLocaleLowerCase();
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -1620,16 +1662,16 @@ export function AiReviewerPanelView({
         .filter(([, count]) => count > 1)
         .map(([name]) => name),
     );
-  }, [models]);
+  }, [connectedModels]);
   const filteredModels = useMemo(() => {
     const query = modelQuery.trim().toLocaleLowerCase();
-    if (query === "") return models;
-    return models.filter((model) =>
+    if (query === "") return connectedModels;
+    return connectedModels.filter((model) =>
       [model.displayName, model.id, model.connectionLabel].some((value) =>
         value.toLocaleLowerCase().includes(query),
       ),
     );
-  }, [modelQuery, models]);
+  }, [connectedModels, modelQuery]);
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
       setDiscussions((current) => {
@@ -2202,6 +2244,9 @@ export function AiReviewerPanelView({
         } else if (event.type === "error") {
           run.terminal = "error";
           run.errorCode = event.error.code;
+          if (event.error.code === "AI_PROVIDER_CONNECTION_NOT_FOUND") {
+            recoverMissingProviderConnection();
+          }
         }
         const displayEvent =
           event.type === "error"
@@ -2263,6 +2308,9 @@ export function AiReviewerPanelView({
           error instanceof AgentStreamError
             ? error.details.code
             : "AI_WORKSPACE_STREAM_FAILED";
+        if (code === "AI_PROVIDER_CONNECTION_NOT_FOUND") {
+          recoverMissingProviderConnection();
+        }
         failRun(run, code, streamErrorGuidance(error, t));
       } finally {
         if (activeRun.current === run) {
@@ -2271,7 +2319,7 @@ export function AiReviewerPanelView({
       }
       return run.errorCode;
     },
-    [failRun, isActiveRun, streamRequest, t],
+    [failRun, isActiveRun, recoverMissingProviderConnection, streamRequest, t],
   );
 
   const executeSelectionReview = useCallback(
@@ -2958,15 +3006,9 @@ export function AiReviewerPanelView({
       if (activeSuggestionIdentity.current !== identity) {
         return;
       }
-      // Error decisions do not change the persisted artifact state. Keep the
-      // preview mounted so its error message remains visible.
-      if (decision.status !== "error") {
-        disposeActiveSuggestion(
-          cancellationReason(
-            "The suggestion preview reached a terminal state.",
-          ),
-        );
-      }
+      disposeActiveSuggestion(
+        cancellationReason("The suggestion preview reached a terminal state."),
+      );
       if (!mounted.current) {
         return;
       }
@@ -3411,6 +3453,9 @@ export function AiReviewerPanelView({
           active.terminal = "completed";
         } else if (event.type === "error") {
           active.terminal = "error";
+          if (event.error.code === "AI_PROVIDER_CONNECTION_NOT_FOUND") {
+            recoverMissingProviderConnection();
+          }
           updateDiscussions((current) =>
             current.map((candidate) =>
               candidate.id === discussionId
@@ -3472,11 +3517,11 @@ export function AiReviewerPanelView({
           ) {
             return;
           }
-          failDiscussionRequest(
-            active,
-            streamErrorGuidance(error, t),
-            streamErrorCode(error),
-          );
+          const code = streamErrorCode(error);
+          if (code === "AI_PROVIDER_CONNECTION_NOT_FOUND") {
+            recoverMissingProviderConnection();
+          }
+          failDiscussionRequest(active, streamErrorGuidance(error, t), code);
         })
         .finally(() => {
           if (activeDiscussionRequest.current === active) {
@@ -3491,6 +3536,7 @@ export function AiReviewerPanelView({
       now,
       openConversation,
       projectId,
+      recoverMissingProviderConnection,
       runModel,
       selectedMode,
       streamRequest,
@@ -4111,6 +4157,7 @@ export function AiReviewerPanelView({
         mountPreview={mountSuggestionPreview}
         applySuggestion={applySelectionSuggestion}
         registerLease={activeLeaseRegistrar}
+        onErrorNotice={setActionNotice}
         onDecision={(nextDecision) =>
           recordSuggestionDecision(identity, nextDecision)
         }
@@ -5238,7 +5285,7 @@ export function AiReviewerPanelView({
         {/* Models from every connection sit in one list: choosing a model is
             what chooses the connection, so no separate picker is offered. With
             no connection at all there is nothing to choose between. */}
-        {activeDiscussion == null && models.length > 0 && (
+        {activeDiscussion == null && connectedModels.length > 0 && (
           <Dropdown align="start">
             <DropdownToggle
               bsPrefix="ai-reviewer-panel-model-chip"
@@ -5459,13 +5506,24 @@ export function AiReviewerPanelView({
               </p>
             )}
             {modelCatalogError && (
-              <p
-                className="ai-reviewer-panel-model-failures form-text mb-0"
-                role="alert"
-                data-testid="ai-reviewer-model-catalog-error"
-              >
-                {t("ai_reviewer_provider_models_load_failed")}
-              </p>
+              <div className="ai-reviewer-panel-model-failures form-text mb-0">
+                <p
+                  className="mb-0"
+                  role="alert"
+                  data-testid="ai-reviewer-model-catalog-error"
+                >
+                  {t("ai_reviewer_provider_models_load_failed")}
+                </p>
+                <OLButton
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="btn-inline-link"
+                  onClick={retryProviderCatalog}
+                >
+                  {t("ai_reviewer_provider_models_retry")}
+                </OLButton>
+              </div>
             )}
             {/* Selecting text is an intent to act on it, so these sit directly
                 above the composer and stay there whether or not results exist. */}
@@ -5549,7 +5607,14 @@ export function AiReviewerPanelView({
 
       {showProviderSettings && (
         <Suspense fallback={null}>
-          <AiIntegrationDetails onHide={() => setShowProviderSettings(false)} />
+          <ProviderSettings
+            onHide={(connectionsChanged) => {
+              setShowProviderSettings(false);
+              if (connectionsChanged) {
+                refreshProviderCatalog();
+              }
+            }}
+          />
         </Suspense>
       )}
 

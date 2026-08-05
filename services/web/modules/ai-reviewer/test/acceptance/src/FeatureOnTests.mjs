@@ -207,10 +207,9 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         sequence: 0,
         createdAt: unconfiguredEvent.createdAt,
         error: {
-          code: "AI_PROVIDER_NOT_CONFIGURED",
+          code: "AI_PROVIDER_MODEL_NOT_SELECTED",
           category: "configuration",
-          message:
-            "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
+          message: "Select an AI model for this review, then run it again.",
           retryable: false,
         },
       });

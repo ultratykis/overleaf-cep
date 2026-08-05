@@ -17,6 +17,9 @@ const {
 } = require("../../frontend/js/components/ai-reviewer-panel");
 const { AgentStreamError } = require("../../frontend/js/services/agent-stream");
 const {
+  DetachedSuggestionDiffError,
+} = require("../../frontend/js/services/detached-suggestion-diff");
+const {
   useLatestCommittedEditorSelectionSessionContext,
 } = require("../../frontend/js/hooks/use-editor-selection-session-context");
 const {
@@ -1040,6 +1043,65 @@ describe("AI reviewer: single document selection workspace", function () {
         name: "Preview diff 1",
       }),
     ).not.to.exist;
+  });
+  it("closes a failed suggestion preview and lifts its message into the panel", async function () {
+    const session = selectionSession({
+      action: "rewrite",
+      instruction: "Rewrite the selected phrase.",
+    });
+    const streamRequest = sinon.stub().callsFake(async (call) => {
+      call.onEvent(startedEvent(session.request));
+      call.onEvent({
+        ...eventBase(session.request.requestId, 1, "suggestion"),
+        type: "suggestion",
+        suggestion: suggestion(session.request),
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+    const mountSuggestionPreview = sinon
+      .stub()
+      .rejects(
+        new DetachedSuggestionDiffError(
+          "AI_DIFF_CRYPTO_UNAVAILABLE",
+          "private preview failure",
+        ),
+      );
+    renderPanel({
+      captureSelectionSession: sinon.stub().resolves({
+        status: "ready",
+        session,
+      }),
+      streamRequest,
+      getSelectionContext: sinon.stub(),
+      mountSuggestionPreview,
+    });
+
+    await clickSelectionAction(
+      "Rewrite selection",
+      "Rewrite the selected phrase.",
+    );
+    await screen.findByText("Completed");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).to.equal(
+      "AI Reviewer needs browser APIs that are only available on a secure connection. Open this Overleaf instance over HTTPS (or localhost) and try again.",
+    );
+    expect(screen.queryByLabelText("Suggestion preview")).not.to.exist;
+    expect(document.body.textContent).not.to.include("private preview failure");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+    await waitFor(() => expect(mountSuggestionPreview.callCount).to.equal(2));
   });
   it("leaves only discard when a suggestion enters conflict", async function () {
     const instruction = "Rewrite the selected phrase.";

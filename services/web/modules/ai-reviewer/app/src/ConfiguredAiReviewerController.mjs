@@ -124,6 +124,17 @@ function modelSelectionRequired() {
   });
 }
 
+function selectedConnectionMissing() {
+  return new AgentGatewayError(
+    "The selected AI provider connection does not exist.",
+    {
+      code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+      category: "configuration",
+      retryable: false,
+    },
+  );
+}
+
 function modelContextLengthRequired() {
   return new AgentGatewayError(
     "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
@@ -137,8 +148,9 @@ function modelContextLengthRequired() {
 
 /**
  * Load the connection the request selected. A connection identifier that is
- * not this user's own is absent rather than readable, and is reported as an
- * unconfigured provider instead of leaking that it exists for somebody else.
+ * not this user's own is absent rather than readable. The public error says
+ * only that the selected connection is unavailable to this user, without
+ * revealing whether the identifier exists in another user's configuration.
  * With no selection there is no destination to fall back to, even when only
  * one connection remains: sending manuscript content requires an explicit
  * project choice.
@@ -154,7 +166,7 @@ async function loadRunConnection(configStore, context, userId) {
     return await configStore.get(userId, connectionId);
   } catch (error) {
     if (error instanceof AiReviewerConnectionNotFoundError) {
-      return null;
+      throw selectedConnectionMissing();
     }
     throw error;
   }

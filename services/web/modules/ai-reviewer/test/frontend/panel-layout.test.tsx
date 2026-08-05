@@ -86,7 +86,13 @@ const concurrencyFailureGuidance =
   "An AI review is already running. Wait for it to finish, then try again.";
 const plaintextCredentialFailureGuidance =
   "API key blocked. Use HTTPS or recreate without a key.";
+const connectionNotFoundFailureGuidance =
+  "The selected connection could not be found. Choose a model again, then retry the review.";
+const modelNotSelectedFailureGuidance =
+  "Choose a model before starting the review.";
 const codeFailureGuidance: Partial<Record<string, string>> = {
+  AI_PROVIDER_CONNECTION_NOT_FOUND: connectionNotFoundFailureGuidance,
+  AI_PROVIDER_MODEL_NOT_SELECTED: modelNotSelectedFailureGuidance,
   AI_PROJECT_CONTENT_NOT_AVAILABLE: projectContentFailureGuidance,
   AI_STREAM_NETWORK_ERROR: streamFailureGuidance,
   AI_HTTP_ERROR: streamFailureGuidance,
@@ -109,6 +115,16 @@ const emittedFailureGuidanceCases = [
   },
   {
     code: "AI_PROVIDER_NOT_CONFIGURED",
+    category: "configuration",
+    retryable: false,
+  },
+  {
+    code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+    category: "configuration",
+    retryable: false,
+  },
+  {
+    code: "AI_PROVIDER_MODEL_NOT_SELECTED",
     category: "configuration",
     retryable: false,
   },

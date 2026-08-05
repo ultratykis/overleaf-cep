@@ -269,6 +269,30 @@ function renderPanel(
   return render(<AiReviewerPanelView projectId={projectId} {...props} />);
 }
 
+function ChangedProviderSettings({
+  onHide,
+}: {
+  onHide: (connectionsChanged: boolean) => void;
+}) {
+  return (
+    <button type="button" onClick={() => onHide(true)}>
+      Close changed settings
+    </button>
+  );
+}
+
+function UnchangedProviderSettings({
+  onHide,
+}: {
+  onHide: (connectionsChanged: boolean) => void;
+}) {
+  return (
+    <button type="button" onClick={() => onHide(false)}>
+      Close unchanged settings
+    </button>
+  );
+}
+
 function composerField() {
   return screen.getByRole("textbox", {
     name: hostChatInputLabel,
@@ -324,6 +348,125 @@ describe("AI reviewer: context-driven panel", function () {
       .exist;
     expect(screen.queryByRole("button", { name: "Review whole project" })).not
       .to.exist;
+  });
+
+  it("refreshes a changed settings catalogue and renders its new connection and model", async function () {
+    const loadProviderConnections = sinon.stub();
+    loadProviderConnections.onFirstCall().resolves({ connections: [] });
+    loadProviderConnections.resolves({ connections: [claudeConnection] });
+    const loadProviderModels = sinon.stub();
+    loadProviderModels.onFirstCall().resolves({ models: [], failures: [] });
+    loadProviderModels.resolves({ models: [alternateModel], failures: [] });
+    renderPanel({
+      loadProviderConnections,
+      loadProviderModels,
+      providerSettingsComponent: ChangedProviderSettings,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add connection" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close changed settings" }),
+    );
+
+    const modelChip = await screen.findByRole("button", {
+      name: "Selected model — None",
+    });
+    expect(screen.queryByTestId("ai-reviewer-onboarding")).not.to.exist;
+    expect(loadProviderConnections).to.have.been.calledTwice;
+    expect(loadProviderModels).to.have.been.calledTwice;
+    fireEvent.click(modelChip);
+    expect(
+      screen.getByRole("menuitem", {
+        name: /Claude Sonnet.*Anthropic Claude/u,
+      }),
+    ).to.exist;
+  });
+
+  it("does not refresh the provider catalogue when settings close unchanged", async function () {
+    const loadProviderConnections = sinon
+      .stub()
+      .resolves({ connections: [] });
+    const loadProviderModels = sinon
+      .stub()
+      .resolves({ models: [], failures: [] });
+    renderPanel({
+      loadProviderConnections,
+      loadProviderModels,
+      providerSettingsComponent: UnchangedProviderSettings,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add connection" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close unchanged settings" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Close unchanged settings" }),
+      ).not.to.exist;
+    });
+
+    expect(loadProviderConnections).to.have.been.calledOnce;
+    expect(loadProviderModels).to.have.been.calledOnce;
+  });
+
+  it("hides the sole connection's stale model when its refresh fails after deletion", async function () {
+    const loadProviderConnections = sinon.stub();
+    loadProviderConnections.onFirstCall().resolves({
+      connections: [localConnection],
+    });
+    loadProviderConnections.resolves({ connections: [] });
+    const loadProviderModels = sinon.stub();
+    loadProviderModels.onFirstCall().resolves({
+      models: [defaultModel],
+      failures: [],
+    });
+    loadProviderModels.rejects(new Error("HTTP 409"));
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        call.onEvent({
+          type: "error",
+          eventId: "context-too-small",
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          error: {
+            code: "AI_MODEL_CONTEXT_TOO_SMALL",
+            category: "configuration",
+            message: "Bounded server wording.",
+            retryable: false,
+          },
+        });
+      });
+    renderPanel({
+      captureSelectionSession: captureSelectionSession(),
+      selectionPreview,
+      streamRequest,
+      loadProviderConnections,
+      loadProviderModels,
+      providerSettingsComponent: ChangedProviderSettings,
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    ).to.exist;
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open connection settings" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close changed settings" }),
+    );
+
+    expect(await screen.findByTestId("ai-reviewer-onboarding")).to.exist;
+    expect(loadProviderConnections).to.have.been.calledTwice;
+    expect(loadProviderModels).to.have.been.calledTwice;
+    expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
+      .exist;
   });
 
   it("hides the saved unresolved count while no connection onboarding is shown", async function () {
@@ -1140,6 +1283,32 @@ describe("AI reviewer: context-driven panel", function () {
     );
     expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
       .exist;
+    expect(
+      screen.getByRole("button", { name: "Retry loading models" }),
+    ).to.exist;
+  });
+
+  it("manually retries a failed initial model catalogue load", async function () {
+    const loadProviderModels = sinon.stub();
+    loadProviderModels.onFirstCall().rejects(new Error("HTTP 504"));
+    loadProviderModels.resolves({ models: [defaultModel], failures: [] });
+    renderPanel({
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection] }),
+      loadProviderModels,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Retry loading models" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    ).to.exist;
+    expect(loadProviderModels).to.have.been.calledTwice;
+    expect(screen.queryByTestId("ai-reviewer-model-catalog-error")).not.to
+      .exist;
   });
 
   it("saves the chosen model and restores it after a reload", async function () {
@@ -1200,6 +1369,63 @@ describe("AI reviewer: context-driven panel", function () {
     }
   });
 
+  for (const failureDelivery of ["emitted", "thrown"] as const) {
+    it(`clears and refreshes a missing discussion connection from an ${failureDelivery} error`, async function () {
+      const loadProviderConnections = sinon
+        .stub()
+        .resolves({ connections: [localConnection] });
+      const loadProviderModels = sinon
+        .stub()
+        .resolves({ models: [defaultModel], failures: [] });
+      const streamRequest = sinon
+        .stub()
+        .callsFake(async (call: ReviewStreamCall) => {
+          const details = {
+            code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+            category: "configuration" as const,
+            message: "Bounded server wording.",
+            retryable: false,
+          };
+          if (failureDelivery === "thrown") {
+            throw new AgentStreamError(details);
+          }
+          call.onEvent({
+            type: "error",
+            eventId: "discussion-connection-not-found",
+            requestId: call.request.requestId,
+            sequence: 0,
+            createdAt,
+            error: details,
+          });
+        });
+      renderPanel({
+        createDiscussionId: () => `missing-discussion-${failureDelivery}`,
+        createDiscussionRequestId: () =>
+          `missing-discussion-request-${failureDelivery}`,
+        streamRequest,
+        loadProviderConnections,
+        loadProviderModels,
+      });
+
+      await chooseModel(`Default reviewer (${localConnection.label})`);
+      typeConversationMessage("Explain the selected connection.");
+
+      expect((await screen.findByRole("alert")).textContent).to.equal(
+        "The selected connection could not be found. Choose a model again, then retry the review.",
+      );
+      await waitFor(() => {
+        expect(loadProviderConnections).to.have.been.calledTwice;
+        expect(loadProviderModels).to.have.been.calledTwice;
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Back to review list" }),
+      );
+      expect(
+        await screen.findByRole("button", { name: "Selected model — None" }),
+      ).to.exist;
+    });
+  }
+
   it("clears a stored selection when its connection is gone without choosing a fallback", async function () {
     const store = new MemoryWorkspace();
     store.workspace = {
@@ -1226,6 +1452,73 @@ describe("AI reviewer: context-driven panel", function () {
     // another connection for the manuscript.
     await waitFor(() => {
       expect(store.workspace).not.to.have.property("selectedModel");
+    });
+  });
+
+  it("clears and refreshes a selected connection rejected by the run", async function () {
+    const loadProviderConnections = sinon.stub();
+    loadProviderConnections.onFirstCall().resolves({
+      connections: [localConnection],
+    });
+    loadProviderConnections.resolves({ connections: [localConnection] });
+    const loadProviderModels = sinon.stub();
+    loadProviderModels.onFirstCall().resolves({
+      models: [defaultModel],
+      failures: [
+        {
+          connectionId: "connection-slow",
+          connectionLabel: "Slow gateway",
+          code: "AI_REQUEST_TIMEOUT",
+          category: "timeout",
+        },
+      ],
+    });
+    loadProviderModels.rejects(new Error("HTTP 504"));
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        call.onEvent({
+          type: "error",
+          eventId: "connection-not-found",
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          error: {
+            code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+            category: "configuration",
+            message: "Bounded server wording.",
+            retryable: false,
+          },
+        });
+      });
+    renderPanel({
+      captureSelectionSession: captureSelectionSession(),
+      selectionPreview,
+      streamRequest,
+      loadProviderConnections,
+      loadProviderModels,
+    });
+
+    await chooseModel(`Default reviewer (${localConnection.label})`);
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+
+    expect(
+      await screen.findByText(
+        "The selected connection could not be found. Choose a model again, then retry the review.",
+      ),
+    ).to.exist;
+    await waitFor(() => {
+      expect(loadProviderConnections).to.have.been.calledTwice;
+      expect(loadProviderModels).to.have.been.calledTwice;
+      expect(
+        screen.getByRole("button", { name: "Selected model — None" }),
+      ).to.exist;
+      expect(screen.getByTestId("ai-reviewer-model-catalog-error")).to.exist;
+      expect(screen.getByTestId("ai-reviewer-model-failures").textContent).to
+        .include("Slow gateway");
+      expect(
+        screen.getByRole("button", { name: "Retry loading models" }),
+      ).to.exist;
     });
   });
 

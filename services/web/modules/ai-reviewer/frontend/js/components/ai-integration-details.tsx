@@ -115,7 +115,7 @@ type ConfigurationField =
 
 type Props = {
   scopeKey: string;
-  onHide: () => void;
+  onHide: (connectionsChanged: boolean) => void;
   listConnections: typeof getAiProviderConnections;
   createConnection: typeof createAiProviderConnection;
   updateConnection: typeof updateAiProviderConnection;
@@ -713,12 +713,20 @@ export function AiIntegrationDetailsView({
     generation: number;
     controller: AbortController | null;
   }>({ generation: 0, controller: null });
+  const connectionsChangedRef = useRef(false);
 
   const cancel = useCallback(() => {
     operationRef.current.controller?.abort();
     operationRef.current.controller = null;
     operationRef.current.generation += 1;
   }, []);
+
+  const cancelPotentialWrite = () => {
+    if (busy === "save" || busy === "connections") {
+      connectionsChangedRef.current = true;
+    }
+    cancel();
+  };
 
   const begin = useCallback((): Operation => {
     cancel();
@@ -753,6 +761,7 @@ export function AiIntegrationDetailsView({
 
   useEffect(() => {
     const operation = begin();
+    connectionsChangedRef.current = false;
     setConnections(undefined);
     setSelectedId(null);
     setFormMode("idle");
@@ -910,7 +919,7 @@ export function AiIntegrationDetailsView({
   const connectionLimitReached = (connections?.length ?? 0) >= connectionLimit;
   const updateDraft = (field: ConfigurationField, value: string) => {
     if (!formEditable) return;
-    if (busy) cancel();
+    if (busy) cancelPotentialWrite();
     setDraft((current) => {
       if (field === "baseUrl" && current.provider === "azure") {
         const portal = azurePortalEndpointFields(value);
@@ -935,7 +944,7 @@ export function AiIntegrationDetailsView({
     if (!formEditable || (value !== "v1" && value !== "deployment")) {
       return;
     }
-    if (busy) cancel();
+    if (busy) cancelPotentialWrite();
     setDraft((current) => ({
       ...current,
       requestStyle: value,
@@ -955,7 +964,7 @@ export function AiIntegrationDetailsView({
     if (formMode !== "create") return;
     const provider = providerFromValue(value);
     if (provider == null) return;
-    if (busy) cancel();
+    if (busy) cancelPotentialWrite();
     // Destination-specific fields must not survive a provider change. Keeping
     // baseUrl empty also makes plaintext policy structural rather than vendor-based.
     setDraft((current) => ({
@@ -1060,6 +1069,7 @@ export function AiIntegrationDetailsView({
         setNotice(genericErrorNotice());
         return;
       }
+      connectionsChangedRef.current = true;
       // A write returns only the written connection, so retain the usage count
       // from the listing while splicing it into place.
       const connectionWithUsage = {
@@ -1101,14 +1111,14 @@ export function AiIntegrationDetailsView({
 
   const performNavigation = (navigation: PendingNavigation) => {
     if (navigation.kind === "close") {
-      cancel();
+      cancelPotentialWrite();
       skillOperationRef.current?.abort();
       skillOperationRef.current = null;
-      onHide();
+      onHide(connectionsChangedRef.current);
       return;
     }
     if (navigation.kind === "cancel") {
-      if (busy) cancel();
+      if (busy) cancelPotentialWrite();
       setSelectedId(null);
       setFormMode("idle");
       setDraft({ ...emptyConfiguration });
@@ -1118,7 +1128,7 @@ export function AiIntegrationDetailsView({
     }
     if (navigation.kind === "add") {
       if (connectionLimitReached) return;
-      if (busy) cancel();
+      if (busy) cancelPotentialWrite();
       setSelectedId(null);
       setFormMode("create");
       setDraft({ ...emptyConfiguration });
@@ -1130,7 +1140,7 @@ export function AiIntegrationDetailsView({
       (entry) => entry.id === navigation.connectionId,
     );
     if (connection == null) return;
-    if (busy) cancel();
+    if (busy) cancelPotentialWrite();
     setSelectedId(connection.id);
     setFormMode("edit");
     setDraft(draftFromConnection(connection));
@@ -1166,6 +1176,7 @@ export function AiIntegrationDetailsView({
       deleteConnection(scopeKey, connection.id, connection.revision, signal),
     ).then((response) => {
       if (!response) return;
+      connectionsChangedRef.current = true;
       applyConnections(response.connections);
     });
   };
@@ -2605,7 +2616,7 @@ export function AiIntegrationDetailsView({
 export default function AiIntegrationDetails({
   onHide,
 }: {
-  onHide: () => void;
+  onHide: (connectionsChanged: boolean) => void;
 }) {
   const { projectId } = useProjectContext();
   return (
@@ -2639,7 +2650,7 @@ export function AiReviewerAccountSettingsDetails({
   return (
     <AiIntegrationDetailsView
       scopeKey={accountSettingsScopeKey}
-      onHide={onHide}
+      onHide={() => onHide()}
       listConnections={getUserAiProviderConnections}
       createConnection={createUserAiProviderConnection}
       updateConnection={updateUserAiProviderConnection}

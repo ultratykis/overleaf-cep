@@ -167,6 +167,7 @@ export function AiReviewerSuggestionPreview({
   applySuggestion = applySelectedEditorSelectionSuggestion,
   registerLease,
   onDecision,
+  onErrorNotice,
 }: {
   session: EditorSelectionSession;
   suggestion: UnresolvedSuggestion;
@@ -175,6 +176,7 @@ export function AiReviewerSuggestionPreview({
   applySuggestion?: ApplySelectionSuggestion;
   registerLease?: RegisterSuggestionPreviewLease;
   onDecision?: (decision: SelectionSuggestionDecision) => void;
+  onErrorNotice?: (message: string) => void;
 }) {
   const { t } = useTranslation();
   const previewParent = useRef<HTMLDivElement | null>(null);
@@ -230,9 +232,12 @@ export function AiReviewerSuggestionPreview({
       safeDestroy(handle);
       setStatus(decisionStatus(decision));
       setMessage(nextMessage);
+      if (decision.status === "error") {
+        onErrorNotice?.(nextMessage);
+      }
       onDecisionRef.current?.(decision);
     },
-    [t],
+    [onErrorNotice, t],
   );
 
   useEffect(() => {

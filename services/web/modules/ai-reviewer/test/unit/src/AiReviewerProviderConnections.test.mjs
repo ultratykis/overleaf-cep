@@ -540,7 +540,7 @@ describe("AI reviewer provider connections", function () {
       credentialUpdatedAt,
     });
 
-    await store.update(
+    const updatedGemini = await store.update(
       userId,
       gemini.id,
       {
@@ -549,6 +549,7 @@ describe("AI reviewer provider connections", function () {
       },
       gemini.revision,
     );
+    expect(updatedGemini.id).toBe(gemini.id);
     expect((await store.get(userId, gemini.id)).contextLengthOverride).toBe(
       32_768,
     );
@@ -1243,7 +1244,7 @@ describe("AI reviewer run destination", function () {
     expect(providerService.createAgentGateway).not.toHaveBeenCalled();
   });
 
-  it("treats a deleted selected connection as unconfigured without falling back", async function () {
+  it("reports a deleted selected connection without falling back", async function () {
     const { store } = storeFixture();
     const deleted = await store.create(userId, geminiConnection);
     await store.create(userId, claudeConnection);
@@ -1263,7 +1264,12 @@ describe("AI reviewer run destination", function () {
 
     expect(parseNdjson(response)[0]).toMatchObject({
       type: "error",
-      error: { code: "AI_PROVIDER_NOT_CONFIGURED", category: "configuration" },
+      error: {
+        code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+        category: "configuration",
+        message:
+          "The selected AI provider connection could not be found. Choose a model again.",
+      },
     });
     expect(providerService.createAgentGateway).not.toHaveBeenCalled();
   });
@@ -1287,7 +1293,10 @@ describe("AI reviewer run destination", function () {
 
     expect(parseNdjson(response)[0]).toMatchObject({
       type: "error",
-      error: { code: "AI_PROVIDER_NOT_CONFIGURED", category: "configuration" },
+      error: {
+        code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+        category: "configuration",
+      },
     });
     expect(providerService.createAgentGateway).not.toHaveBeenCalled();
     expect(response.chunks.join("")).not.toContain(claudeCredential);

@@ -1739,12 +1739,18 @@ describe("AI reviewer: provider configuration", function () {
   });
 
   it("adds a second connection without disturbing the first", async function () {
+    const onHide = sinon.stub();
     const listConnections = sinon
       .stub()
       .resolves({ connections: [otherConfigured] });
     const createConnection = sinon.stub().resolves(claudeConfigured);
     const updateConnection = sinon.stub().resolves(otherConfigured);
-    renderConnections({ listConnections, createConnection, updateConnection });
+    renderConnections({
+      onHide,
+      listConnections,
+      createConnection,
+      updateConnection,
+    });
     await waitUntilLoaded();
     expect(connectionRows()).to.have.length(1);
 
@@ -1762,6 +1768,29 @@ describe("AI reviewer: provider configuration", function () {
     ]);
     await waitFor(() => expect(connectionRows()).to.have.length(2));
     expect(document.body.textContent).not.to.include(credential);
+    fireEvent.click(closeSettingsButton());
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
+  });
+
+  it("reports a possible connection change when closing during a save", async function () {
+    const onHide = sinon.stub();
+    const pendingSave = deferred<AiProviderConnection>();
+    const createConnection = sinon.stub().returns(pendingSave.promise);
+    renderConnections({ onHide, createConnection });
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "claude" } });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(createConnection).to.have.been.calledOnce);
+
+    const signal = createConnection.firstCall.args[2] as AbortSignal;
+    fireEvent.click(closeSettingsButton());
+    expect(screen.getByText("Discard unsaved changes?")).to.exist;
+    fireEvent.click(button("Discard changes"));
+
+    expect(signal.aborted).to.equal(true);
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
   });
 
   it("confirms before discarding edits when switching rows or closing", async function () {
@@ -1797,15 +1826,16 @@ describe("AI reviewer: provider configuration", function () {
     await waitFor(
       () => expect(screen.queryByText("Discard unsaved changes?")).not.to.exist,
     );
-    expect(onHide).to.have.been.calledOnce;
+    expect(onHide).to.have.been.calledOnceWithExactly(false);
   });
 
   it("updates a connection only after its explicit edit action", async function () {
+    const onHide = sinon.stub();
     const listConnections = sinon
       .stub()
       .resolves({ connections: [claudeConfigured, otherConfigured] });
     const updateConnection = sinon.stub().resolves(claudeConfigured);
-    renderConnections({ listConnections, updateConnection });
+    renderConnections({ onHide, listConnections, updateConnection });
     await waitUntilLoaded();
 
     expect(screen.queryByLabelText("Display name")).not.to.exist;
@@ -1825,9 +1855,15 @@ describe("AI reviewer: provider configuration", function () {
         label: "Renamed connection",
       },
     ]);
+    await waitFor(() =>
+      expect(screen.queryByLabelText("Display name")).not.to.exist,
+    );
+    fireEvent.click(closeSettingsButton());
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
   });
 
   it("confirms deletion with the number of projects using the connection", async function () {
+    const onHide = sinon.stub();
     const usedClaudeConnection = {
       ...claudeConfigured,
       projectUseCount: 3,
@@ -1838,7 +1874,7 @@ describe("AI reviewer: provider configuration", function () {
     const deleteConnection = sinon
       .stub()
       .resolves({ connections: [otherConfigured] });
-    renderConnections({ listConnections, deleteConnection });
+    renderConnections({ onHide, listConnections, deleteConnection });
     await waitUntilLoaded();
 
     fireEvent.click(deleteConnectionButton(usedClaudeConnection));
@@ -1861,6 +1897,8 @@ describe("AI reviewer: provider configuration", function () {
     expect(within(connectionRows()[0]).getByText(otherConfigured.label)).to
       .exist;
     expect(screen.queryByLabelText("Provider")).not.to.exist;
+    fireEvent.click(closeSettingsButton());
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
   });
 
   it("disables the add control when ten connections already exist", async function () {
