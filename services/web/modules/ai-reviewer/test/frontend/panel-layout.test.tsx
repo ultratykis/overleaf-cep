@@ -172,10 +172,18 @@ function emitCompletedReview(call: StreamCall) {
     skill: call.request.skill,
   });
   call.onEvent({
+    type: "subject",
+    eventId: "panel-layout-subject",
+    requestId: call.request.requestId,
+    sequence: 1,
+    createdAt,
+    subject: "Claim support",
+  });
+  call.onEvent({
     type: "completed",
     eventId: "panel-layout-completed",
     requestId: call.request.requestId,
-    sequence: 1,
+    sequence: 2,
     createdAt,
     finishReason: "stop",
   });
@@ -187,17 +195,18 @@ function renderPanel(
   return render(<AiReviewerPanelView projectId={projectId} {...props} />);
 }
 
-function modelOptions() {
-  const select = screen.queryByRole("combobox", { name: "Model" });
-  return select == null
-    ? []
-    : [...(select as HTMLSelectElement).options].map((option) => option.text);
+function runSelectionReview() {
+  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
 }
 
-// A model option is identified by its connection and its id together, because
-// the same id can be reachable through more than one connection.
-function modelValue(connectionId: string, id: string) {
-  return JSON.stringify([connectionId, id]);
+async function openModelChip() {
+  const chip = await screen.findByRole("button", { name: "Model" });
+  fireEvent.click(chip);
+  return chip;
+}
+
+function modelOptions() {
+  return screen.queryAllByRole("menuitem").map((item) => item.textContent);
 }
 
 function catalogModel(
@@ -217,7 +226,7 @@ function primaryControls(container: HTMLElement) {
   return [...container.querySelectorAll<HTMLButtonElement>(".btn-primary")];
 }
 
-function documentCapture(text: string) {
+function selectionCapture() {
   return sinon
     .stub()
     .callsFake(
@@ -239,12 +248,13 @@ function documentCapture(text: string) {
             instruction,
             skill: "referee-review",
             scope: Object.freeze({
-              kind: "document" as const,
+              kind: "selection" as const,
               documentId: "document-1",
               path: "main.tex",
               baseRevision: 7,
               baseTextHash: "a".repeat(64),
-              text,
+              range: Object.freeze({ from: 0, to: 4 }),
+              text: "Body",
             }),
           }),
           binding: Object.freeze({
@@ -258,41 +268,31 @@ function documentCapture(text: string) {
     );
 }
 
-// The override is the only context length a client can see, so it is what
-// decides whether a document review has to be split.
-function splitConnections(contextLengthOverride: number) {
-  return {
-    connections: [
-      {
-        ...localConnection,
-        config: { ...localConnection.config, contextLengthOverride },
-      },
-    ],
-  };
-}
-
-function splitCatalog() {
-  return {
-    models: [catalogModel(localConnection, "split-model", "Split model")],
-    failures: [],
-  };
+function renderReviewPanel(
+  props: Partial<React.ComponentProps<typeof AiReviewerPanelView>> = {},
+) {
+  return renderPanel({
+    captureSelectionSession: selectionCapture(),
+    selectionPreview: {
+      fileType: "tex",
+      fromLine: 1,
+      toLine: 1,
+      wordCount: 1,
+    },
+    ...props,
+  });
 }
 
 describe("AI reviewer: panel layout", function () {
   it("shows the one-line empty state before any run and keeps controls at the bottom", function () {
     const { container } = renderPanel({
       captureSelectionSession: sinon.stub(),
-      captureDocumentSession: sinon.stub(),
     });
 
     const panel = screen.getByTestId("ai-reviewer-panel");
     const header = panel.querySelector(".ai-reviewer-panel-header");
     const bottomControls = screen.getByTestId("ai-reviewer-bottom-controls");
     const empty = screen.getByText(emptyState);
-    const composer = screen
-      .getByRole("textbox", { name: "Discussion message" })
-      .closest(".ai-reviewer-panel-composer-input");
-    const send = screen.getByRole("button", { name: "Send message" });
 
     expect(header).not.to.equal(null);
     if (header == null) {
@@ -303,66 +303,55 @@ describe("AI reviewer: panel layout", function () {
       header.compareDocumentPosition(bottomControls) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).to.not.equal(0);
+    // The conversation is the default surface, so the composer stands even
+    // before a run; only the selection transforms wait for a target.
+    expect(primaryControls(container)).to.have.length(0);
+    expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
+    expect(screen.queryByRole("button", { name: "Rewrite selection" })).not.to
+      .exist;
+    expect(screen.queryByTestId("ai-reviewer-review-shortcuts")).not.to.exist;
+    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
+  });
+
+  it("renders selection-only transforms while text is selected and drops them when it is deselected", function () {
+    const { container, rerender } = renderPanel({
+      captureSelectionSession: sinon.stub(),
+      selectionPreview: {
+        fileType: "tex",
+        fromLine: 1,
+        toLine: 1,
+        wordCount: 3,
+      },
+    });
+
+    const transforms = screen.getByTestId("ai-reviewer-selection-transforms");
+    expect(within(transforms).getByText("tex: Line 1–Line 1 (3 words)")).to
+      .exist;
+    expect(screen.getByRole("button", { name: "Rewrite selection" })).to.exist;
+    expect(screen.getByRole("button", { name: "Shorten selection" })).to.exist;
+    // Reviewing the selection is the primary act while one exists.
     expect(primaryControls(container)).to.have.length(1);
     expect(primaryControls(container)[0]).to.equal(
       screen.getByRole("button", { name: "Review selection" }),
     );
-    expect(composer).not.to.equal(null);
-    if (composer == null) {
-      throw new Error("The discussion composer input must render.");
-    }
-    expect(
-      within(composer).getByRole("button", { name: "Send message" }),
-    ).to.equal(send);
-    expect(send.classList.contains("icon-button-small")).to.equal(true);
-    expect(send.classList.contains("ai-reviewer-panel-send")).to.equal(true);
-    expect(send.textContent).to.equal("send");
-  });
 
-  it("renders selection-only transforms only for the selection scope", function () {
-    const { container } = renderPanel({
-      captureSelectionSession: sinon.stub(),
-      captureDocumentSession: sinon.stub(),
-    });
-    const scope = screen.getByRole("combobox", {
-      name: "Review scope",
-    });
+    rerender(
+      <AiReviewerPanelView
+        projectId={projectId}
+        captureSelectionSession={sinon.stub()}
+        selectionPreview={null}
+      />,
+    );
 
-    expect(screen.getByTestId("ai-reviewer-selection-transforms")).to.exist;
-    const rewrite = screen.getByRole("button", {
-      name: "Rewrite selection",
-    });
-    const shorten = screen.getByRole("button", {
-      name: "Shorten selection",
-    });
-    expect(rewrite.classList.contains("btn-link")).to.equal(true);
-    expect(rewrite.classList.contains("btn-inline-link")).to.equal(true);
-    expect(rewrite.classList.contains("btn-secondary")).to.equal(false);
-    expect(shorten.classList.contains("btn-link")).to.equal(true);
-    expect(shorten.classList.contains("btn-inline-link")).to.equal(true);
-    expect(shorten.classList.contains("btn-secondary")).to.equal(false);
-    expect(primaryControls(container)).to.have.length(1);
-
-    fireEvent.change(scope, { target: { value: "document" } });
     expect(screen.queryByTestId("ai-reviewer-selection-transforms")).not.to
+      .exist;
+    expect(screen.queryByRole("button", { name: "Review selection" })).not.to
       .exist;
     expect(screen.queryByRole("button", { name: "Rewrite selection" })).not.to
       .exist;
     expect(screen.queryByRole("button", { name: "Shorten selection" })).not.to
       .exist;
-    expect(screen.getByRole("button", { name: "Review current document" })).to
-      .exist;
-    expect(primaryControls(container)).to.have.length(1);
-
-    fireEvent.change(scope, { target: { value: "project" } });
-    expect(screen.queryByTestId("ai-reviewer-selection-transforms")).not.to
-      .exist;
-    expect(screen.queryByRole("button", { name: "Rewrite selection" })).not.to
-      .exist;
-    expect(screen.queryByRole("button", { name: "Shorten selection" })).not.to
-      .exist;
-    expect(screen.getByRole("button", { name: "Run review" })).to.exist;
-    expect(primaryControls(container)).to.have.length(1);
+    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
   });
 
   it("selects a model per run and displays the persisted run origin", async function () {
@@ -387,7 +376,7 @@ describe("AI reviewer: panel layout", function () {
         finishReason: "stop",
       });
     });
-    renderPanel({
+    renderReviewPanel({
       streamRequest,
       loadProviderConnections: sinon
         .stub()
@@ -405,13 +394,15 @@ describe("AI reviewer: panel layout", function () {
       }),
     });
 
-    const modelSelect = await screen.findByRole("combobox", { name: "Model" });
+    await openModelChip();
     // Choosing a model is what chooses a connection: no separate picker.
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
-    fireEvent.change(modelSelect, {
-      target: { value: modelValue(localConnection.id, selectedModel) },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: `Alternate reviewer (${localConnection.label})`,
+      }),
+    );
+    runSelectionReview();
     await screen.findByText("Completed");
 
     expect(streamRequest.firstCall.args[0].request.model).to.equal(
@@ -446,7 +437,7 @@ describe("AI reviewer: panel layout", function () {
       ],
       failures: [],
     });
-    renderPanel({
+    renderReviewPanel({
       streamRequest,
       loadProviderConnections: sinon
         .stub()
@@ -454,7 +445,7 @@ describe("AI reviewer: panel layout", function () {
       loadProviderModels,
     });
 
-    const modelSelect = await screen.findByRole("combobox", { name: "Model" });
+    await openModelChip();
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
     // The same model id from two connections stays two distinguishable options.
     expect(modelOptions()).to.deep.equal([
@@ -464,16 +455,52 @@ describe("AI reviewer: panel layout", function () {
     ]);
     expect(loadProviderModels.firstCall.args[0]).to.equal(projectId);
 
-    fireEvent.change(modelSelect, {
-      target: { value: modelValue(claudeConnection.id, "shared-model") },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    fireEvent.click(
+      screen.getAllByRole("menuitem", {
+        name: `Shared model (${claudeConnection.label})`,
+      })[0],
+    );
+    runSelectionReview();
     await screen.findByText("Completed");
 
     expect(streamRequest.firstCall.args[0].request).to.include({
       connectionId: claudeConnection.id,
       model: "shared-model",
     });
+  });
+
+  it("portals both header menus outside the clipped panel", async function () {
+    renderPanel({
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection] }),
+      loadProviderModels: sinon.stub().resolves({
+        models: [catalogModel(localConnection, "portal-model", "Portal model")],
+        failures: [],
+      }),
+    });
+
+    await openModelChip();
+    const panel = screen.getByTestId("ai-reviewer-panel");
+    const modelMenu = document.querySelector<HTMLElement>(
+      ".ai-reviewer-panel-model-menu",
+    );
+    expect(modelMenu).not.to.equal(null);
+    expect(panel.contains(modelMenu)).to.equal(false);
+    expect(modelMenu?.parentElement).to.equal(document.body);
+
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: `Portal model (${localConnection.label})`,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    const overflowMenu = document.querySelector<HTMLElement>(
+      ".ai-reviewer-panel-overflow-menu",
+    );
+    expect(overflowMenu).not.to.equal(null);
+    expect(panel.contains(overflowMenu)).to.equal(false);
+    expect(overflowMenu?.parentElement).to.equal(document.body);
   });
 
   it("keeps a reachable connection's models when another one fails", async function () {
@@ -500,7 +527,7 @@ describe("AI reviewer: panel layout", function () {
       }),
     });
 
-    await screen.findByRole("combobox", { name: "Model" });
+    await openModelChip();
     expect(modelOptions()).to.deep.equal([
       `Claude Sonnet (${claudeConnection.label})`,
     ]);
@@ -529,21 +556,18 @@ describe("AI reviewer: panel layout", function () {
       loadProviderModels: sinon.stub().resolves({ models: [], failures: [] }),
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Run review" }));
-    await screen.findByText("Completed");
-
-    expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
-    expect(screen.queryByRole("combobox", { name: "Model" })).not.to.exist;
+    expect(await screen.findByTestId("ai-reviewer-onboarding")).to.exist;
+    expect(screen.getByRole("button", { name: "Add connection" })).to.exist;
+    // Nothing else is offered, because nothing else would reach a provider.
+    expect(screen.queryByTestId("ai-reviewer-bottom-controls")).not.to.exist;
+    expect(screen.queryByRole("button", { name: "Review whole project" })).not
+      .to.exist;
+    expect(screen.queryByRole("button", { name: "Model" })).not.to.exist;
     expect(screen.queryByTestId("ai-reviewer-model-failures")).not.to.exist;
-    expect(streamRequest.firstCall.args[0].request).not.to.have.property(
-      "connectionId",
-    );
-    expect(streamRequest.firstCall.args[0].request).not.to.have.property(
-      "model",
-    );
+    expect(streamRequest.called).to.equal(false);
   });
 
-  it("suppresses the bottom controls during a run and keeps cancel in its header", async function () {
+  it("shows stop in the run header while active", async function () {
     const streamRequest = sinon.stub().callsFake(
       ({ signal }: StreamCall) =>
         new Promise<void>((_resolve, reject) => {
@@ -552,34 +576,75 @@ describe("AI reviewer: panel layout", function () {
           });
         }),
     );
-    renderPanel({ streamRequest });
+    renderReviewPanel({ streamRequest });
 
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    runSelectionReview();
+    await screen.findByRole("article", { name: "Review run 1" });
+
+    expect(screen.getByTestId("ai-reviewer-bottom-controls")).to.exist;
+    const run = screen.getByRole("article", { name: "Review run 1" });
+    const headerAction = within(run).getByTestId(
+      "ai-reviewer-run-header-action",
+    );
+    expect(within(headerAction).getByRole("button", { name: "Stop" })).to.exist;
+    // A review already running is the one thing left to act on.
+    expect(
+      screen.getByRole("button", { name: "Review selection" }),
+    ).to.have.property("disabled", true);
+
+    fireEvent.click(within(headerAction).getByRole("button", { name: "Stop" }));
+    await screen.findByText("Cancelled");
+    expect(within(headerAction).queryByRole("button")).not.to.exist;
+    expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
+  });
+
+  it("reuses the run header action slot for discuss after completion", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      emitCompletedReview(call);
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+    await within(run).findByText("Completed");
+    const headerAction = within(run).getByTestId(
+      "ai-reviewer-run-header-action",
+    );
+
+    expect(within(headerAction).queryByRole("button", { name: "Stop" })).not.to
+      .exist;
+    expect(within(headerAction).getByRole("button", { name: "Discuss" })).to
+      .exist;
+    expect(within(run).getByRole("heading", { name: "Claim support" })).to
+      .exist;
+  });
+
+  it("shows No subject when a completed review emitted none", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-no-subject-completed",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
     const run = await screen.findByRole("article", { name: "Review run 1" });
 
-    expect(screen.queryByTestId("ai-reviewer-bottom-controls")).not.to.exist;
-    expect(
-      within(run).getByRole("button", {
-        name: "Cancel",
-      }),
-    ).to.exist;
-    expect(screen.queryByRole("combobox", { name: "Review scope" })).not.to
-      .exist;
-    expect(screen.queryByRole("textbox", { name: "Discussion message" })).not.to
-      .exist;
-
-    fireEvent.click(within(run).getByRole("button", { name: "Cancel" }));
-    await screen.findByText("Cancelled");
-    expect(screen.getByTestId("ai-reviewer-bottom-controls")).to.exist;
+    expect(within(run).getByRole("heading", { name: "No subject" })).to.exist;
   });
 
   it("keeps reset out of the main flow and requires confirmation", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       emitCompletedReview(call);
     });
-    renderPanel({ streamRequest });
+    renderReviewPanel({ streamRequest });
 
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    runSelectionReview();
     await screen.findByText("Completed");
     expect(
       screen.queryByRole("menuitem", {
@@ -615,9 +680,9 @@ describe("AI reviewer: panel layout", function () {
           retryable: failure.retryable,
         }),
       );
-      renderPanel({ streamRequest });
+      renderReviewPanel({ streamRequest });
 
-      fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+      runSelectionReview();
       const alert = await screen.findByRole("alert");
 
       expect(alert.textContent).to.equal(
@@ -626,6 +691,7 @@ describe("AI reviewer: panel layout", function () {
       );
       expect(alert.textContent).not.to.include(failure.code);
       expect(alert.textContent).not.to.include(boundedMessage);
+      expect(screen.getByRole("heading", { name: "Response Failed" })).to.exist;
     });
   }
 
@@ -639,9 +705,9 @@ describe("AI reviewer: panel layout", function () {
         retryable: true,
       }),
     );
-    renderPanel({ streamRequest });
+    renderReviewPanel({ streamRequest });
 
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    runSelectionReview();
     const alert = await screen.findByRole("alert");
 
     expect(alert.textContent).to.equal(categoryFailureGuidance.network);
@@ -658,154 +724,12 @@ describe("AI reviewer: panel layout", function () {
         retryable: true,
       }),
     );
-    renderPanel({ streamRequest });
+    renderReviewPanel({ streamRequest });
 
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    runSelectionReview();
     const alert = await screen.findByRole("alert");
 
     expect(alert.textContent).to.equal(categoryFailureGuidance.unknown);
     expect(alert.textContent).not.to.include(boundedMessage);
-  });
-
-  it("keeps a fitting document as one document run", async function () {
-    const text = "\\section{Only}\nShort.";
-    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
-      emitCompletedReview(call);
-    });
-    renderPanel({
-      captureDocumentSession: documentCapture(text),
-      streamRequest,
-      loadProviderConnections: sinon.stub().resolves(splitConnections(4_096)),
-      loadProviderModels: sinon.stub().resolves(splitCatalog()),
-    });
-
-    await screen.findByRole("combobox", { name: "Model" });
-    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
-      target: { value: "document" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Review current document" }),
-    );
-    await screen.findByText("Completed");
-
-    expect(streamRequest).to.have.been.calledOnce;
-    expect(streamRequest.firstCall.args[0].request.scope.kind).to.equal(
-      "document",
-    );
-  });
-
-  it("runs oversized sections as grouped selection reviews with the selected model", async function () {
-    const text = ["One", "Two", "Three"]
-      .map((title) => `\\section{${title}}\n${title.repeat(70)}\n`)
-      .join("");
-    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
-      emitCompletedReview(call);
-    });
-    renderPanel({
-      createRequestId: (() => {
-        let next = 0;
-        return () => `split-request-${++next}`;
-      })(),
-      captureDocumentSession: documentCapture(text),
-      streamRequest,
-      loadProviderConnections: sinon.stub().resolves(splitConnections(1_600)),
-      loadProviderModels: sinon.stub().resolves(splitCatalog()),
-    });
-
-    await screen.findByRole("combobox", { name: "Model" });
-    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
-      target: { value: "document" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Review current document" }),
-    );
-    await waitFor(() => expect(streamRequest.callCount).to.equal(3));
-
-    for (const [index, call] of streamRequest.getCalls().entries()) {
-      const scope = call.args[0].request.scope;
-      expect(scope.kind).to.equal("selection");
-      if (scope.kind !== "selection") {
-        throw new Error("Expected a selection review.");
-      }
-      expect(scope.text).to.equal(text.slice(scope.range.from, scope.range.to));
-      expect(call.args[0].request.model).to.equal("split-model");
-      expect(screen.getByText(`Selection ${index + 1}/3`)).to.exist;
-    }
-  });
-
-  it("reports an oversized subsection while continuing with usable sections", async function () {
-    const text = [
-      "\\section{Large}",
-      "\\subsection{Too large}",
-      "x".repeat(500),
-      "\\section{Usable}",
-      "ok",
-    ].join("\n");
-    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
-      emitCompletedReview(call);
-    });
-    renderPanel({
-      captureDocumentSession: documentCapture(text),
-      streamRequest,
-      loadProviderConnections: sinon.stub().resolves(splitConnections(1_600)),
-      loadProviderModels: sinon.stub().resolves(splitCatalog()),
-    });
-
-    await screen.findByRole("combobox", { name: "Model" });
-    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
-      target: { value: "document" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Review current document" }),
-    );
-
-    expect(
-      await screen.findByText(
-        "1 oversized subsection(s) could not be split and were skipped.",
-      ),
-    ).to.exist;
-    expect(streamRequest).to.have.been.calledOnce;
-    expect(streamRequest.firstCall.args[0].request.scope.text).to.equal(
-      "\\section{Usable}\nok",
-    );
-  });
-
-  it("stops remaining split reviews after a concurrency rejection", async function () {
-    const text = ["One", "Two", "Three"]
-      .map((title) => `\\section{${title}}\n${title.repeat(70)}\n`)
-      .join("");
-    const streamRequest = sinon
-      .stub()
-      .onFirstCall()
-      .callsFake(async (call: StreamCall) => emitCompletedReview(call));
-    streamRequest.onSecondCall().rejects(
-      new AgentStreamError({
-        code: "AI_REVIEWER_CONCURRENCY_LIMITED",
-        category: "rate-limit",
-        message: "bounded",
-        retryable: true,
-      }),
-    );
-    renderPanel({
-      captureDocumentSession: documentCapture(text),
-      streamRequest,
-      loadProviderConnections: sinon.stub().resolves(splitConnections(1_700)),
-      loadProviderModels: sinon.stub().resolves(splitCatalog()),
-    });
-
-    await screen.findByRole("combobox", { name: "Model" });
-    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
-      target: { value: "document" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Review current document" }),
-    );
-
-    expect(
-      await screen.findByText(
-        "1 remaining section(s) were not started because the concurrent review limit was reached.",
-      ),
-    ).to.exist;
-    expect(streamRequest.callCount).to.equal(2);
   });
 });

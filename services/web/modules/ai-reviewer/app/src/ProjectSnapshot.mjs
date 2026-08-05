@@ -108,7 +108,9 @@ function assertProjectRequest(request, projectId) {
   if (
     !parsed.success ||
     parsed.data.projectId !== projectId ||
-    parsed.data.scope.kind !== "project"
+    // A request that names no document is about the project as a whole and
+    // reads the project the same way an explicit project review does.
+    (parsed.data.scope != null && parsed.data.scope.kind !== "project")
   ) {
     throw unavailable();
   }

@@ -228,10 +228,7 @@ function dropEmptyUnboundRuns(workspace) {
   );
   return runs.length === workspace.runs.length
     ? workspace
-    : {
-        runs,
-        discussions: workspace.discussions,
-      };
+    : { ...workspace, runs };
 }
 
 /**
@@ -291,7 +288,7 @@ export function clearResolvedWorkspace(workspace) {
   }
   return {
     changed,
-    workspace: changed ? { runs, discussions } : workspace,
+    workspace: changed ? { ...workspace, runs, discussions } : workspace,
   };
 }
 
@@ -443,7 +440,7 @@ export function createAiReviewerWorkspaceStore({
           return snapshot;
         }
         const withoutDiscussion = dropEmptyUnboundRuns({
-          runs: snapshot.workspace.runs,
+          ...snapshot.workspace,
           discussions,
         });
         const validated = parseWorkspace(withoutDiscussion, projectId);

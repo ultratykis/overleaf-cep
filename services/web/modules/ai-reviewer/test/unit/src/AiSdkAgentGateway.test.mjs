@@ -84,6 +84,27 @@ function structuredOutput(findingOverrides = {}) {
   };
 }
 
+// The narrative streams as free text and each finding arrives as its own tool
+// call, so one review is a conversation the model drives with tools.
+function reviewStep(output, textId = "text-0001") {
+  return streamResult([
+    { type: "text-start", id: textId },
+    { type: "text-delta", id: textId, delta: output.narrative },
+    { type: "text-end", id: textId },
+    ...output.findings.map((finding, index) => ({
+      type: "tool-call",
+      toolCallId: `report-finding-${index}`,
+      toolName: "report_finding",
+      input: JSON.stringify(finding),
+    })),
+    finish("tool-calls"),
+  ]);
+}
+
+function closingStep(tokenUsage = usage(5, 8)) {
+  return streamResult([finish("stop", tokenUsage)]);
+}
+
 function strictStreamModel(results) {
   let index = 0;
   const model = new MockLanguageModelV3({
@@ -136,6 +157,33 @@ async function captureError(promise) {
 }
 
 describe("AI reviewer: AI SDK v6 adapter", function () {
+  it("emits a structured subject from the same review run", async function () {
+    const subjectStep = streamResult([
+      {
+        type: "tool-call",
+        toolCallId: "report-subject-0001",
+        toolName: "report_subject",
+        input: JSON.stringify({ subject: "Claim support in chapter 3" }),
+      },
+      finish("tool-calls"),
+    ]);
+    const { model, consumed } = strictStreamModel([subjectStep, closingStep()]);
+    const gateway = createGateway(model);
+
+    const events = await collect(gateway.stream(request()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "subject",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      subject: "Claim support in chapter 3",
+      sequence: 1,
+    });
+    expect(consumed()).toBe(2);
+  });
+
   it("maps one read-only tool call and structured result into local events", async function () {
     const toolStep = streamResult([
       {
@@ -149,14 +197,11 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       },
       finish("tool-calls"),
     ]);
-    const output = JSON.stringify(structuredOutput());
-    const structuredStep = streamResult([
-      { type: "text-start", id: "text-0001" },
-      { type: "text-delta", id: "text-0001", delta: output },
-      { type: "text-end", id: "text-0001" },
-      finish("stop", usage(5, 8)),
+    const { model, consumed } = strictStreamModel([
+      toolStep,
+      reviewStep(structuredOutput()),
+      closingStep(),
     ]);
-    const { model, consumed } = strictStreamModel([toolStep, structuredStep]);
     const readProjectFile = vi.fn(async () => ({
       path: "main.tex",
       text: "Synthetic tool result.",
@@ -205,22 +250,22 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     expect(events[4]).toMatchObject({
       finishReason: "stop",
       usage: {
-        inputTokens: 8,
-        outputTokens: 10,
+        inputTokens: 11,
+        outputTokens: 12,
       },
     });
     expect(readProjectFile).toHaveBeenCalledOnce();
-    expect(consumed()).toBe(2);
-    expect(model.doStreamCalls).toHaveLength(2);
+    expect(consumed()).toBe(3);
+    expect(model.doStreamCalls).toHaveLength(3);
     expect(model.doStreamCalls[0].abortSignal).toBe(controller.signal);
     expect(model.doStreamCalls[1].abortSignal).toBe(controller.signal);
     expect(
       model.doStreamCalls.map(
         (call) => call.providerOptions.openai.reasoningEffort,
       ),
-    ).toEqual(["none", "none"]);
+    ).toEqual(["none", "none", "none"]);
     expect(model.doStreamCalls[0].prompt[0].content).toContain(
-      "Act as a critical academic referee.",
+      "You are reviewing an academic manuscript as a referee.",
     );
     expect(model.doStreamCalls[0].prompt[0].content).toContain(
       "Every finding must include at least one project-file evidence reference",
@@ -232,10 +277,15 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       'artifactKind "finding"',
     );
     const userPrompt = model.doStreamCalls[0].prompt[1].content[0].text;
-    expect(JSON.parse(userPrompt).project).toEqual({
-      summary: { fileCount: 1 },
-      files: [{ path: "main.tex", textLength: 4 }],
-    });
+    expect(userPrompt).toContain("## Project");
+    expect(userPrompt).toContain(
+      JSON.stringify({
+        summary: { fileCount: 1 },
+        files: [{ path: "main.tex", textLength: 4 }],
+      }),
+    );
+    expect(userPrompt).toContain("## Conversation");
+    expect(userPrompt).toContain("User:\nReview the synthetic project.");
     expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
       structuredOutput().findings[0].evidence,
       {
@@ -250,14 +300,10 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       artifactKind: "citation-finding",
       proposedText: "Add a bibliography entry for the synthetic citation.",
     });
-    const output = JSON.stringify(citationOutput);
-    const structuredStep = streamResult([
-      { type: "text-start", id: "text-citation-0001" },
-      { type: "text-delta", id: "text-citation-0001", delta: output },
-      { type: "text-end", id: "text-citation-0001" },
-      finish("stop", usage(5, 8)),
+    const { model } = strictStreamModel([
+      reviewStep(citationOutput, "text-citation-0001"),
+      closingStep(),
     ]);
-    const { model } = strictStreamModel([structuredStep]);
     const validateEvidence = vi.fn();
     const gateway = createGateway(model, { validateEvidence });
 
@@ -296,14 +342,11 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       },
       finish("tool-calls"),
     ]);
-    const output = JSON.stringify(structuredOutput());
-    const structuredStep = streamResult([
-      { type: "text-start", id: "text-zotero-0001" },
-      { type: "text-delta", id: "text-zotero-0001", delta: output },
-      { type: "text-end", id: "text-zotero-0001" },
-      finish("stop", usage(5, 8)),
+    const { model } = strictStreamModel([
+      toolStep,
+      reviewStep(structuredOutput(), "text-zotero-0001"),
+      closingStep(),
     ]);
-    const { model } = strictStreamModel([toolStep, structuredStep]);
     const searchZotero = vi.fn(async () => [
       {
         itemKey: "ITEM1",
@@ -329,10 +372,18 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
 
     expect(events.map((event) => event.type)).toEqual([
       "started",
+      "tool.call",
       "text.delta",
       "finding",
       "completed",
     ]);
+    expect(events[1]).toMatchObject({
+      call: {
+        id: "tool-call-zotero-0001",
+        name: "search_zotero",
+        arguments: { query: "Synthetic 2026" },
+      },
+    });
     expect(searchZotero).toHaveBeenCalledExactlyOnceWith(
       { query: "Synthetic 2026" },
       {

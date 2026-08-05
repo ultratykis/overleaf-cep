@@ -407,15 +407,16 @@ export function createEditorEvidenceNavigationTarget({
     }
 
     const request = parsedRequest.data;
+    const scope = request.scope;
     if (
-      request.scope.kind === "project" ||
+      scope == null ||
+      scope.kind === "project" ||
       !Number.isSafeInteger(evidenceIndex) ||
       evidenceIndex < 0
     ) {
       return null;
     }
 
-    const scope = request.scope;
     const scopeFrom = scope.kind === "selection" ? scope.range.from : 0;
     const scopeTo =
       scope.kind === "selection" ? scope.range.to : scope.text.length;
@@ -483,7 +484,7 @@ export function createProjectEditorEvidenceNavigationTarget({
     if (
       !parsedRequest.success ||
       !parsedFinding.success ||
-      parsedRequest.data.scope.kind !== "project" ||
+      parsedRequest.data.scope?.kind !== "project" ||
       !Number.isSafeInteger(evidenceIndex) ||
       evidenceIndex < 0
     ) {

@@ -28,7 +28,11 @@ export function authenticatedUserId(request) {
 /** @param {unknown} input */
 function requestIdentity(input) {
   const parsed = AgentRequestSchema.safeParse(input);
-  if (!parsed.success || parsed.data.scope.kind === "project") {
+  if (
+    !parsed.success ||
+    parsed.data.scope == null ||
+    parsed.data.scope.kind === "project"
+  ) {
     return null;
   }
   const request = parsed.data;
@@ -75,7 +79,7 @@ export function createRequestScopeReader({
         throw rejected();
       }
       const request = parsed.data;
-      const scope = /** @type {any} */ (request.scope);
+      const scope = /** @type {any} */ (request.scope ?? null);
       if (request.projectId !== httpRequest?.params?.project_id) {
         throw rejected();
       }
@@ -87,7 +91,9 @@ export function createRequestScopeReader({
       } catch {
         throw rejected();
       }
-      if (scope.kind === "project") {
+      // A request without a scope is a conversation about the project, so it
+      // reads the project index the same way a project review does.
+      if (scope == null || scope.kind === "project") {
         if (typeof loadProjectDocuments !== "function") {
           throw rejected();
         }
@@ -121,6 +127,17 @@ export function createRequestScopeReader({
         });
       }
       const identity = requestIdentity(request);
+      // A document conversation reaches the same library a project review
+      // reaches; only the manuscript reads stay bound to the named document.
+      const zoteroLinked =
+        typeof searchZoteroItems === "function" &&
+        typeof isZoteroLinked === "function" &&
+        (await isZoteroLinked(userId));
+      /** @type {undefined | ((input: { query: string }, options: { signal?: AbortSignal }) => unknown | Promise<unknown>)} */
+      const searchZotero =
+        typeof searchZoteroItems === "function" && zoteroLinked
+          ? (input, { signal }) => searchZoteroItems(userId, input, { signal })
+          : undefined;
       const lower = scope.kind === "selection" ? scope.range.from : 0;
       const upper =
         scope.kind === "selection" ? scope.range.to : scope.text.length;
@@ -171,6 +188,7 @@ export function createRequestScopeReader({
         documentId: scope.documentId,
         path: scope.path,
         readProjectFile,
+        searchZotero,
       });
     },
   };

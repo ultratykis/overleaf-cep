@@ -112,6 +112,18 @@ const ProjectScopeSchema = z
   })
   .strict();
 
+export const DiscussionTurnSchema = z
+  .object({
+    role: z.enum(["user", "assistant"]),
+    text: z.string().min(1),
+  })
+  .strict();
+
+// One request covers both an editor selection action and an ordinary message,
+// because the agent path behind them is one path. `instruction` is always the
+// message the user just sent; `turns` is what was said before it. Editor
+// actions carry their captured scope, while a message carries the mode the
+// author can see beside the composer.
 export const AgentRequestSchema = z
   .object({
     requestId: IdentifierSchema,
@@ -132,11 +144,17 @@ export const AgentRequestSchema = z
     // with a single connection offering a single model need not choose.
     connectionId: IdentifierSchema.optional(),
     model: IdentifierSchema.optional(),
-    scope: z.discriminatedUnion("kind", [
-      SelectionScopeSchema,
-      DocumentScopeSchema,
-      ProjectScopeSchema,
-    ]),
+    scope: z
+      .discriminatedUnion("kind", [
+        SelectionScopeSchema,
+        DocumentScopeSchema,
+        ProjectScopeSchema,
+      ])
+      .optional(),
+    turns: z
+      .array(DiscussionTurnSchema)
+      .max(DISCUSSION_CONTEXT_TURN_LIMIT)
+      .optional(),
   })
   .strict();
 
@@ -217,13 +235,6 @@ export const FindingSchema = z.discriminatedUnion("artifactKind", [
   OrdinaryFindingSchema,
   CitationFindingSchema,
 ]);
-
-export const DiscussionTurnSchema = z
-  .object({
-    role: z.enum(["user", "assistant"]),
-    text: z.string().min(1),
-  })
-  .strict();
 
 export const DiscussionSubjectSchema = z.discriminatedUnion("kind", [
   z
@@ -318,6 +329,10 @@ export const WorkspaceRunSchema = z
     provider: IdentifierSchema.optional(),
     model: IdentifierSchema.optional(),
     group: WorkspaceRunGroupSchema.optional(),
+    // Records written before model-generated subjects remain readable. A
+    // missing value hydrates to the same no-subject fallback as a run whose
+    // model did not produce one.
+    subject: ShortTextSchema.optional(),
     text: ContentSchema,
     findings: z.array(WorkspaceFindingSchema).max(100),
     suggestions: z.array(WorkspaceSuggestionSchema).max(100),
@@ -358,12 +373,28 @@ export const WorkspaceDiscussionSchema = z
     }
   });
 
+// The client keeps its model choice here so a reload, a discussion, and a
+// rewrite all run against the same destination. The server only stores what
+// was chosen; resolving a stale or absent choice against the current
+// connections stays in ConfiguredAiReviewerController.
+export const WorkspaceModelSelectionSchema = z
+  .object({
+    connectionId: IdentifierSchema,
+    model: IdentifierSchema,
+  })
+  .strict();
+
 export const AiReviewerWorkspaceSchema = z
   .object({
     runs: z.array(WorkspaceRunSchema),
     discussions: z
       .array(WorkspaceDiscussionSchema)
       .max(AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT),
+    // Workspaces stored before this field existed carry no selection. Leaving
+    // it absent rather than defaulting it keeps those records byte-identical
+    // through a load and save, so no migration is needed; readers treat a
+    // missing value the same as null.
+    selectedModel: WorkspaceModelSelectionSchema.nullable().optional(),
   })
   .strict()
   .superRefine((workspace, context) => {
@@ -522,57 +553,6 @@ export const AiReviewerWorkspaceSnapshotSchema = z
   })
   .strict();
 
-export const DiscussionRequestSchema = z
-  .object({
-    requestId: IdentifierSchema,
-    discussionId: IdentifierSchema,
-    projectId: IdentifierSchema,
-    subject: DiscussionSubjectSchema.nullable(),
-    turns: z
-      .array(DiscussionTurnSchema)
-      .min(1)
-      .max(DISCUSSION_CONTEXT_TURN_LIMIT),
-  })
-  .strict()
-  .superRefine((request, context) => {
-    if (request.turns.at(-1)?.role !== "user") {
-      context.addIssue({
-        code: "custom",
-        message: "Discussion context must end with the active user turn",
-        path: ["turns"],
-      });
-    }
-    if (request.subject == null) {
-      return;
-    }
-    const { sourceRequest } = request.subject;
-    if (sourceRequest.projectId !== request.projectId) {
-      context.addIssue({
-        code: "custom",
-        message: "Discussion source project must match its request",
-        path: ["subject", "sourceRequest", "projectId"],
-      });
-    }
-    if (request.subject.kind === "scope") {
-      return;
-    }
-    const { artifact } = request.subject;
-    if (artifact.requestId !== sourceRequest.requestId) {
-      context.addIssue({
-        code: "custom",
-        message: "Discussion subject must belong to its source request",
-        path: ["subject", "artifact", "requestId"],
-      });
-    }
-    if (artifact.projectId !== sourceRequest.projectId) {
-      context.addIssue({
-        code: "custom",
-        message: "Discussion subject must belong to its source project",
-        path: ["subject", "artifact", "projectId"],
-      });
-    }
-  });
-
 export const AgentErrorSchema = z
   .object({
     code: IdentifierSchema,
@@ -629,6 +609,14 @@ const TextDeltaEventSchema = z
   })
   .strict();
 
+const SubjectEventSchema = z
+  .object({
+    type: z.literal("subject"),
+    ...EventBase,
+    subject: ShortTextSchema,
+  })
+  .strict();
+
 const FindingEventSchema = z
   .object({
     type: z.literal("finding"),
@@ -652,6 +640,12 @@ export const ReadProjectFileArgumentsSchema = z
   })
   .strict();
 
+export const ZoteroSearchArgumentsSchema = z
+  .object({
+    query: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
 const ReadProjectFileToolCallSchema = z
   .object({
     id: IdentifierSchema,
@@ -660,8 +654,20 @@ const ReadProjectFileToolCallSchema = z
   })
   .strict();
 
+const SearchZoteroToolCallSchema = z
+  .object({
+    id: IdentifierSchema,
+    name: z.literal("search_zotero"),
+    arguments: ZoteroSearchArgumentsSchema,
+  })
+  .strict();
+
+// Only the reading tools are announced. The tools that emit artifacts already
+// arrive as `finding` and `suggestion` events, and their arguments carry
+// manuscript text that must not be shown as a tool line.
 export const ToolCallSchema = z.discriminatedUnion("name", [
   ReadProjectFileToolCallSchema,
+  SearchZoteroToolCallSchema,
 ]);
 
 const ToolCallEventSchema = z
@@ -698,6 +704,7 @@ const ErrorEventSchema = z
 
 const AgentEventUnionSchema = z.discriminatedUnion("type", [
   StartedEventSchema,
+  SubjectEventSchema,
   TextDeltaEventSchema,
   FindingEventSchema,
   SuggestionEventSchema,
@@ -724,59 +731,3 @@ export const AgentEventSchema = AgentEventUnionSchema.superRefine(
     }
   },
 );
-
-const DiscussionStartedEventSchema = z
-  .object({
-    type: z.literal("started"),
-    ...EventBase,
-    provider: IdentifierSchema,
-    model: IdentifierSchema,
-  })
-  .strict();
-
-const DiscussionTextDeltaEventSchema = z
-  .object({
-    type: z.literal("text.delta"),
-    ...EventBase,
-    delta: z.string().min(1),
-  })
-  .strict();
-
-const DiscussionSuggestionEventSchema = z
-  .object({
-    type: z.literal("suggestion"),
-    ...EventBase,
-    suggestion: UnresolvedSuggestionSchema,
-  })
-  .strict();
-
-const DiscussionCompletedEventSchema = z
-  .object({
-    type: z.literal("completed"),
-    ...EventBase,
-    finishReason: z.enum(["stop", "cancelled", "length", "tool-calls"]),
-    usage: z
-      .object({
-        inputTokens: z.number().int().nonnegative(),
-        outputTokens: z.number().int().nonnegative(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
-
-const DiscussionErrorEventSchema = z
-  .object({
-    type: z.literal("error"),
-    ...EventBase,
-    error: AgentErrorSchema,
-  })
-  .strict();
-
-export const DiscussionEventSchema = z.discriminatedUnion("type", [
-  DiscussionStartedEventSchema,
-  DiscussionTextDeltaEventSchema,
-  DiscussionSuggestionEventSchema,
-  DiscussionCompletedEventSchema,
-  DiscussionErrorEventSchema,
-]);

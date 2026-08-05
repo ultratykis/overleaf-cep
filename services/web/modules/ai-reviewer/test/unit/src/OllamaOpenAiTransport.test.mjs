@@ -462,25 +462,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(Reflect.ownKeys(fixture.transport)).toEqual([]);
   });
 
-  it("creates the discussion gateway from the same private concrete model", function () {
-    const fixture = transportFixture();
-    const gateway = fixture.transport.createDiscussionGateway({
-      contextLength: 8_192,
-      now: () => "2026-07-25T00:00:00.000Z",
-      createId: () => "synthetic-id",
-    });
-
-    expect(gateway).toBeInstanceOf(AiSdkAgentGateway);
-    expect(gateway).toMatchObject({
-      provider: "openai-compatible",
-      modelId: modelTag,
-      streamDiscussion: expect.any(Function),
-    });
-    expect("languageModel" in fixture.transport).toBe(false);
-    expect("model" in fixture.transport).toBe(false);
-    expect(Reflect.ownKeys(fixture.transport)).toEqual([]);
-  });
-
   it("generates one fixed non-stream request without a generation cap", async function () {
     const fixture = transportFixture();
     const controller = new AbortController();

@@ -22,7 +22,6 @@ import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mj
 import {
   AgentEventSchema,
   AgentRequestSchema,
-  DiscussionEventSchema,
   WorkspaceRunSchema,
 } from "../../../shared/contracts.mjs";
 
@@ -204,42 +203,41 @@ function streamEvents() {
   ];
 }
 
-function discussionRequest() {
+function conversationRequest() {
   return {
-    requestId: "discussion-turn-provider-0001",
-    discussionId: "discussion-provider-0001",
+    requestId: "conversation-turn-provider-0001",
     projectId,
-    subject: {
-      kind: "scope",
-      sourceRequest: selectionRequest(),
-    },
-    turns: [{ role: "user", text: "Explain this selection." }],
+    action: "review",
+    instruction: "Explain this selection.",
+    skill: null,
+    turns: [{ role: "user", text: "What did the review mean here?" }],
   };
 }
 
-function discussionEvents() {
+function conversationEvents() {
   return [
     {
       type: "started",
-      eventId: "discussion-event-provider-started",
-      requestId: "discussion-turn-provider-0001",
+      eventId: "conversation-event-provider-started",
+      requestId: "conversation-turn-provider-0001",
       sequence: 0,
       createdAt,
       provider: "openai-compatible",
       model: otherModel,
+      skill: null,
     },
     {
       type: "text.delta",
-      eventId: "discussion-event-provider-delta",
-      requestId: "discussion-turn-provider-0001",
+      eventId: "conversation-event-provider-delta",
+      requestId: "conversation-turn-provider-0001",
       sequence: 1,
       createdAt,
-      delta: "Configured synthetic discussion.",
+      delta: "Configured synthetic answer.",
     },
     {
       type: "completed",
-      eventId: "discussion-event-provider-completed",
-      requestId: "discussion-turn-provider-0001",
+      eventId: "conversation-event-provider-completed",
+      requestId: "conversation-turn-provider-0001",
       sequence: 2,
       createdAt,
       finishReason: "stop",
@@ -402,15 +400,6 @@ function parseNdjson(response) {
     .map((line) => AgentEventSchema.parse(JSON.parse(line)));
 }
 
-function parseDiscussionNdjson(response) {
-  return response.chunks
-    .join("")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => DiscussionEventSchema.parse(JSON.parse(line)));
-}
-
 /**
  * The stubs a run needs before it reaches a transport: which models the
  * connection offers, and what context length the selected one resolves to.
@@ -440,12 +429,14 @@ async function projectCoverageStream({
   text,
   configuredContextLength = contextLength,
   performReads = async () => {},
+  body = projectRequest(),
+  events = streamEvents(),
 }) {
   const transport = {
     createAgentGateway: vi.fn(({ readProjectFile }) => ({
       async *stream(agentRequest, { signal }) {
         await performReads(readProjectFile, agentRequest, signal);
-        yield* streamEvents();
+        yield* events;
       },
     })),
   };
@@ -476,7 +467,7 @@ async function projectCoverageStream({
     eventId: () => "event-provider-error",
   });
   const response = new FakeResponse();
-  await controller.stream(httpRequest({ body: projectRequest() }), response);
+  await controller.stream(httpRequest({ body }), response);
   return parseNdjson(response);
 }
 
@@ -1354,23 +1345,19 @@ describe("AI reviewer provider configuration", function () {
     expect(contextLengthDetector).toHaveBeenCalledOnce();
   });
 
-  it("passes the credential only into discussion and review transport construction", async function () {
+  it("passes the credential only into transport construction", async function () {
     const transport = {
-      createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
       createAgentGateway: vi.fn(() => ({ kind: "review" })),
     };
     const transportFactory = vi.fn(() => transport);
     const service = createOllamaProviderService({ transportFactory });
 
-    expect(service.createDiscussionGateway(credentialConfiguration)).toEqual({
-      kind: "discussion",
-    });
     expect(
       service.createAgentGateway(credentialConfiguration, {
         readProjectFile: vi.fn(),
       }),
     ).toEqual({ kind: "review" });
-    expect(transportFactory).toHaveBeenCalledTimes(2);
+    expect(transportFactory).toHaveBeenCalledOnce();
     for (const [options] of transportFactory.mock.calls) {
       expect(options).toEqual({
         baseUrl: remoteBaseUrl,
@@ -1398,7 +1385,6 @@ describe("AI reviewer provider configuration", function () {
     "dispatches $configuration.provider through its native provider transport without a base URL",
     async function ({ configuration: nativeConfiguration, factoryName }) {
       const transport = {
-        createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
         createAgentGateway: vi.fn(() => ({ kind: "review" })),
       };
       const nativeFactory = vi.fn(() => transport);
@@ -1409,15 +1395,12 @@ describe("AI reviewer provider configuration", function () {
         }),
       });
 
-      expect(service.createDiscussionGateway(nativeConfiguration)).toEqual({
-        kind: "discussion",
-      });
       expect(
         service.createAgentGateway(nativeConfiguration, {
           readProjectFile: vi.fn(),
         }),
       ).toEqual({ kind: "review" });
-      expect(nativeFactory).toHaveBeenCalledTimes(2);
+      expect(nativeFactory).toHaveBeenCalledOnce();
       for (const [options] of nativeFactory.mock.calls) {
         expect(options).toEqual({
           credential,
@@ -1442,7 +1425,9 @@ describe("AI reviewer provider configuration", function () {
       });
 
       expect(() =>
-        service.createDiscussionGateway(nativeConfiguration),
+        service.createAgentGateway(nativeConfiguration, {
+          readProjectFile: vi.fn(),
+        }),
       ).toThrow(AgentGatewayError);
       expect(geminiTransportFactory).not.toHaveBeenCalled();
       expect(claudeTransportFactory).not.toHaveBeenCalled();
@@ -2020,37 +2005,74 @@ describe("AI reviewer provider configuration", function () {
     expect(parseNdjson(response)).toEqual(streamEvents());
   });
 
-  it("uses the same saved transport configuration for a discussion without reading project scope", async function () {
+  it("offers the connected Zotero library to a selection conversation", async function () {
+    const searchZoteroItems = vi.fn(async () => [
+      { itemKey: "ITEM1", title: "Synthetic result" },
+    ]);
+    const requestScopeReader = createRequestScopeReader({
+      isZoteroLinked: vi.fn(async () => true),
+      searchZoteroItems,
+    });
+
+    const scope = await requestScopeReader.read(
+      httpRequest({ body: selectionRequest() }),
+      { contextLength },
+    );
+
+    expect(scope.kind).toBe("selection");
+    expect(await scope.searchZotero({ query: "greenwade" }, {})).toEqual([
+      { itemKey: "ITEM1", title: "Synthetic result" },
+    ]);
+    expect(searchZoteroItems).toHaveBeenCalledExactlyOnceWith(
+      userId,
+      { query: "greenwade" },
+      { signal: undefined },
+    );
+  });
+
+  it("withholds the Zotero seam from a selection when no library is linked", async function () {
+    const requestScopeReader = createRequestScopeReader({
+      isZoteroLinked: vi.fn(async () => false),
+      searchZoteroItems: vi.fn(),
+    });
+
+    const scope = await requestScopeReader.read(
+      httpRequest({ body: selectionRequest() }),
+      { contextLength },
+    );
+
+    expect(scope.searchZotero).toBeUndefined();
+  });
+
+  it("reads the project scope for a conversation that names no document", async function () {
     const gateway = {
-      stream: vi.fn(),
-      async *streamDiscussion() {
-        yield* discussionEvents();
+      async *stream() {
+        yield* conversationEvents();
       },
     };
     const transport = {
-      createDiscussionGateway: vi.fn(() => gateway),
+      createAgentGateway: vi.fn(() => gateway),
     };
     const transportFactory = vi.fn(() => transport);
     const providerService = withModelListing(
       createOllamaProviderService({ transportFactory }),
       [{ id: remoteModel, displayName: remoteModel }],
     );
+    const readProjectFile = vi.fn();
     const requestScopeReader = {
-      read: vi.fn(async () => {
-        throw new Error("Discussion must not create a review scope reader.");
-      }),
+      read: vi.fn(async () => ({ kind: "project", readProjectFile })),
     };
     const controller = createConfiguredAiReviewerController({
       configStore: { get: vi.fn(async () => credentialConnection) },
       providerService,
       requestScopeReader,
       now: () => createdAt,
-      eventId: () => "discussion-provider-error",
+      eventId: () => "conversation-provider-error",
     });
     const response = new FakeResponse();
 
-    await controller.discussionStream(
-      httpRequest({ body: discussionRequest() }),
+    await controller.stream(
+      httpRequest({ body: conversationRequest() }),
       response,
     );
 
@@ -2059,12 +2081,15 @@ describe("AI reviewer provider configuration", function () {
       credential,
       modelTag: remoteModel,
     });
-    expect(transport.createDiscussionGateway).toHaveBeenCalledExactlyOnceWith({
+    expect(requestScopeReader.read).toHaveBeenCalledOnce();
+    expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
+      readProjectFile,
+      projectContext: undefined,
+      searchZotero: undefined,
+      validateEvidence: undefined,
     });
-    expect(requestScopeReader.read).not.toHaveBeenCalled();
-    expect(gateway.stream).not.toHaveBeenCalled();
-    expect(parseDiscussionNdjson(response)).toEqual(discussionEvents());
+    expect(parseNdjson(response)).toEqual(conversationEvents());
   });
 
   it("passes a metadata-only project snapshot to the configured provider", async function () {
@@ -2200,6 +2225,29 @@ Cite \cite{missing}`;
       ],
     ]);
     expect(parseNdjson(response)).toEqual(streamEvents());
+  });
+
+  it("does not hold a project conversation to the review read-coverage rule", async function () {
+    const events = await projectCoverageStream({
+      text: "Synthetic",
+      // This fixture carries no mode. The stub events echo the request's skill,
+      // so both sides drop it together.
+      events: streamEvents().map((event) =>
+        Object.hasOwn(event, "skill") ? { ...event, skill: null } : event,
+      ),
+      body: {
+        ...projectRequest(),
+        requestId: "request-provider-0001",
+        skill: null,
+        turns: [{ role: "user", text: "Which chapter still needs work?" }],
+      },
+    });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "completed",
+    ]);
   });
 
   it("errors when a project review read no manuscript content", async function () {

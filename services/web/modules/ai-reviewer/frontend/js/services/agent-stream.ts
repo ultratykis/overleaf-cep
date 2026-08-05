@@ -4,15 +4,11 @@ import {
   AgentErrorSchema,
   AgentEventSchema,
   AgentRequestSchema,
-  DiscussionEventSchema,
-  DiscussionRequestSchema,
 } from "../../../shared/contracts.mjs";
 import type {
   AgentError,
   AgentEvent,
   AgentRequest,
-  DiscussionEvent,
-  DiscussionRequest,
   EvidenceReference,
 } from "../../../shared/contract-types";
 import { prepareSingleDocumentSuggestion } from "./single-document-suggestions";
@@ -29,15 +25,6 @@ type StreamAgentEventsOptions = {
   request: AgentRequest;
   signal: AbortSignal;
   onEvent: (event: AgentEvent) => void;
-  csrfToken?: string;
-  fetchImpl?: typeof fetch;
-};
-
-type StreamDiscussionEventsOptions = {
-  projectId: string;
-  request: DiscussionRequest;
-  signal: AbortSignal;
-  onEvent: (event: DiscussionEvent) => void;
   csrfToken?: string;
   fetchImpl?: typeof fetch;
 };
@@ -215,7 +202,9 @@ function assertPathAndRangeWithinRequest(
     };
   },
 ) {
-  if (request.scope.kind === "project") {
+  // A request without a scope is project-wide, so no path or range of the
+  // project can be out of bounds.
+  if (request.scope == null || request.scope.kind === "project") {
     return;
   }
 
@@ -242,12 +231,14 @@ function assertEvidenceForRequest(
 ) {
   for (const reference of evidence) {
     assertPathAndRangeWithinRequest(request, reference);
+    const scope = request.scope;
     if (
-      request.scope.kind !== "project" &&
+      scope != null &&
+      scope.kind !== "project" &&
       ((reference.revision != null &&
-        reference.revision !== request.scope.baseRevision) ||
+        reference.revision !== scope.baseRevision) ||
         (reference.textHash != null &&
-          reference.textHash !== request.scope.baseTextHash))
+          reference.textHash !== scope.baseTextHash))
     ) {
       throw protocolError(
         "AI_STREAM_EVENT_SCOPE_INVALID",
@@ -289,7 +280,9 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
         "The AI reviewer returned a suggestion outside the active request.",
       );
     }
-    if (request.scope.kind === "project") {
+    // The server only proposes an edit inside an explicit document scope, so a
+    // suggestion arriving without one is out of bounds either way.
+    if (request.scope == null || request.scope.kind === "project") {
       throw protocolError(
         "AI_STREAM_EVENT_SCOPE_INVALID",
         "A project review cannot return edit suggestions.",
@@ -309,7 +302,9 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
     return;
   }
 
-  if (event.type === "tool.call") {
+  // Only the file read names a manuscript location; a Zotero query has none to
+  // check against the scope.
+  if (event.type === "tool.call" && event.call.name === "read_project_file") {
     assertPathAndRangeWithinRequest(request, event.call.arguments);
   }
 }
@@ -493,70 +488,6 @@ export async function streamAgentEvents({
     signal,
     onEvent,
     assertEvent: assertEventForRequest,
-    csrfToken,
-    fetchImpl,
-  });
-}
-
-function assertDiscussionEventForRequest(
-  request: DiscussionRequest,
-  event: DiscussionEvent,
-) {
-  if (event.type !== "suggestion") {
-    return;
-  }
-
-  if (request.subject == null) {
-    throw protocolError(
-      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
-      "An open discussion cannot return edit suggestions.",
-    );
-  }
-
-  const sourceRequest = request.subject.sourceRequest;
-  if (sourceRequest.scope.kind === "project") {
-    throw protocolError(
-      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
-      "A project discussion cannot return edit suggestions.",
-    );
-  }
-  try {
-    prepareSingleDocumentSuggestion({
-      request: sourceRequest,
-      suggestion: event.suggestion,
-    });
-  } catch {
-    throw protocolError(
-      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
-      "The AI reviewer returned a discussion suggestion outside the subject scope.",
-    );
-  }
-}
-
-export async function streamDiscussionEvents({
-  projectId,
-  request,
-  signal,
-  onEvent,
-  csrfToken = getMeta("ol-csrfToken"),
-  fetchImpl = fetch,
-}: StreamDiscussionEventsOptions) {
-  throwIfAborted(signal);
-  const parsedRequest = DiscussionRequestSchema.safeParse(request);
-  if (!parsedRequest.success || parsedRequest.data.projectId !== projectId) {
-    throw protocolError(
-      "AI_DISCUSSION_REQUEST_INVALID",
-      "The AI reviewer discussion does not match the active project.",
-    );
-  }
-  const boundRequest = parsedRequest.data;
-  await streamAuthenticatedEvents({
-    boundRequest,
-    endpoint: `/project/${encodeURIComponent(boundRequest.projectId)}/ai-reviewer/discussion-stream`,
-    eventSchema: DiscussionEventSchema,
-    signal,
-    onEvent,
-    assertEvent: assertDiscussionEventForRequest,
     csrfToken,
     fetchImpl,
   });

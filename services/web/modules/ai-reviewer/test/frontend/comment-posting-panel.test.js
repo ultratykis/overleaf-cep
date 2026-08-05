@@ -248,6 +248,12 @@ async function renderCompletedPanel({
       projectId,
       createRequestId: () => requestId,
       captureSelectionSession,
+      selectionPreview: {
+        fileType: "tex",
+        fromLine: 1,
+        toLine: 1,
+        wordCount: 3,
+      },
       streamRequest,
       getSelectionContext: selectionContext,
       navigateEvidence,
@@ -370,12 +376,14 @@ describe("AI reviewer comment-posting panel", function () {
 
   it("does not offer a posting action for a citation finding", async function () {
     const { postEditorComment } = await renderCompletedPanel();
-    const citationFindings = screen.getByRole("region", {
-      name: "Review citation findings",
-    });
+    // Both kinds of finding share the one pinned list, so the card is what
+    // bounds the assertion.
+    const citationFinding = screen
+      .getByText("Synthetic citation issue")
+      .closest(".ai-reviewer-artifact");
 
     expect(
-      within(citationFindings).queryByRole("button", {
+      within(citationFinding).queryByRole("button", {
         name: /Post .* as comment/u,
       }),
     ).not.to.exist;
@@ -406,7 +414,13 @@ describe("AI reviewer comment-posting panel", function () {
     expect((await within(findings).findByRole("alert")).textContent).to.equal(
       "Comment was not posted because the manuscript changed and the artifact range no longer matches.",
     );
-    expect(within(findings).getByText("Status: Unresolved")).to.exist;
+    expect(
+      within(
+        screen
+          .getByText("Ambiguous synthetic phrase")
+          .closest(".ai-reviewer-artifact"),
+      ).getByText("Status: Unresolved"),
+    ).to.exist;
     expect(postEditorComment.called).to.equal(false);
   });
 

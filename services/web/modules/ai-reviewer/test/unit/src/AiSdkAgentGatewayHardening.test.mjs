@@ -113,22 +113,46 @@ function toolStep(
   ]);
 }
 
+function artifactCall(toolName, input, index) {
+  return {
+    type: "tool-call",
+    toolCallId: `${toolName}-hardening-${index}`,
+    toolName,
+    input: JSON.stringify(input),
+  };
+}
+
+// One step of prose plus whatever artifacts the model chose to report. A step
+// that reports something is followed by `closingStep`, because the SDK runs
+// another model step once a tool has produced a result.
 function outputChunks(output, finishReason = "stop") {
-  const text = JSON.stringify(output);
+  const calls = [
+    ...(output.findings ?? []).map((finding, index) =>
+      artifactCall("report_finding", finding, index),
+    ),
+    ...(output.suggestions ?? []).map((suggestion, index) =>
+      artifactCall("propose_suggestion", suggestion, index),
+    ),
+  ];
   return [
     { type: "text-start", id: "text-hardening-0001" },
     {
       type: "text-delta",
       id: "text-hardening-0001",
-      delta: text,
+      delta: output.narrative,
     },
     { type: "text-end", id: "text-hardening-0001" },
-    finish(finishReason),
+    ...calls,
+    finish(calls.length > 0 ? "tool-calls" : finishReason),
   ];
 }
 
 function outputStep(output, finishReason = "stop") {
   return streamResult(outputChunks(output, finishReason));
+}
+
+function closingStep() {
+  return streamResult([finish("stop")]);
 }
 
 function outputStepWithWarnings(output, warnings) {
@@ -710,26 +734,22 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
   });
 
-  it("rejects malformed structured output as a bounded schema error", async function () {
+  it("rejects a malformed reported finding as a bounded schema error", async function () {
     const { model } = strictStreamModel([
-      outputStep({
-        narrative: "Synthetic malformed review.",
-        findings: [],
-        suggestions: [],
-        undeclared: true,
-      }),
+      outputStep(
+        validOutput({
+          findings: [{ artifactKind: "finding", undeclared: true }],
+        }),
+      ),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 
     expect(
       await captureError(collect(gateway.stream(projectRequest()))),
     ).toMatchObject({
-      code: "AI_PROVIDER_SCHEMA_INVALID",
       category: "schema",
       retryable: false,
-      providerStatusCode: null,
-      providerErrorType: "AI_NoObjectGeneratedError",
-      message: "The AI provider returned an invalid structured response.",
     });
   });
 
@@ -894,6 +914,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     async function ({ request, suggestion }) {
       const { model } = strictStreamModel([
         outputStep(validOutput({ suggestions: [suggestion] })),
+        closingStep(),
       ]);
       const gateway = createGateway(model);
 
@@ -928,6 +949,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
           ],
         }),
       ),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 
@@ -959,6 +981,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
           ],
         }),
       ),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 
@@ -3171,6 +3194,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     const suggestion = validSuggestion();
     const { model } = strictStreamModel([
       outputStep(validOutput({ suggestions: [suggestion] })),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 
@@ -3191,6 +3215,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
   it("rejects a structured suggestion when the request skill is null", async function () {
     const { model } = strictStreamModel([
       outputStep(validOutput({ suggestions: [validSuggestion()] })),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 
@@ -3208,6 +3233,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
   it("keeps project review read-only even when a skill is selected", async function () {
     const { model } = strictStreamModel([
       outputStep(validOutput({ suggestions: [validSuggestion()] })),
+      closingStep(),
     ]);
     const gateway = createGateway(model);
 

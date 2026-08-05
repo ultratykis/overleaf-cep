@@ -69,28 +69,6 @@ function selectionRequest({
     }),
   });
 }
-function documentRequest({
-  action = "review",
-  instruction,
-  requestId = "request-document",
-  requestProjectId = projectId,
-}) {
-  return Object.freeze({
-    requestId,
-    projectId: requestProjectId,
-    action,
-    instruction,
-    skill: action === "review" ? "referee-review" : "line-edit",
-    scope: Object.freeze({
-      kind: "document",
-      documentId,
-      path,
-      baseRevision: 7,
-      baseTextHash,
-      text: baseText,
-    }),
-  });
-}
 function selectionSession(options) {
   const currentDocument = {
     doc_id: documentId,
@@ -107,29 +85,6 @@ function selectionSession(options) {
   };
   return Object.freeze({
     request: selectionRequest(options),
-    binding: Object.freeze({
-      currentDocument,
-      shareDocument: currentDocument.doc,
-      trackChanges: false,
-    }),
-  });
-}
-function documentSession(options) {
-  const currentDocument = {
-    doc_id: documentId,
-    joined: true,
-    doc: {
-      connection: {
-        state: "ok",
-      },
-      getVersion: () => 7,
-    },
-    getSnapshot: () => baseText,
-    hasBufferedOps: () => false,
-    getTrackingChanges: () => false,
-  };
-  return Object.freeze({
-    request: documentRequest(options),
     binding: Object.freeze({
       currentDocument,
       shareDocument: currentDocument.doc,
@@ -240,7 +195,6 @@ function reviewEvents(request) {
 }
 function renderPanel({
   captureSelectionSession,
-  captureDocumentSession,
   streamRequest,
   createRequestId = () => "request-duplicate",
   getSelectionContext,
@@ -256,7 +210,12 @@ function renderPanel({
       projectId,
       createRequestId,
       captureSelectionSession,
-      captureDocumentSession,
+      selectionPreview: {
+        fileType: "tex",
+        fromLine: 1,
+        toLine: 1,
+        wordCount: 3,
+      },
       streamRequest,
       getSelectionContext,
       navigateEvidence,
@@ -342,7 +301,9 @@ describe("AI reviewer: single document selection workspace", function () {
       expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
       expect(screen.getByText("The selected phrase needs a more precise term."))
         .to.exist;
-      expect(screen.getAllByText(`${path} (chars 6\u201310)`)).to.have.length(2);
+      expect(screen.getAllByText(`${path} (chars 6\u201310)`)).to.have.length(
+        2,
+      );
       expect(screen.getByText("Original: beta")).to.exist;
       expect(screen.getByText("Replacement: clear")).to.exist;
       expect(screen.getByText("Rationale: Use a more precise synthetic term."))
@@ -357,101 +318,6 @@ describe("AI reviewer: single document selection workspace", function () {
       expect(session.binding.currentDocument.getSnapshot()).to.equal(baseText);
     });
   }
-  it("captures the current document and streams its exact document-scoped request", async function () {
-    const instruction = "Review the current document.";
-    const capture = deferred();
-    const stream = deferred();
-    const captureDocumentSession = sinon.stub().returns(capture.promise);
-    let streamCall;
-    const streamRequest = sinon.stub().callsFake((call) => {
-      streamCall = call;
-      return stream.promise;
-    });
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange(["ai-hunk-v1-document"]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-document"]),
-        destroy: sinon.stub(),
-      };
-    });
-    const applySelectionSuggestion = sinon.stub().resolves({
-      status: "applied",
-    });
-    renderPanel({
-      captureDocumentSession,
-      streamRequest,
-      getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
-      applySelectionSuggestion,
-    });
-
-    await clickSelectionAction("Review current document", instruction);
-    expect(
-      captureDocumentSession.calledOnceWithExactly({
-        requestId: "request-duplicate",
-        action: "review",
-        instruction,
-      }),
-    ).to.equal(true);
-    const session = documentSession({
-      instruction,
-      requestId: "request-duplicate",
-    });
-    await act(async () => {
-      capture.resolve({
-        status: "ready",
-        session,
-      });
-      await capture.promise;
-    });
-    await waitFor(() => expect(streamRequest.calledOnce).to.equal(true));
-
-    expect(streamCall.request).to.equal(session.request);
-    expect(streamCall.request.scope).to.deep.equal({
-      kind: "document",
-      documentId,
-      path,
-      baseRevision: 7,
-      baseTextHash,
-      text: baseText,
-    });
-    act(() => {
-      for (const event of reviewEvents(session.request)) {
-        streamCall.onEvent(event);
-      }
-    });
-    await act(async () => {
-      stream.resolve();
-      await stream.promise;
-    });
-    await screen.findByText("Completed");
-    expect(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).to.exist;
-    expect(
-      screen.getByRole("button", {
-        name: "Discard suggestion",
-      }),
-    ).to.exist;
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await screen.findByText("Suggestion preview ready");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Apply selected changes",
-      }),
-    );
-    await screen.findByText("Status: Applied");
-    expect(applySelectionSuggestion.calledOnce).to.equal(true);
-    expect(
-      applySelectionSuggestion.firstCall.args[0].session.request.scope.kind,
-    ).to.equal("document");
-  });
   it("pins distinct actions and discard states for findings, citation findings, and suggestions", async function () {
     const instruction = "Review the selected phrase.";
     const session = selectionSession({
@@ -516,23 +382,26 @@ describe("AI reviewer: single document selection workspace", function () {
     });
     await screen.findByText("Completed");
 
+    // Both kinds of finding are pinned in the one list above the conversation.
     const findingsSection = screen.getByRole("region", {
       name: "Review findings",
     });
+    const findingCard = within(findingsSection)
+      .getByText("Ambiguous synthetic phrase")
+      .closest(".ai-reviewer-artifact");
+    const citationCard = within(findingsSection)
+      .getByText("Synthetic citation issue")
+      .closest(".ai-reviewer-artifact");
     expect(
-      within(findingsSection)
+      within(findingCard)
         .getAllByRole("button")
         .map((button) => button.textContent),
     ).to.deep.equal(["Go to text", "Discuss finding", "Discard finding"]);
-    expect(within(findingsSection).queryByText(/Apply/u)).not.to.exist;
-    expect(within(findingsSection).queryByText(/Copy proposed text/u)).not.to
-      .exist;
+    expect(within(findingCard).queryByText(/Apply/u)).not.to.exist;
+    expect(within(findingCard).queryByText(/Copy proposed text/u)).not.to.exist;
 
-    const citationSection = screen.getByRole("region", {
-      name: "Review citation findings",
-    });
     expect(
-      within(citationSection)
+      within(citationCard)
         .getAllByRole("button")
         .map((button) => button.textContent),
     ).to.deep.equal([
@@ -541,7 +410,7 @@ describe("AI reviewer: single document selection workspace", function () {
       "Copy proposed text",
       "Discard citation finding",
     ]);
-    expect(within(citationSection).queryByText(/Apply/u)).not.to.exist;
+    expect(within(citationCard).queryByText(/Apply/u)).not.to.exist;
 
     const suggestionsSection = screen.getByRole("region", {
       name: "Review suggestions",
@@ -562,7 +431,7 @@ describe("AI reviewer: single document selection workspace", function () {
     ).not.to.exist;
 
     fireEvent.click(
-      within(citationSection).getByRole("button", {
+      within(citationCard).getByRole("button", {
         name: "Copy proposed text",
       }),
     );
@@ -574,37 +443,34 @@ describe("AI reviewer: single document selection workspace", function () {
     ).to.equal(true);
 
     fireEvent.click(
-      within(findingsSection).getByRole("button", {
+      within(findingCard).getByRole("button", {
         name: "Discard finding",
       }),
     );
-    expect(within(findingsSection).getByText("Status: Discarded")).to.exist;
+    // A resolved finding keeps its place in the list and only dims.
+    expect(within(findingCard).getByText("Status: Discarded")).to.exist;
     expect(
-      within(findingsSection)
-        .getByText("Ambiguous synthetic phrase")
-        .closest("details")?.open,
-    ).to.equal(false);
-    expect(within(findingsSection).queryAllByRole("button")).to.have.length(1);
+      findingCard.classList.contains("ai-reviewer-artifact-resolved"),
+    ).to.equal(true);
+    expect(within(findingCard).queryAllByRole("button")).to.have.length(1);
     expect(
-      within(findingsSection).getByRole("button", {
+      within(findingCard).getByRole("button", {
         name: "Discuss finding",
       }),
     ).to.exist;
 
     fireEvent.click(
-      within(citationSection).getByRole("button", {
+      within(citationCard).getByRole("button", {
         name: "Discard citation finding",
       }),
     );
-    expect(within(citationSection).getByText("Status: Discarded")).to.exist;
+    expect(within(citationCard).getByText("Status: Discarded")).to.exist;
     expect(
-      within(citationSection)
-        .getByText("Synthetic citation issue")
-        .closest("details")?.open,
-    ).to.equal(false);
-    expect(within(citationSection).queryAllByRole("button")).to.have.length(1);
+      citationCard.classList.contains("ai-reviewer-artifact-resolved"),
+    ).to.equal(true);
+    expect(within(citationCard).queryAllByRole("button")).to.have.length(1);
     expect(
-      within(citationSection).getByRole("button", {
+      within(citationCard).getByRole("button", {
         name: "Discuss citation finding",
       }),
     ).to.exist;
@@ -617,9 +483,10 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(within(suggestionsSection).getByText("Status: Discarded")).to.exist;
     expect(
       within(suggestionsSection)
-        .getByText("Use a more precise synthetic term.")
-        .closest("details")?.open,
-    ).to.equal(false);
+        .getByText("Rationale: Use a more precise synthetic term.")
+        .closest(".ai-reviewer-artifact")
+        .classList.contains("ai-reviewer-artifact-resolved"),
+    ).to.equal(true);
     expect(within(suggestionsSection).queryAllByRole("button")).to.have.length(
       1,
     );
@@ -1412,58 +1279,6 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     expect(secondDestroy.called).to.equal(false);
   });
-  it("rejects project-scope suggestions without rendering any apply affordance", async function () {
-    const request = {
-      requestId: "request-project-0001",
-      projectId,
-      action: "review",
-      instruction: "Review the synthetic project.",
-      skill: "referee-review",
-      scope: {
-        kind: "project",
-      },
-    };
-    const streamRequest = sinon.stub().callsFake(async (call) => {
-      call.onEvent(startedEvent(request));
-      call.onEvent({
-        ...eventBase(request.requestId, 1, "suggestion"),
-        type: "suggestion",
-        suggestion: {
-          ...suggestion({
-            ...request,
-            scope: {
-              kind: "selection",
-            },
-          }),
-          requestId: request.requestId,
-        },
-      });
-      call.onEvent({
-        ...eventBase(request.requestId, 2, "completed"),
-        type: "completed",
-        finishReason: "stop",
-      });
-    });
-    renderPanel({
-      createRequestId: () => request.requestId,
-      streamRequest,
-      getSelectionContext: sinon.stub(),
-      mountSuggestionPreview: sinon.stub(),
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
-    await screen.findByText("A project review cannot return edit suggestions.");
-    expect(screen.queryByText("Replacement: clear")).not.to.exist;
-    expect(
-      screen.queryByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).not.to.exist;
-    expect(
-      screen.queryByRole("button", {
-        name: "Apply selected changes",
-      }),
-    ).not.to.exist;
-  });
   it("offers a preview for a prototype-shaped suggestion ID with no decision", async function () {
     const session = selectionSession({
       action: "rewrite",
@@ -1700,81 +1515,6 @@ async function renderCompletedEvidenceWorkspace({
   };
 }
 
-async function renderCompletedProjectEvidenceWorkspace({
-  navigationResult = {
-    status: "navigated",
-  },
-} = {}) {
-  const navigateEvidence = sinon.stub().resolves(navigationResult);
-  const getSelectionContext = sinon.stub();
-  const resolveEvidenceDocument = sinon.stub().returns({
-    documentId: "document-project-evidence",
-    path: "chapters/other.tex",
-  });
-  const openEvidenceDocument = sinon.stub().resolves({
-    _id: "document-project-evidence",
-  });
-  let emittedFinding;
-  const streamRequest = sinon.stub().callsFake(async (call) => {
-    emittedFinding = {
-      id: "finding-project-0001",
-      requestId: call.request.requestId,
-      projectId: call.request.projectId,
-      artifactKind: "finding",
-      severity: "warning",
-      category: "structure",
-      title: "Project evidence",
-      message: "This project result points to another project document.",
-      evidence: [
-        {
-          path: "chapters/other.tex",
-          range: {
-            from: 1,
-            to: 3,
-          },
-          revision: 12,
-          textHash: "b".repeat(64),
-        },
-      ],
-      suggestionIds: [],
-    };
-    call.onEvent(startedEvent(call.request));
-    call.onEvent({
-      ...eventBase(call.request.requestId, 1, "finding"),
-      type: "finding",
-      finding: emittedFinding,
-    });
-    call.onEvent({
-      ...eventBase(call.request.requestId, 2, "completed"),
-      type: "completed",
-      finishReason: "stop",
-    });
-  });
-  renderPanel({
-    streamRequest,
-    navigateEvidence,
-    getSelectionContext,
-    resolveEvidenceDocument,
-    openEvidenceDocument,
-  });
-
-  fireEvent.click(
-    screen.getByRole("button", {
-      name: "Run review",
-    }),
-  );
-  await screen.findByText("Completed");
-
-  return {
-    emittedFinding,
-    getSelectionContext,
-    navigateEvidence,
-    openEvidenceDocument,
-    resolveEvidenceDocument,
-    streamRequest,
-  };
-}
-
 describe("AI reviewer: single document evidence navigation workspace", function () {
   it("passes one exact completed finding target to the injected navigator", async function () {
     const navigateEvidence = sinon.stub().resolves({
@@ -1916,58 +1656,6 @@ describe("AI reviewer: single document evidence navigation workspace", function 
       "AI_EVIDENCE_PRIVATE_REJECTION",
     );
     expect(screen.getByText("Completed")).to.exist;
-  });
-
-  it("offers cross-file navigation for project-scope evidence", async function () {
-    const workspace = await renderCompletedProjectEvidenceWorkspace();
-    expect(screen.getByText("chapters/other.tex (chars 1–3)")).to.exist;
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Go to text",
-      }),
-    );
-    await waitFor(() =>
-      expect(workspace.navigateEvidence.calledOnce).to.equal(true),
-    );
-
-    const options = workspace.navigateEvidence.firstCall.args[0];
-    expect(options.target).to.deep.include({
-      kind: "project",
-      requestId: workspace.emittedFinding.requestId,
-      findingId: workspace.emittedFinding.id,
-      projectId,
-      path: "chapters/other.tex",
-      revision: 12,
-      textHash: "b".repeat(64),
-    });
-    expect(options.target.range).to.deep.equal({
-      from: 1,
-      to: 3,
-    });
-    expect(options.getContext).to.equal(workspace.getSelectionContext);
-    expect(options.resolveDocument).to.equal(workspace.resolveEvidenceDocument);
-    expect(options.openDocument).to.equal(workspace.openEvidenceDocument);
-    expect(await screen.findByText("Evidence selected")).to.exist;
-  });
-
-  it("announces that only the file opened when the project evidence range no longer matches", async function () {
-    await renderCompletedProjectEvidenceWorkspace({
-      navigationResult: {
-        status: "opened",
-      },
-    });
-
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Go to text",
-      }),
-    );
-
-    expect(
-      await screen.findByText(
-        "Evidence file opened; range could not be confirmed",
-      ),
-    ).to.exist;
   });
 
   it("keeps range-less selection evidence as read-only text", async function () {
@@ -2215,7 +1903,7 @@ describe("AI reviewer: OT safety selection workspace", function () {
       "Review selection",
       "Review the selected phrase.",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await screen.findByText("Cancelled");
     await clickSelectionAction(
       "Rewrite selection",
@@ -2287,7 +1975,7 @@ describe("AI reviewer: OT safety selection workspace", function () {
       "Review the selected phrase.",
     );
     await waitFor(() => expect(streamCalls).to.have.length(1));
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(streamCalls[0].signal.aborted).to.equal(true);
     await clickSelectionAction(
       "Rewrite selection",
@@ -2322,7 +2010,7 @@ describe("AI reviewer: OT safety selection workspace", function () {
     expect(screen.queryByText("Stale result A.")).not.to.exist;
     expect(screen.queryByText("Stale finding A")).not.to.exist;
     expect(screen.getByText("Streaming")).to.exist;
-    expect(screen.getByRole("button", { name: "Cancel" })).to.exist;
+    expect(screen.getByRole("button", { name: "Stop" })).to.exist;
     act(() => {
       streamCalls[1].onEvent(startedEvent(sessionB.request));
       streamCalls[1].onEvent({

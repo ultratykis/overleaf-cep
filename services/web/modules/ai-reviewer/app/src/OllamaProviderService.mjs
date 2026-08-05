@@ -544,16 +544,6 @@ export function createAiReviewerProviderService(dependencies = {}) {
 
     /**
      * @param {unknown} input
-     */
-    createDiscussionGateway(input) {
-      const config = parseAiReviewerProviderConfig(input);
-      return createTransport(config).createDiscussionGateway({
-        contextLength: config.contextLength,
-      });
-    },
-
-    /**
-     * @param {unknown} input
      * @param {{
      *   readProjectFile: Function,
      *   projectContext?: unknown,

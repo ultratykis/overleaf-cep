@@ -353,6 +353,86 @@ describe("AI reviewer workspace persistence", function () {
     );
   });
 
+  it("keeps the selected model through every workspace rewrite", async function () {
+    const selectedModel = {
+      connectionId: "connection-workspace-0001",
+      model: "deterministic-v1",
+    };
+    const discussion = openWorkspaceDiscussion({ createdOrder: 2 });
+    const input = {
+      runs: [
+        workspaceRun({
+          requestId: "request-resolved",
+          generation: 1,
+          createdOrder: 1,
+          findingStatus: "discarded",
+        }),
+      ],
+      discussions: [discussion],
+      selectedModel,
+    };
+    const { model, records } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+
+    expect(await store.save(userId, projectId, input, 0)).toEqual({
+      revision: 1,
+      workspace: input,
+    });
+    // Clearing artifacts resolved in a prior session and deleting a discussion
+    // both rebuild the workspace, and the selection must survive both.
+    expect(await store.load(userId, projectId)).toEqual({
+      revision: 2,
+      workspace: { runs: [], discussions: [discussion], selectedModel },
+    });
+    expect(
+      await store.deleteDiscussion(userId, projectId, discussion.id),
+    ).toEqual({
+      revision: 3,
+      workspace: { ...emptyWorkspace(), selectedModel },
+    });
+    expect(records.get(recordKey(userId, projectId)).workspace).toEqual({
+      ...emptyWorkspace(),
+      selectedModel,
+    });
+  });
+
+  it("loads a workspace stored before the selected model existed", async function () {
+    const input = {
+      runs: [],
+      discussions: [openWorkspaceDiscussion()],
+    };
+    const { model, records } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+
+    await store.save(userId, projectId, input, 0);
+    const loaded = await store.load(userId, projectId);
+
+    expect(loaded.workspace.selectedModel ?? null).toBeNull();
+    // A record without the field must survive untouched, so no migration is
+    // needed for workspaces stored before the selection was added.
+    expect(loaded.workspace).toEqual(input);
+    expect(records.get(recordKey(userId, projectId)).workspace).toEqual(input);
+  });
+
+  it("rejects a selected model that is not a connection and model pair", async function () {
+    const { model } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+
+    expect(
+      await captureError(
+        store.save(
+          userId,
+          projectId,
+          {
+            ...emptyWorkspace(),
+            selectedModel: { connectionId: "connection-workspace-0001" },
+          },
+          0,
+        ),
+      ),
+    ).toBeInstanceOf(AiReviewerWorkspaceValidationError);
+  });
+
   it("keeps resolved artifacts on save, then clears them and empty unbound runs on load", async function () {
     const unresolvedRun = workspaceRun({
       requestId: "request-unresolved",

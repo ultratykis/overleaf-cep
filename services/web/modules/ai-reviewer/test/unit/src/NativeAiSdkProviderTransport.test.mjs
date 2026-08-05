@@ -88,14 +88,22 @@ async function collect(stream) {
   return values;
 }
 
-function discussionRequest() {
+function conversationRequest() {
   return {
-    requestId: "native-discussion-request-0001",
-    discussionId: "native-discussion-0001",
+    requestId: "native-conversation-request-0001",
     projectId: "native-project-0001",
-    subject: null,
-    turns: [{ role: "user", text: "Explain this synthetic case." }],
+    action: "review",
+    instruction: "Explain this synthetic case.",
+    skill: null,
   };
+}
+
+function agentGateway(transport, options = {}) {
+  return transport.createAgentGateway({
+    contextLength: 8_192,
+    readProjectFile: async () => ({ path: "main.tex", text: "Synthetic." }),
+    ...options,
+  });
 }
 
 describe("AI reviewer: native AI SDK provider transports", function () {
@@ -108,9 +116,7 @@ describe("AI reviewer: native AI SDK provider transports", function () {
         modelTag: modelId,
         fetchImpl,
       });
-      const gateway = transport.createDiscussionGateway({
-        contextLength: 8_192,
-      });
+      const gateway = agentGateway(transport);
 
       expect(gateway).toMatchObject({
         provider: name,
@@ -184,7 +190,7 @@ describe("AI reviewer: native AI SDK provider transports", function () {
   );
 
   it.each(providers)(
-    "passes $name discussion streams through the shared bounded gateway normalizer",
+    "passes $name streams through the shared bounded gateway normalizer",
     async function ({ name, model: modelId, Transport }) {
       const secret = "PRIVATE_NATIVE_STREAM_WARNING";
       const fixture = nativeTransportFixture({ Transport, model: modelId });
@@ -213,15 +219,12 @@ describe("AI reviewer: native AI SDK provider transports", function () {
         }),
       });
       let id = 0;
-      const gateway = fixture.transport.createDiscussionGateway({
-        contextLength: 8_192,
+      const gateway = agentGateway(fixture.transport, {
         now: () => createdAt,
         createId: (kind) => `${kind}-${(id += 1)}`,
       });
 
-      const events = await collect(
-        gateway.streamDiscussion(discussionRequest()),
-      );
+      const events = await collect(gateway.stream(conversationRequest()));
       expect(events).toEqual([
         expect.objectContaining({
           type: "started",
@@ -262,12 +265,10 @@ describe("AI reviewer: native AI SDK provider transports", function () {
           isRetryable: true,
         }),
       );
-      const gateway = fixture.transport.createDiscussionGateway({
-        contextLength: 8_192,
-      });
+      const gateway = agentGateway(fixture.transport);
 
       const error = await captureError(
-        collect(gateway.streamDiscussion(discussionRequest())),
+        collect(gateway.stream(conversationRequest())),
       );
 
       expect(error).toMatchObject({

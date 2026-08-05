@@ -29,8 +29,12 @@ import {
 
 const CANONICAL_MODEL_ARCHITECTURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
-const MAX_CONTEXT_METADATA_BYTES = 65_536;
-const MAX_CONTEXT_METADATA_CHUNKS = 128;
+// Ollama answers /api/show with the full modelfile and license text, which is
+// already ~80 KB for a small model. The old 64 KiB ceiling truncated that, so
+// detection failed and every local model silently fell back to the 4 096
+// default — far below the 262 144 the model actually reports.
+const MAX_CONTEXT_METADATA_BYTES = 1_048_576;
+const MAX_CONTEXT_METADATA_CHUNKS = 2_048;
 const MAX_NONSTREAM_CONTENT_PARTS = 512;
 const MAX_NONSTREAM_OUTPUT_CHARACTERS = 100_000;
 const MAX_PROMPT_CHARACTERS = 100_000;
@@ -3253,38 +3257,6 @@ export class HardenedAiSdkProviderTransport {
     if (streamFailed) {
       throw classifyUntrustedProviderError(streamError, signal);
     }
-  }
-
-  /**
-   * Create the subject-bound discussion path from the same private concrete
-   * model as review requests. Discussions expose no project-read tool.
-   *
-   * @param {{
-   *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
-   *   now?: () => string,
-   *   createId?: (kind: 'event' | 'finding' | 'suggestion') => string,
-   * }} options
-   */
-  createDiscussionGateway({ contextLength, now, createId }) {
-    return new AiSdkAgentGateway({
-      model: this.#languageModel,
-      provider: this.#provider,
-      modelId: this.#modelTag,
-      providerOptions: this.#gatewayProviderOptions,
-      contextLength,
-      readProjectFile() {
-        throw new AgentGatewayError(
-          "Project reads are not available in a discussion.",
-          {
-            code: "AI_TOOL_NOT_ALLOWED",
-            category: "schema",
-            retryable: false,
-          },
-        );
-      },
-      now,
-      createId,
-    });
   }
 
   /**

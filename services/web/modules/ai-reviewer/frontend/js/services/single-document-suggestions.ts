@@ -76,7 +76,8 @@ function parseRequest(request: unknown): SingleDocumentRequest {
       "The AI reviewer request is invalid.",
     );
   }
-  if (parsed.data.scope.kind === "project") {
+  // A scopeless request is project-wide, so it cannot bind an edit either.
+  if (parsed.data.scope == null || parsed.data.scope.kind === "project") {
     throw new SingleDocumentSuggestionError(
       "AI_SUGGESTION_SCOPE_UNSUPPORTED",
       "A single-document suggestion requires a document-bound request.",

@@ -419,13 +419,14 @@ function createRequest(
             text: snapshot.text,
           },
   });
-  if (!parsed.success || parsed.data.scope.kind !== target) {
+  const scope = parsed.success ? parsed.data.scope : null;
+  if (!parsed.success || scope == null || scope.kind !== target) {
     return null;
   }
-  if (parsed.data.scope.kind === "selection") {
-    Object.freeze(parsed.data.scope.range);
+  if (scope.kind === "selection") {
+    Object.freeze(scope.range);
   }
-  Object.freeze(parsed.data.scope);
+  Object.freeze(scope);
   Object.freeze(parsed.data);
   return parsed.data;
 }

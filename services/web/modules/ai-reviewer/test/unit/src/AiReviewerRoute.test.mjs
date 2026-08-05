@@ -9,10 +9,7 @@ import {
 } from "../../../app/src/AgentGateway.mjs";
 import { createAiReviewerController } from "../../../app/src/AiReviewerController.mjs";
 import { createAiReviewerRouter } from "../../../app/src/AiReviewerRouter.mjs";
-import {
-  AgentEventSchema,
-  DiscussionEventSchema,
-} from "../../../shared/contracts.mjs";
+import { AgentEventSchema } from "../../../shared/contracts.mjs";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
 
@@ -60,47 +57,50 @@ function events() {
   ];
 }
 
-function discussionRequest() {
+function conversationRequest() {
   return {
-    requestId: "discussion-request-0001",
-    discussionId: "discussion-0001",
+    requestId: "conversation-request-0001",
     projectId: "project-0001",
-    subject: {
-      kind: "scope",
-      sourceRequest: documentRequest(),
-    },
+    action: "review",
+    instruction: "Explain the proposed review in more detail.",
+    skill: null,
     turns: [
       {
         role: "user",
-        text: "Explain the proposed review in more detail.",
+        text: "What did you find?",
+      },
+      {
+        role: "assistant",
+        text: "One terminology issue.",
       },
     ],
   };
 }
 
-function discussionEvents() {
+function conversationEvents() {
   return [
     {
       type: "started",
-      eventId: "discussion-event-0001",
-      requestId: "discussion-request-0001",
+      eventId: "conversation-event-0001",
+      requestId: "conversation-request-0001",
       sequence: 0,
       createdAt,
       provider: "fake",
       model: "deterministic-v1",
+      skill: null,
     },
     {
       type: "text.delta",
-      eventId: "discussion-event-0002",
-      requestId: "discussion-request-0001",
+      eventId: "conversation-event-0002",
+      requestId: "conversation-request-0001",
       sequence: 1,
       createdAt,
-      delta: "Synthetic discussion response.",
+      delta: "Synthetic conversation response.",
     },
     {
       type: "completed",
-      eventId: "discussion-event-0003",
-      requestId: "discussion-request-0001",
+      eventId: "conversation-event-0003",
+      requestId: "conversation-request-0001",
       sequence: 2,
       createdAt,
       finishReason: "stop",
@@ -233,6 +233,20 @@ const publicProviderError = {
   retryable: true,
 };
 
+const publicModelBusyError = {
+  code: "AI_PROVIDER_MODEL_BUSY",
+  category: "rate-limit",
+  message: "This model is busy right now. Wait a moment, then try again.",
+  retryable: true,
+};
+
+const publicModelUnavailableError = {
+  code: "AI_PROVIDER_MODEL_UNAVAILABLE",
+  category: "configuration",
+  message: "This model is not available. Choose a different model.",
+  retryable: false,
+};
+
 const publicProtocolError = {
   code: "AI_STREAM_PROTOCOL_ERROR",
   category: "schema",
@@ -313,15 +327,6 @@ function parseNdjson(response) {
     .map((line) => AgentEventSchema.parse(JSON.parse(line)));
 }
 
-function parseDiscussionNdjson(response) {
-  return response.chunks
-    .join("")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => DiscussionEventSchema.parse(JSON.parse(line)));
-}
-
 function nonCooperativeGateway() {
   const next = vi.fn(() => new Promise(() => {}));
   const returnIterator = vi.fn(async () => ({ done: true, value: undefined }));
@@ -358,7 +363,6 @@ describe("AI reviewer: module shell authenticated route", function () {
     const listModels = vi.fn();
     const testConnection = vi.fn();
     const stream = vi.fn();
-    const discussionStream = vi.fn();
     const getWorkspace = vi.fn();
     const saveWorkspace = vi.fn();
     const getCommentProvenance = vi.fn();
@@ -370,6 +374,9 @@ describe("AI reviewer: module shell authenticated route", function () {
     const createConnection = vi.fn();
     const updateConnection = vi.fn();
     const deleteConnection = vi.fn();
+    const listSkills = vi.fn();
+    const uploadSkill = vi.fn();
+    const deleteSkill = vi.fn();
     const requireLogin = vi.fn(() => login);
     const get = vi.fn();
     const post = vi.fn();
@@ -392,7 +399,6 @@ describe("AI reviewer: module shell authenticated route", function () {
       listModels,
       testConnection,
       stream,
-      discussionStream,
       getWorkspace,
       saveWorkspace,
       getCommentProvenance,
@@ -404,6 +410,9 @@ describe("AI reviewer: module shell authenticated route", function () {
       createConnection,
       updateConnection,
       deleteConnection,
+      listSkills,
+      uploadSkill,
+      deleteSkill,
     });
 
     router.apply(webRouter);
@@ -474,15 +483,6 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       stream,
     );
-    expect(post).toHaveBeenNthCalledWith(
-      3,
-      "/project/:project_id/ai-reviewer/discussion-stream",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
-      discussionStream,
-    );
     expect(remove).toHaveBeenNthCalledWith(
       1,
       "/project/:project_id/ai-reviewer/workspace/discussions/:discussion_id",
@@ -520,7 +520,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       listConnections,
     );
     expect(post).toHaveBeenNthCalledWith(
-      4,
+      3,
       "/project/:project_id/ai-reviewer/connections",
       login,
       rateLimit,
@@ -546,10 +546,37 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       deleteConnection,
     );
-    expect(anotherRouter.get).toHaveBeenCalledTimes(4);
+    expect(get).toHaveBeenNthCalledWith(
+      5,
+      "/project/:project_id/ai-reviewer/skills",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      listSkills,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/project/:project_id/ai-reviewer/skills",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      uploadSkill,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      5,
+      "/project/:project_id/ai-reviewer/skills/:skill_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteSkill,
+    );
+    expect(anotherRouter.get).toHaveBeenCalledTimes(5);
     expect(anotherRouter.put).toHaveBeenCalledTimes(3);
     expect(anotherRouter.post).toHaveBeenCalledTimes(4);
-    expect(anotherRouter.delete).toHaveBeenCalledTimes(4);
+    expect(anotherRouter.delete).toHaveBeenCalledTimes(5);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
     expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);
@@ -592,9 +619,9 @@ describe("AI reviewer: module shell authenticated route", function () {
       "AI_REVIEWER_USER_CONCURRENCY_LIMITED",
     ],
     [
-      "discussion",
-      "discussionStream",
-      discussionRequest(),
+      "conversation",
+      "stream",
+      conversationRequest(),
       "system",
       "AI_REVIEWER_SYSTEM_CONCURRENCY_LIMITED",
     ],
@@ -908,25 +935,119 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
   });
 
-  it("streams discussion events through the discussion gateway path", async function () {
-    const reviewStream = vi.fn();
-    const streamDiscussion = vi.fn(async function* (input) {
-      expect(input).toEqual(discussionRequest());
-      yield* discussionEvents();
+  it.each([
+    {
+      label: "a rate-limited model",
+      internalCode: "AI_PROVIDER_REQUEST_FAILED",
+      internalCategory: "provider",
+      diagnostics: {
+        providerStatusCode: 429,
+        providerErrorType: "AI_APICallError",
+      },
+      publicError: publicModelBusyError,
+    },
+    {
+      label: "a model that is out of capacity",
+      internalCode: "AI_PROVIDER_REQUEST_FAILED",
+      internalCategory: "provider",
+      diagnostics: {
+        providerStatusCode: 503,
+        providerErrorType: "AI_APICallError",
+      },
+      publicError: publicModelBusyError,
+    },
+    {
+      label: "a model the provider no longer serves",
+      internalCode: "AI_PROVIDER_REQUEST_FAILED",
+      internalCategory: "provider",
+      diagnostics: {
+        providerStatusCode: 404,
+        providerErrorType: "AI_APICallError",
+      },
+      publicError: publicModelUnavailableError,
+    },
+    {
+      label: "a model the SDK cannot resolve",
+      internalCode: "AI_PROVIDER_NOT_CONFIGURED",
+      internalCategory: "configuration",
+      diagnostics: { providerErrorType: "AI_NoSuchModelError" },
+      publicError: publicModelUnavailableError,
+    },
+    {
+      label: "a rejection with no actionable signal",
+      internalCode: "AI_PROVIDER_REQUEST_FAILED",
+      internalCategory: "provider",
+      diagnostics: {
+        providerStatusCode: 400,
+        providerErrorType: "AI_APICallError",
+      },
+      publicError: publicProviderError,
+    },
+  ])(
+    "names the action for $label from its transport signals alone",
+    async function ({
+      internalCode,
+      internalCategory,
+      diagnostics,
+      publicError,
+    }) {
+      // The provider's own wording can quote the manuscript, so the guidance
+      // must come from the status and SDK error type instead.
+      const privateMessage =
+        "PRIVATE_PROVIDER_BODY This model is no longer available to new users.";
+      const gateway = {
+        async *stream() {
+          yield events()[0];
+          throw new AgentGatewayError(privateMessage, {
+            code: internalCode,
+            category: internalCategory,
+            retryable: false,
+            ...diagnostics,
+          });
+        },
+      };
+      const controller = createAiReviewerController({
+        gatewayFactory: () => gateway,
+        now: () => createdAt,
+        eventId: () => "event-error",
+      });
+      const response = new FakeResponse();
+
+      await controller.stream(httpRequest(), response);
+
+      const terminalEvent = parseNdjson(response).at(-1);
+      expect(terminalEvent).toMatchObject({
+        type: "error",
+        error: publicError,
+      });
+      if (terminalEvent?.type !== "error") {
+        throw new Error("Expected a terminal error event.");
+      }
+      expect(Object.keys(terminalEvent.error).sort()).toEqual([
+        "category",
+        "code",
+        "message",
+        "retryable",
+      ]);
+      expect(response.chunks.join("")).not.toContain(privateMessage);
+    },
+  );
+
+  it("streams a scopeless conversation through the same gateway path", async function () {
+    const stream = vi.fn(async function* (input) {
+      expect(input).toEqual(conversationRequest());
+      yield* conversationEvents();
     });
-    const gatewayFactory = vi.fn(() => ({
-      stream: reviewStream,
-      streamDiscussion,
-    }));
+    const gatewayFactory = vi.fn(() => ({ stream }));
     const controller = createAiReviewerController({
       gatewayFactory,
       now: () => createdAt,
       eventId: () => "event-error",
     });
-    const rawHttpRequest = httpRequest(discussionRequest());
+    const rawHttpRequest = httpRequest(conversationRequest());
     const response = new FakeResponse();
 
-    await controller.discussionStream(rawHttpRequest, response);
+    await controller.stream(rawHttpRequest, response);
 
     expect(response.statusCode).toBe(200);
     expect(response.headers.get("content-type")).toBe(
@@ -935,25 +1056,22 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     expect(response.writableEnded).toBe(true);
-    expect(parseDiscussionNdjson(response)).toEqual(discussionEvents());
+    expect(parseNdjson(response)).toEqual(conversationEvents());
     expect(gatewayFactory).toHaveBeenCalledExactlyOnceWith({
-      request: discussionRequest(),
+      request: conversationRequest(),
       httpRequest: rawHttpRequest,
       signal: expect.any(AbortSignal),
       setFailureProvider: expect.any(Function),
     });
-    expect(streamDiscussion).toHaveBeenCalledExactlyOnceWith(
-      discussionRequest(),
-      { signal: expect.any(AbortSignal) },
-    );
-    expect(reviewStream).not.toHaveBeenCalled();
+    expect(stream).toHaveBeenCalledExactlyOnceWith(conversationRequest(), {
+      signal: expect.any(AbortSignal),
+    });
   });
 
-  it("redacts discussion provider failures into a typed terminal event", async function () {
-    const secretSentinel = "PRIVATE_DISCUSSION_PROVIDER_SECRET";
+  it("redacts conversation provider failures into a typed terminal event", async function () {
+    const secretSentinel = "PRIVATE_CONVERSATION_PROVIDER_SECRET";
     const gateway = {
-      stream: vi.fn(),
-      streamDiscussion() {
+      stream() {
         throw new AgentGatewayError(secretSentinel, {
           code: secretSentinel,
           category: "provider",
@@ -968,16 +1086,13 @@ describe("AI reviewer: module shell authenticated route", function () {
     });
     const response = new FakeResponse();
 
-    await controller.discussionStream(
-      httpRequest(discussionRequest()),
-      response,
-    );
+    await controller.stream(httpRequest(conversationRequest()), response);
 
-    expect(parseDiscussionNdjson(response)).toEqual([
+    expect(parseNdjson(response)).toEqual([
       {
         type: "error",
         eventId: "event-error",
-        requestId: "discussion-request-0001",
+        requestId: "conversation-request-0001",
         sequence: 0,
         createdAt,
         error: publicProviderError,
@@ -987,7 +1102,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(response.writableEnded).toBe(true);
   });
 
-  it("applies the shared timeout handling to a discussion stream", async function () {
+  it("applies the shared timeout handling to a conversation stream", async function () {
     const timeout = new AbortController();
     const release = vi.fn(async () => {});
     const next = vi.fn(() => new Promise(() => {}));
@@ -996,8 +1111,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       value: undefined,
     }));
     const gateway = {
-      stream: vi.fn(),
-      streamDiscussion() {
+      stream() {
         return {
           [Symbol.asyncIterator]() {
             return this;
@@ -1021,8 +1135,8 @@ describe("AI reviewer: module shell authenticated route", function () {
     });
     const response = new FakeResponse();
 
-    const streaming = controller.discussionStream(
-      httpRequest(discussionRequest()),
+    const streaming = controller.stream(
+      httpRequest(conversationRequest()),
       response,
     );
     await vi.waitFor(() => expect(next).toHaveBeenCalledOnce());
@@ -1031,11 +1145,11 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(await settlesWithin(streaming)).toBe(true);
     expect(returnIterator).toHaveBeenCalledOnce();
     expect(release).toHaveBeenCalledOnce();
-    expect(parseDiscussionNdjson(response)).toEqual([
+    expect(parseNdjson(response)).toEqual([
       {
         type: "error",
         eventId: "event-error",
-        requestId: "discussion-request-0001",
+        requestId: "conversation-request-0001",
         sequence: 0,
         createdAt,
         error: {

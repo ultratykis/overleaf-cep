@@ -139,7 +139,8 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
                 "general.architecture": "qwen35",
                 "qwen35.context_length": 32_768,
               },
-              padding: "x".repeat(70_000),
+              // Just over the 1 MiB metadata ceiling, so the guard still bites.
+              padding: "x".repeat(1_100_000),
             }),
             {
               status: 200,

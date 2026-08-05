@@ -7,8 +7,7 @@ import {
   AgentRequestSchema,
   AiReviewerWorkspaceSchema,
   DISCUSSION_CONTEXT_TURN_LIMIT,
-  DiscussionEventSchema,
-  DiscussionRequestSchema,
+  DiscussionSubjectSchema,
   FindingSchema,
   SuggestionSchema,
   SuggestionStatusSchema,
@@ -90,18 +89,13 @@ function finding(overrides = {}) {
   };
 }
 
-function discussionRequest(overrides = {}) {
-  const sourceRequest = selectionRequest();
+function conversationRequest(overrides = {}) {
+  const { scope, ...request } = selectionRequest();
   return {
-    requestId: "discussion-turn-0001",
-    discussionId: "discussion-0001",
-    projectId: sourceRequest.projectId,
-    subject: {
-      kind: "finding",
-      sourceRequest,
-      artifact: finding(),
-    },
-    turns: [{ role: "user", text: "Explain this finding." }],
+    ...request,
+    requestId: "conversation-turn-0001",
+    skill: null,
+    instruction: "Explain this finding.",
     ...overrides,
   };
 }
@@ -323,6 +317,23 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AgentEventSchema.safeParse(event).success).toBe(false);
   });
 
+  it("accepts the Zotero search tool with its strict typed query", function () {
+    const event = {
+      type: "tool.call",
+      eventId: "event-0003",
+      requestId: "request-0001",
+      sequence: 1,
+      createdAt,
+      call: {
+        id: "call-0002",
+        name: "search_zotero",
+        arguments: { query: "greenwade" },
+      },
+    };
+
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
   it("accepts the known read tool with strict typed arguments", function () {
     const event = {
       type: "tool.call",
@@ -343,7 +354,20 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AgentEventSchema.parse(event)).toEqual(event);
   });
 
-  it("accepts subject-bound and open discussions with bounded recent turns", function () {
+  it("accepts a short streamed review subject", function () {
+    const event = {
+      type: "subject",
+      eventId: "event-subject-0001",
+      requestId: "request-0001",
+      sequence: 1,
+      createdAt,
+      subject: "Claim support in chapter 3",
+    };
+
+    expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it("carries a bounded conversation history on one review request", function () {
     const turns = Array.from(
       { length: DISCUSSION_CONTEXT_TURN_LIMIT },
       (_, index) => ({
@@ -351,34 +375,33 @@ describe("AI reviewer: runtime contracts", function () {
         text: `Turn ${index}`,
       }),
     );
-    const request = discussionRequest({ turns });
+    const request = conversationRequest({ turns });
 
-    expect(DiscussionRequestSchema.parse(request)).toEqual(request);
+    expect(AgentRequestSchema.parse(request)).toEqual(request);
     expect(
-      DiscussionRequestSchema.parse({
-        ...request,
-        subject: null,
-      }),
-    ).toEqual({
-      ...request,
-      subject: null,
-    });
-    expect(
-      DiscussionRequestSchema.safeParse({
+      AgentRequestSchema.safeParse({
         ...request,
         turns: [...turns, { role: "user", text: "One turn too many." }],
       }).success,
     ).toBe(false);
-    expect(
-      DiscussionRequestSchema.safeParse({
-        ...request,
-        turns: [{ role: "assistant", text: "Missing the active user turn." }],
-      }).success,
-    ).toBe(false);
-    const { subject, ...withoutSubject } = request;
-    expect(DiscussionRequestSchema.safeParse(withoutSubject).success).toBe(
-      false,
-    );
+  });
+
+  it("accepts a request that names no scope and no history", function () {
+    const request = conversationRequest();
+
+    expect(AgentRequestSchema.parse(request)).toEqual(request);
+    expect(request).not.toHaveProperty("scope");
+    expect(request).not.toHaveProperty("turns");
+  });
+
+  it("keeps editor-action fields on the same request", function () {
+    const request = conversationRequest({
+      ...selectionRequest(),
+      skill: "referee-review",
+      turns: [{ role: "user", text: "An earlier question." }],
+    });
+
+    expect(AgentRequestSchema.parse(request)).toEqual(request);
   });
 
   it.each([
@@ -396,47 +419,22 @@ describe("AI reviewer: runtime contracts", function () {
     ["suggestion", { kind: "suggestion", artifact: suggestion() }],
     ["review scope", { kind: "scope" }],
   ])("accepts a %s discussion subject", function (_label, subject) {
-    const sourceRequest = selectionRequest();
-    const request = discussionRequest({
-      subject: {
-        ...subject,
-        sourceRequest,
-      },
-    });
+    const bound = { ...subject, sourceRequest: selectionRequest() };
 
-    expect(DiscussionRequestSchema.parse(request)).toEqual(request);
+    expect(DiscussionSubjectSchema.parse(bound)).toEqual(bound);
   });
 
-  it("does not impose a fixed character cap on an individual discussion turn", function () {
-    const request = discussionRequest({
+  it("does not impose a fixed character cap on an individual turn", function () {
+    const request = conversationRequest({
       turns: [{ role: "user", text: "x".repeat(25_000) }],
     });
 
-    expect(DiscussionRequestSchema.safeParse(request).success).toBe(true);
-  });
-
-  it("binds discussion subjects to their source request", function () {
-    const request = discussionRequest();
-
-    expect(
-      DiscussionRequestSchema.safeParse({
-        ...request,
-        projectId: "another-project",
-      }).success,
-    ).toBe(false);
-    expect(
-      DiscussionRequestSchema.safeParse({
-        ...request,
-        subject: {
-          ...request.subject,
-          artifact: finding({ requestId: "another-request" }),
-        },
-      }).success,
-    ).toBe(false);
+    expect(AgentRequestSchema.safeParse(request).success).toBe(true);
   });
 
   it("accepts a strict persisted review workspace", function () {
     const stored = workspace();
+    stored.runs[0].subject = "Persisted claim support";
 
     expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
   });
@@ -571,32 +569,6 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AI_REVIEWER_WORKSPACE_TURN_LIMIT).toBeGreaterThan(
       DISCUSSION_CONTEXT_TURN_LIMIT,
     );
-  });
-
-  it("accepts discussion events whose envelope is distinct from a source suggestion", function () {
-    const event = {
-      type: "suggestion",
-      eventId: "discussion-event-0001",
-      requestId: "discussion-turn-0001",
-      sequence: 1,
-      createdAt,
-      suggestion: suggestion(),
-    };
-
-    expect(DiscussionEventSchema.parse(event)).toEqual(event);
-  });
-
-  it("does not impose a fixed character cap on discussion text output", function () {
-    const event = {
-      type: "text.delta",
-      eventId: "discussion-event-long-text",
-      requestId: "discussion-turn-0001",
-      sequence: 1,
-      createdAt,
-      delta: "x".repeat(125_000),
-    };
-
-    expect(DiscussionEventSchema.safeParse(event).success).toBe(true);
   });
 
   it.each([

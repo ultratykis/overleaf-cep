@@ -205,6 +205,9 @@ function renderDetails({
     updateConnection,
     deleteConnection,
     testConnection,
+    listSkills: sinon.stub().resolves({ skills: [] }),
+    uploadSkill: sinon.stub(),
+    deleteSkill: sinon.stub(),
   };
   return {
     ...render(
@@ -225,6 +228,9 @@ function renderConnections({
   updateConnection = sinon.stub().resolves(configured),
   deleteConnection = sinon.stub().resolves({ connections: [] }),
   testConnection = sinon.stub().resolves(connectionResponse),
+  listSkills = sinon.stub().resolves({ skills: [] }),
+  uploadSkill = sinon.stub(),
+  deleteSkill = sinon.stub(),
 } = {}) {
   return render(
     <AiIntegrationDetailsView
@@ -235,6 +241,9 @@ function renderConnections({
       updateConnection={updateConnection}
       deleteConnection={deleteConnection}
       testConnection={testConnection}
+      listSkills={listSkills}
+      uploadSkill={uploadSkill}
+      deleteSkill={deleteSkill}
     />,
   );
 }

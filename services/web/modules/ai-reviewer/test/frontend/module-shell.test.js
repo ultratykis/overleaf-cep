@@ -30,11 +30,31 @@ function request() {
     requestId: "request-0001",
     projectId: "project-0001",
     action: "review",
-    instruction: "Review the synthetic project.",
+    instruction: "Review the selected phrase.",
     skill: "referee-review",
     scope: {
-      kind: "project",
+      kind: "selection",
+      documentId: "document-0001",
+      path: "main.tex",
+      baseRevision: 1,
+      baseTextHash: "a".repeat(64),
+      range: { from: 0, to: 4 },
+      text: "Body",
     },
+  };
+}
+
+async function captureSelectionSession() {
+  return {
+    status: "ready",
+    session: Object.freeze({
+      request: Object.freeze(request()),
+      binding: Object.freeze({
+        currentDocument: {},
+        shareDocument: {},
+        trackChanges: false,
+      }),
+    }),
   };
 }
 
@@ -145,12 +165,19 @@ describe("AI reviewer: module shell", function () {
       React.createElement(AiReviewerPanelView, {
         projectId: "project-0001",
         createRequestId: () => "request-0001",
+        captureSelectionSession,
+        selectionPreview: {
+          fileType: "tex",
+          fromLine: 1,
+          toLine: 1,
+          wordCount: 1,
+        },
         streamRequest,
       }),
     );
 
     expect(streamRequest.called).to.equal(false);
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
 
     await screen.findByText("Synthetic review.");
     expect(screen.getByText("Completed")).to.exist;
@@ -173,13 +200,20 @@ describe("AI reviewer: module shell", function () {
       React.createElement(AiReviewerPanelView, {
         projectId: "project-0001",
         createRequestId: () => "request-0001",
+        captureSelectionSession,
+        selectionPreview: {
+          fileType: "tex",
+          fromLine: 1,
+          toLine: 1,
+          wordCount: 1,
+        },
         streamRequest,
       }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
     await screen.findByText("Streaming");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     releaseLateEvent();
 
     await waitFor(() => expect(screen.getByText("Cancelled")).to.exist);

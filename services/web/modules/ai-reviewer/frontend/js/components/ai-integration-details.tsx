@@ -16,6 +16,7 @@ import OLNotification from "@/shared/components/ol/ol-notification";
 import type { TFunction } from "i18next";
 import {
   type FormEvent,
+  type ChangeEvent,
   useCallback,
   useEffect,
   useRef,
@@ -37,6 +38,14 @@ import {
   testAiProviderConnection,
   updateAiProviderConnection,
 } from "../services/ai-provider-configuration";
+import {
+  AiReviewerSkillClientError,
+  type AiReviewerSkill,
+  type AiReviewerSkillUpload,
+  deleteAiReviewerSkill,
+  getAiReviewerSkills,
+  uploadAiReviewerSkill,
+} from "../services/ai-reviewer-skills";
 
 type OperationKind = "save" | "test" | "connections";
 type Operation = { generation: number; controller: AbortController };
@@ -67,6 +76,9 @@ type Props = {
   updateConnection: typeof updateAiProviderConnection;
   deleteConnection: typeof deleteAiProviderConnection;
   testConnection: typeof testAiProviderConnection;
+  listSkills: typeof getAiReviewerSkills;
+  uploadSkill: typeof uploadAiReviewerSkill;
+  deleteSkill: typeof deleteAiReviewerSkill;
 };
 
 const emptyConfiguration: ConfigurationDraft = {
@@ -245,6 +257,9 @@ export function AiIntegrationDetailsView({
   updateConnection,
   deleteConnection,
   testConnection,
+  listSkills,
+  uploadSkill,
+  deleteSkill,
 }: Props) {
   const { t } = useTranslation();
   const [connections, setConnections] = useState<
@@ -256,6 +271,10 @@ export function AiIntegrationDetailsView({
   const [draft, setDraft] = useState({ ...emptyConfiguration });
   const [busy, setBusy] = useState<OperationKind | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [skills, setSkills] = useState<AiReviewerSkill[] | undefined>();
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [skillNotice, setSkillNotice] = useState<string | null>(null);
+  const skillOperationRef = useRef<AbortController | null>(null);
   const operationRef = useRef<{
     generation: number;
     controller: AbortController | null;
@@ -333,6 +352,39 @@ export function AiIntegrationDetailsView({
     );
     return cancel;
   }, [applyConnections, begin, cancel, complete, listConnections, projectId]);
+
+  useEffect(() => {
+    skillOperationRef.current?.abort();
+    const controller = new AbortController();
+    skillOperationRef.current = controller;
+    setSkills(undefined);
+    setSkillBusy(false);
+    setSkillNotice(null);
+    void listSkills(projectId, controller.signal).then(
+      (response) => {
+        if (skillOperationRef.current !== controller) return;
+        skillOperationRef.current = null;
+        setSkills(response.skills);
+      },
+      (error) => {
+        if (skillOperationRef.current !== controller) return;
+        skillOperationRef.current = null;
+        setSkills([]);
+        setSkillNotice(
+          error instanceof AiReviewerSkillClientError
+            ? error.message
+            : "The AI reviewer skills could not be loaded.",
+        );
+      },
+    );
+    return () => {
+      controller.abort();
+      // A file read can hand this slot to an upload before unmount or project
+      // change; abort whichever request currently belongs to this view.
+      skillOperationRef.current?.abort();
+      skillOperationRef.current = null;
+    };
+  }, [listSkills, projectId]);
 
   const selected =
     connections?.find((entry) => entry.id === selectedId) ?? null;
@@ -516,8 +568,103 @@ export function AiIntegrationDetailsView({
     });
   };
 
+  const runSkillRequest = <T,>(
+    request: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T | undefined> => {
+    skillOperationRef.current?.abort();
+    const controller = new AbortController();
+    skillOperationRef.current = controller;
+    setSkillBusy(true);
+    setSkillNotice(null);
+    return request(controller.signal).then(
+      (result) => {
+        if (skillOperationRef.current !== controller) return undefined;
+        skillOperationRef.current = null;
+        setSkillBusy(false);
+        return result;
+      },
+      (error) => {
+        if (skillOperationRef.current !== controller) return undefined;
+        skillOperationRef.current = null;
+        setSkillBusy(false);
+        setSkillNotice(
+          error instanceof AiReviewerSkillClientError
+            ? error.message
+            : "The AI reviewer skill request failed.",
+        );
+        return undefined;
+      },
+    );
+  };
+
+  const handleSkillUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const selectedFiles = Array.from(input.files ?? []);
+    input.value = "";
+    if (selectedFiles.length === 0 || skillBusy) return;
+
+    const skillFiles = selectedFiles.filter(
+      (file) => file.name.toLowerCase() === "skill.md",
+    );
+    if (skillFiles.length !== 1) {
+      setSkillNotice("Select exactly one SKILL.md file.");
+      return;
+    }
+    const referenceFiles = selectedFiles.filter(
+      (file) => file !== skillFiles[0],
+    );
+    if (
+      referenceFiles.some((file) => !file.name.toLowerCase().endsWith(".md"))
+    ) {
+      setSkillNotice("Reference files must be Markdown files.");
+      return;
+    }
+
+    let upload: AiReviewerSkillUpload;
+    try {
+      const contents = await Promise.all(
+        selectedFiles.map((file) => file.text()),
+      );
+      const references: Record<string, string> = {};
+      for (const [index, file] of selectedFiles.entries()) {
+        if (file === skillFiles[0]) continue;
+        const relativePath = file.webkitRelativePath || file.name;
+        if (Object.hasOwn(references, relativePath)) {
+          setSkillNotice(`The reference path ${relativePath} is duplicated.`);
+          return;
+        }
+        references[relativePath] = contents[index];
+      }
+      upload = {
+        skillMarkdown: contents[selectedFiles.indexOf(skillFiles[0])],
+        referenceFiles: references,
+      };
+    } catch {
+      setSkillNotice("The selected Markdown files could not be read.");
+      return;
+    }
+
+    const created = await runSkillRequest((signal) =>
+      uploadSkill(projectId, upload, signal),
+    );
+    if (created) {
+      setSkills((current) => [...(current ?? []), created]);
+    }
+  };
+
+  const handleSkillDelete = (skill: AiReviewerSkill) => {
+    if (skillBusy) return;
+    void runSkillRequest((signal) =>
+      deleteSkill(projectId, skill.id, signal),
+    ).then((response) => {
+      if (response) setSkills(response.skills);
+    });
+  };
+
   const handleHide = () => {
     cancel();
+    skillOperationRef.current?.abort();
+    skillOperationRef.current = null;
     onHide();
   };
 
@@ -539,6 +686,64 @@ export function AiIntegrationDetailsView({
         className="ai-reviewer-provider-settings-form"
       >
         <OLModalBody className="ai-reviewer-provider-settings-body">
+          <section
+            className="ai-reviewer-skills mb-3"
+            aria-labelledby="ai-reviewer-skills-heading"
+          >
+            <h3 id="ai-reviewer-skills-heading" className="h5 mt-0">
+              {t("ai_reviewer_skills", "Skills")}
+            </h3>
+            {skills != null && skills.length > 0 && (
+              <ul
+                className="ai-reviewer-skill-list"
+                aria-label={t("ai_reviewer_skills", "Skills")}
+              >
+                {skills.map((skill) => (
+                  <li
+                    key={skill.id}
+                    className="ai-reviewer-skill-row"
+                    data-testid="ai-reviewer-skill-row"
+                  >
+                    <div className="ai-reviewer-skill-summary">
+                      <strong>{skill.name}</strong>
+                      <p className="mb-0">{skill.description}</p>
+                    </div>
+                    <OLButton
+                      type="button"
+                      variant="link"
+                      className="btn-inline-link ai-reviewer-skill-delete"
+                      disabled={skillBusy}
+                      aria-label={`${t("delete")} ${skill.name}`}
+                      onClick={() => handleSkillDelete(skill)}
+                    >
+                      {t("delete")}
+                    </OLButton>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <OLFormGroup
+              controlId="ai-reviewer-skill-files"
+              className="ai-reviewer-skill-upload mt-2"
+            >
+              <OLFormLabel>
+                {t(
+                  "ai_reviewer_skill_upload_label",
+                  "Upload SKILL.md and optional reference Markdown files",
+                )}
+              </OLFormLabel>
+              <OLFormControl
+                type="file"
+                accept=".md,text/markdown"
+                multiple
+                disabled={skills === undefined || skillBusy}
+                onChange={handleSkillUpload}
+              />
+            </OLFormGroup>
+            {skillNotice && (
+              <OLNotification type="error" content={skillNotice} />
+            )}
+          </section>
           {connections != null && connections.length > 0 && (
             <div className="ai-reviewer-connections mb-3">
               <ul
@@ -739,6 +944,9 @@ export default function AiIntegrationDetails({
       updateConnection={updateAiProviderConnection}
       deleteConnection={deleteAiProviderConnection}
       testConnection={testAiProviderConnection}
+      listSkills={getAiReviewerSkills}
+      uploadSkill={uploadAiReviewerSkill}
+      deleteSkill={deleteAiReviewerSkill}
     />
   );
 }

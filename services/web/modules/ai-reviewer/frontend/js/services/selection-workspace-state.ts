@@ -2,9 +2,14 @@ import type {
   AgentEvent,
   AgentRequest,
   Finding,
+  ToolCall,
   UnresolvedSuggestion,
   WorkspaceRun,
 } from "../../../shared/contract-types";
+
+// A request without a scope is project-wide, so the panel has no scope kind to
+// name for it.
+export type ReviewScopeKind = NonNullable<AgentRequest["scope"]>["kind"];
 import type {
   EditorSelectionSession,
   EditorSelectionSessionConflictCode,
@@ -44,13 +49,15 @@ export type SelectionWorkspaceState = {
   generation: number;
   createdOrder: number;
   requestId: string | null;
-  scopeKind: AgentRequest["scope"]["kind"] | null;
+  scopeKind: ReviewScopeKind | null;
   request: AgentRequest | null;
   provider: string | null;
   model: string | null;
   group: WorkspaceRun["group"] | null;
+  subject: string | null;
   session: EditorSelectionSession | null;
   text: string;
+  toolCalls: ToolCall[];
   findings: Finding[];
   suggestions: UnresolvedSuggestion[];
   findingStatuses: Readonly<Record<string, FindingArtifactStatus | undefined>>;
@@ -73,7 +80,7 @@ export type SelectionWorkspaceAction =
   | (BoundAction & {
       type: "begin";
       status: "capturing" | "streaming";
-      scopeKind?: AgentRequest["scope"]["kind"];
+      scopeKind?: ReviewScopeKind;
       createdOrder?: number;
       group?: WorkspaceRun["group"];
     })
@@ -154,8 +161,10 @@ export const initialSelectionWorkspaceState: SelectionWorkspaceState = {
   provider: null,
   model: null,
   group: null,
+  subject: null,
   session: null,
   text: "",
+  toolCalls: [],
   findings: [],
   suggestions: [],
   findingStatuses: {},
@@ -187,8 +196,10 @@ export function reduceSelectionWorkspaceState(
       provider: null,
       model: null,
       group: action.group ?? null,
+      subject: null,
       session: null,
       text: "",
+      toolCalls: [],
       findings: [],
       suggestions: [],
       findingStatuses: {},
@@ -217,7 +228,7 @@ export function reduceSelectionWorkspaceState(
     return {
       ...state,
       status: "streaming",
-      scopeKind: action.session.request.scope.kind,
+      scopeKind: action.session.request.scope?.kind ?? null,
       request: action.session.request,
       session: action.session,
     };
@@ -246,7 +257,7 @@ export function reduceSelectionWorkspaceState(
     }
     return {
       ...state,
-      scopeKind: action.request.scope.kind,
+      scopeKind: action.request.scope?.kind ?? null,
       request: action.request,
     };
   }
@@ -270,6 +281,20 @@ export function reduceSelectionWorkspaceState(
       return {
         ...state,
         text: `${state.text}${action.event.delta}`,
+      };
+    }
+    if (action.event.type === "subject") {
+      return {
+        ...state,
+        subject: action.event.subject,
+      };
+    }
+    // A tool line is the only trace of the agent's reading that the panel is
+    // allowed to show, so it is kept in arrival order.
+    if (action.event.type === "tool.call") {
+      return {
+        ...state,
+        toolCalls: [...state.toolCalls, action.event.call],
       };
     }
     if (action.event.type === "finding") {
@@ -484,13 +509,17 @@ function hydrateWorkspaceRun(run: WorkspaceRun): SelectionWorkspaceState {
     generation: run.generation,
     createdOrder: run.createdOrder,
     requestId: run.request.requestId,
-    scopeKind: run.request.scope.kind,
+    scopeKind: run.request.scope?.kind ?? null,
     request: run.request,
     provider: run.provider ?? null,
     model: run.model ?? null,
     group: run.group ?? null,
+    subject: run.subject ?? null,
     session: null,
     text: run.text,
+    // Tool lines belong to the live stream; a reloaded run only keeps what the
+    // workspace contract stores.
+    toolCalls: [],
     findings: run.findings.map((entry) => entry.artifact),
     suggestions: run.suggestions.map((entry) => ({
       ...entry.artifact,

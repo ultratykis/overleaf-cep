@@ -17,7 +17,7 @@ import {
   workspaceChangedMessage,
   workspaceLimitMessage,
 } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
-import { streamDiscussionEvents } from "../../frontend/js/services/agent-stream";
+import { streamAgentEvents } from "../../frontend/js/services/agent-stream";
 import type { EditorSelectionSessionContext } from "../../frontend/js/services/editor-selection-session";
 import {
   AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT,
@@ -28,14 +28,14 @@ import type {
   AgentRequest,
   AiReviewerWorkspace,
   AiReviewerWorkspaceSnapshot,
-  DiscussionEvent,
+  AgentEvent,
   DiscussionTurn,
   Finding,
   UnresolvedSuggestion,
   WorkspaceDiscussion,
 } from "../../shared/contract-types";
 
-type DiscussionStreamCall = Parameters<typeof streamDiscussionEvents>[0];
+type ConversationStreamCall = Parameters<typeof streamAgentEvents>[0];
 
 const createdAt = "2026-07-25T00:00:00.000Z";
 const baseTextHash =
@@ -43,6 +43,15 @@ const baseTextHash =
 
 function cloneWorkspace(workspace: AiReviewerWorkspace): AiReviewerWorkspace {
   return structuredClone(workspace);
+}
+
+const hostChatInputLabel = "Ask about your manuscript\u2026";
+
+function sendHostChatMessage(text: string) {
+  fireEvent.keyDown(screen.getByRole("textbox", { name: hostChatInputLabel }), {
+    key: "Enter",
+    target: { value: text },
+  });
 }
 
 function emptyWorkspace(): AiReviewerWorkspace {
@@ -390,6 +399,12 @@ function panel(
     <AiReviewerPanelView
       projectId={projectId}
       workspacePersistence={workspacePersistence}
+      selectionPreview={{
+        fileType: "tex",
+        fromLine: 1,
+        toLine: 1,
+        wordCount: 3,
+      }}
       {...extra}
     />
   );
@@ -417,6 +432,31 @@ function confirmDeleteAll() {
 }
 
 describe("AI reviewer: persisted review workspace", function () {
+  it("hydrates and preserves a generated run subject", async function () {
+    const projectId = "subject-persistence-project";
+    const initial = workspaceWithFinding({ projectId });
+    initial.runs[0].subject = "Persisted claim support";
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: initial,
+    });
+    const save = sinon.spy(persistence, "save");
+
+    render(panel(projectId, persistence));
+    expect(
+      await screen.findByRole("heading", { name: "Persisted claim support" }),
+    ).to.exist;
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Discard finding",
+      }),
+    );
+
+    await waitFor(() => expect(save.called).to.equal(true));
+    expect(persistence.read(projectId).runs[0]?.subject).to.equal(
+      "Persisted claim support",
+    );
+  });
+
   it("hydrates unresolved artifacts and discussions on later mounts", async function () {
     const projectId = "persistence-project";
     const persistence = new MemoryWorkspacePersistence({
@@ -455,15 +495,17 @@ describe("AI reviewer: persisted review workspace", function () {
 
   it("persists, reloads, and deletes an open discussion", async function () {
     const projectId = "open-discussion-persistence-project";
-    const persistence = new MemoryWorkspacePersistence({});
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: workspaceWithFinding({ projectId }),
+    });
     const save = sinon.spy(persistence, "save");
     const deleteDiscussion = sinon.spy(persistence, "deleteDiscussion");
     let requestNumber = 0;
-    const streamDiscussionRequest = sinon
+    const streamRequest = sinon
       .stub()
-      .callsFake(async (call: DiscussionStreamCall) => {
+      .callsFake(async (call: ConversationStreamCall) => {
         const { requestId } = call.request;
-        const events: DiscussionEvent[] = [
+        const events: AgentEvent[] = [
           {
             type: "started",
             eventId: `${requestId}-started`,
@@ -472,6 +514,7 @@ describe("AI reviewer: persisted review workspace", function () {
             createdAt,
             provider: "fake",
             model: "deterministic-v1",
+            skill: call.request.skill,
           },
           {
             type: "text.delta",
@@ -500,25 +543,17 @@ describe("AI reviewer: persisted review workspace", function () {
         createDiscussionRequestId: () =>
           `persisted-open-request-${++requestNumber}`,
         now: () => createdAt,
-        streamDiscussionRequest,
+        streamRequest,
       });
 
     const first = render(openPanel());
-    const input = screen.getByLabelText(
-      "Discussion message",
-    ) as HTMLTextAreaElement;
-    await waitFor(() => {
-      expect(input.disabled).to.equal(false);
-    });
-    fireEvent.change(input, {
-      target: {
-        value: "Keep this open question.",
-      },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await screen.findByText("Persisted unresolved finding");
+    // The composer stands on its own, so a question with no subject needs no
+    // separate step to open a thread for it.
+    sendHostChatMessage("Keep this open question.");
 
     expect(
-      await screen.findByRole("region", {
+      await screen.findByRole("article", {
         name: "AI reviewer discussion",
       }),
     ).to.exist;
@@ -528,31 +563,28 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(screen.getByText("Keep this open question.")).to.exist;
     expect(screen.getByText("This answer must survive a reload.")).to.exist;
     await waitFor(() => {
-      expect(save.calledOnce).to.equal(true);
-      expect(persistence.read(projectId)).to.deep.equal({
-        runs: [],
-        discussions: [
-          {
-            id: "persisted-open-discussion",
-            createdOrder: 1,
-            subjectKey: null,
-            subject: null,
-            sourceGeneration: null,
-            turns: [
-              {
-                role: "user",
-                text: "Keep this open question.",
-              },
-              {
-                role: "assistant",
-                text: "This answer must survive a reload.",
-              },
-            ],
-            suggestions: [],
-            updatedAt: createdAt,
-          },
-        ],
-      });
+      expect(save.called).to.equal(true);
+      expect(persistence.read(projectId).discussions).to.deep.equal([
+        {
+          id: "persisted-open-discussion",
+          createdOrder: 2,
+          subjectKey: null,
+          subject: null,
+          sourceGeneration: null,
+          turns: [
+            {
+              role: "user",
+              text: "Keep this open question.",
+            },
+            {
+              role: "assistant",
+              text: "This answer must survive a reload.",
+            },
+          ],
+          suggestions: [],
+          updatedAt: createdAt,
+        },
+      ]);
     });
     first.unmount();
 
@@ -575,7 +607,7 @@ describe("AI reviewer: persisted review workspace", function () {
 
     await waitFor(() => {
       expect(deleteDiscussion.calledOnce).to.equal(true);
-      expect(persistence.read(projectId)).to.deep.equal(emptyWorkspace());
+      expect(persistence.read(projectId).discussions).to.deep.equal([]);
       expect(
         screen.queryByRole("article", {
           name: "Discussion summary",
@@ -584,7 +616,7 @@ describe("AI reviewer: persisted review workspace", function () {
     });
   });
 
-  it("preserves an open-discussion draft when deleting another discussion", async function () {
+  it("keeps the review list usable when deleting a discussion from it", async function () {
     const projectId = "discussion-draft-deletion-project";
     const persistence = new MemoryWorkspacePersistence({
       [projectId]: workspaceWithFinding({
@@ -596,14 +628,6 @@ describe("AI reviewer: persisted review workspace", function () {
 
     render(panel(projectId, persistence));
     await screen.findByText("Persisted unresolved finding");
-    const input = screen.getByLabelText(
-      "Discussion message",
-    ) as HTMLTextAreaElement;
-    fireEvent.change(input, {
-      target: {
-        value: "Keep this unsent open-discussion draft.",
-      },
-    });
     const summary = screen.getByRole("article", {
       name: "Discussion summary",
     });
@@ -617,10 +641,12 @@ describe("AI reviewer: persisted review workspace", function () {
       expect(deleteDiscussion.calledOnce).to.equal(true);
       expect(persistence.read(projectId).discussions).to.have.length(0);
     });
-    expect(input.value).to.equal("Keep this unsent open-discussion draft.");
+    expect(screen.getByText("Persisted unresolved finding")).to.exist;
+    expect(screen.queryByRole("article", { name: "Discussion summary" })).not.to
+      .exist;
   });
 
-  it("clears an active discussion draft after navigating back during deletion", async function () {
+  it("returns to the review list when the active discussion is deleted", async function () {
     const projectId = "active-discussion-draft-deletion-project";
     const persistence = new MemoryWorkspacePersistence({
       [projectId]: workspaceWithFinding({
@@ -644,22 +670,9 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Finding: Persisted unresolved finding",
       }),
     );
-    const input = screen.getByLabelText(
-      "Discussion message",
-    ) as HTMLTextAreaElement;
-    fireEvent.change(input, {
-      target: {
-        value: "Delete this subject-bound draft.",
-      },
-    });
     fireEvent.click(
       screen.getByRole("button", {
         name: "Delete discussion",
-      }),
-    );
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Back to review list",
       }),
     );
 
@@ -669,11 +682,10 @@ describe("AI reviewer: persisted review workspace", function () {
     });
     await waitFor(() => {
       expect(persistence.read(projectId).discussions).to.have.length(0);
-      expect(
-        (screen.getByLabelText("Discussion message") as HTMLTextAreaElement)
-          .value,
-      ).to.equal("");
+      expect(screen.queryByRole("article", { name: "Discussion summary" })).not
+        .to.exist;
     });
+    expect(screen.getByText("Persisted unresolved finding")).to.exist;
   });
 
   it("keeps a resolved artifact collapsed until the next load, then removes its empty run", async function () {
@@ -707,7 +719,7 @@ describe("AI reviewer: persisted review workspace", function () {
       expect(
         screen
           .getByRole("button", {
-            name: "Run review",
+            name: "Review mode",
           })
           .hasAttribute("disabled"),
       ).to.equal(false);
@@ -921,7 +933,7 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(
       screen
         .getByRole("button", {
-          name: "Run review",
+          name: "Review mode",
         })
         .hasAttribute("disabled"),
     ).to.equal(true);
@@ -1247,7 +1259,7 @@ describe("AI reviewer: persisted review workspace", function () {
     });
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Discuss review scope",
+        name: "Discuss",
       }),
     );
     expect(await screen.findByText(workspaceLimitMessage)).to.exist;
@@ -1304,11 +1316,11 @@ describe("AI reviewer: persisted review workspace", function () {
     const persistence = new MemoryWorkspacePersistence({
       [projectId]: stored,
     });
-    const streamDiscussionRequest = sinon.stub();
+    const streamRequest = sinon.stub();
 
     render(
       panel(projectId, persistence, {
-        streamDiscussionRequest,
+        streamRequest,
       }),
     );
     const firstSummary = await screen.findByRole("article", {
@@ -1319,24 +1331,14 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Finding: Persisted unresolved finding",
       }),
     );
-    const input = screen.getByLabelText(
-      "Discussion message",
-    ) as HTMLTextAreaElement;
-    fireEvent.change(input, {
-      target: {
-        value: "This turn must not be silently dropped.",
-      },
-    });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Send message",
-      }),
-    );
-    expect(streamDiscussionRequest.called).to.equal(false);
-    expect(input.value).to.equal("This turn must not be silently dropped.");
-    expect(screen.getAllByLabelText(/Your message|AI response/)).to.have.length(
-      AI_REVIEWER_WORKSPACE_TURN_LIMIT - 1,
-    );
+    sendHostChatMessage("This turn must not be silently dropped.");
+
+    expect(streamRequest.called).to.equal(false);
+    expect(
+      screen
+        .getByLabelText("Discussion turns")
+        .querySelectorAll(".chat-message"),
+    ).to.have.length(AI_REVIEWER_WORKSPACE_TURN_LIMIT - 1);
     expect(screen.getByText(workspaceLimitMessage)).to.exist;
   });
 
@@ -1381,7 +1383,7 @@ describe("AI reviewer: persisted review workspace", function () {
       expect(
         screen
           .getByRole("button", {
-            name: "Run review",
+            name: "Review mode",
           })
           .hasAttribute("disabled"),
       ).to.equal(false);

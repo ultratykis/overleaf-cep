@@ -16,8 +16,10 @@
  *   createConnection: (...args: any[]) => unknown,
  *   updateConnection: (...args: any[]) => unknown,
  *   deleteConnection: (...args: any[]) => unknown,
+ *   listSkills: (...args: any[]) => unknown,
+ *   uploadSkill: (...args: any[]) => unknown,
+ *   deleteSkill: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
- *   discussionStream: (...args: any[]) => unknown,
  *   getWorkspace: (...args: any[]) => unknown,
  *   saveWorkspace: (...args: any[]) => unknown,
  *   getCommentProvenance: (...args: any[]) => unknown,
@@ -37,8 +39,10 @@ export function createAiReviewerRouter({
   createConnection,
   updateConnection,
   deleteConnection,
+  listSkills,
+  uploadSkill,
+  deleteSkill,
   stream,
-  discussionStream,
   getWorkspace,
   saveWorkspace,
   getCommentProvenance,
@@ -106,11 +110,6 @@ export function createAiReviewerRouter({
         ...commonMiddleware,
         stream,
       );
-      webRouter.post(
-        "/project/:project_id/ai-reviewer/discussion-stream",
-        ...commonMiddleware,
-        discussionStream,
-      );
       webRouter.delete(
         "/project/:project_id/ai-reviewer/workspace/discussions/:discussion_id",
         ...commonMiddleware,
@@ -148,6 +147,25 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/connections/:connection_id",
         ...commonMiddleware,
         deleteConnection,
+      );
+
+      // Skills are user-owned, but the project-scoped route keeps their
+      // settings behind the same authenticated, unrestricted read boundary as
+      // every other AI Reviewer setting.
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/skills",
+        ...commonMiddleware,
+        listSkills,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/skills",
+        ...commonMiddleware,
+        uploadSkill,
+      );
+      webRouter.delete(
+        "/project/:project_id/ai-reviewer/skills/:skill_id",
+        ...commonMiddleware,
+        deleteSkill,
       );
     },
   };

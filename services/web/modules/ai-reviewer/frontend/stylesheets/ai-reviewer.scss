@@ -74,7 +74,12 @@
 
   .ai-reviewer-connections,
   .ai-reviewer-connection-list,
-  .ai-reviewer-connection-row {
+  .ai-reviewer-connection-row,
+  .ai-reviewer-skills,
+  .ai-reviewer-skill-list,
+  .ai-reviewer-skill-row,
+  .ai-reviewer-skill-summary,
+  .ai-reviewer-skill-upload {
     width: 100%;
     max-width: 100%;
     min-width: 0;
@@ -85,6 +90,26 @@
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+
+  .ai-reviewer-skill-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-02);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .ai-reviewer-skill-row {
+    display: flex;
+    align-items: start;
+    gap: var(--spacing-02);
+  }
+
+  .ai-reviewer-skill-summary {
+    flex: 1 1 auto;
+    overflow-wrap: anywhere;
   }
 
   .ai-reviewer-connection-row {
@@ -197,13 +222,29 @@
   }
 }
 
-.ai-reviewer-panel-body,
-.ai-reviewer-discussion-turns {
+.ai-reviewer-panel-body {
   flex: 1 1 auto;
   width: 100%;
   max-width: 100%;
   min-height: 0;
   padding: var(--spacing-02);
+  overflow: hidden auto;
+}
+
+// The findings keep their own scroller above the conversation, so a thread
+// that grows can never carry the list off screen.
+.ai-reviewer-panel-findings {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  min-height: 0;
+  max-height: 45%;
+  gap: var(--spacing-03);
+  padding: var(--spacing-02);
+  border-bottom: 1px solid var(--border-divider-themed);
+  background: var(--bg-primary-themed);
   overflow: hidden auto;
 }
 
@@ -238,8 +279,6 @@
   background: var(--bg-primary-themed);
 }
 
-.ai-reviewer-panel-scope,
-.ai-reviewer-panel-composer,
 .ai-reviewer-comment-form {
   display: flex;
   flex-direction: column;
@@ -248,27 +287,38 @@
   gap: var(--spacing-02);
 }
 
-.ai-reviewer-panel-composer-input {
-  position: relative;
-  width: 100%;
-  max-width: 100%;
-
-  .ai-reviewer-panel-textarea {
-    padding-inline-end: var(--spacing-10);
-  }
-}
-
-.ai-reviewer-panel-review-action,
-.ai-reviewer-panel-scope .form-select,
 .ai-reviewer-panel-textarea {
   width: 100%;
   min-width: 0;
-}
-
-.ai-reviewer-panel-textarea {
   min-height: var(--spacing-09);
   resize: vertical;
   overflow-wrap: anywhere;
+}
+
+.ai-reviewer-panel-mode-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  width: 100%;
+  max-width: 100%;
+  min-height: var(--spacing-07);
+  overflow: hidden;
+  white-space: nowrap;
+
+  > .dropdown {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+.ai-reviewer-panel-mode-chip {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--content-secondary-themed);
+  font-size: var(--font-size-01);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 // A connection label is user-supplied, so the failure line has to wrap it.
@@ -276,12 +326,6 @@
   max-width: 100%;
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-.ai-reviewer-panel-send {
-  position: absolute;
-  inset-inline-end: var(--spacing-02);
-  inset-block-end: var(--spacing-02);
 }
 
 .ai-reviewer-panel-actions {
@@ -297,35 +341,14 @@
   }
 }
 
-.ai-reviewer-panel-auxiliary-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  width: 100%;
-  max-width: 100%;
-  gap: var(--spacing-01);
-}
-
-.ai-reviewer-panel-auxiliary-action {
-  max-width: 100%;
-  color: var(--content-secondary-themed);
-  text-align: start;
-
-  .button-content {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
 .ai-reviewer-run,
 .ai-reviewer-artifact,
-.ai-reviewer-discussion-row,
-.ai-reviewer-discussion-turn {
+.ai-reviewer-discussion-row {
   width: 100%;
   max-width: 100%;
   border: 1px solid var(--border-divider-themed);
   border-radius: var(--border-radius-base);
+
   // No overflow clipping here: a turn grows with its text, and hiding the
   // overflow cut the author's own message off behind the next turn.
   overflow-wrap: anywhere;
@@ -339,7 +362,15 @@
   background: var(--bg-primary-themed);
 }
 
-.ai-reviewer-run-header,
+.ai-reviewer-run-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  width: 100%;
+  max-width: 100%;
+  gap: var(--spacing-02);
+}
+
 .ai-reviewer-run-heading {
   display: flex;
   flex-direction: column;
@@ -348,10 +379,19 @@
   gap: var(--spacing-02);
 }
 
+.ai-reviewer-run-header-action {
+  align-self: start;
+
+  .btn,
+  .button-content {
+    width: auto;
+    white-space: nowrap;
+  }
+}
+
 .ai-reviewer-run-title,
 .ai-reviewer-run-section-title,
-.ai-reviewer-artifact-title,
-.ai-reviewer-discussion-turn-author {
+.ai-reviewer-artifact-title {
   margin: 0;
   color: var(--content-primary-themed);
   font-size: var(--font-size-02);
@@ -382,52 +422,12 @@
   }
 }
 
+// A resolved artifact keeps its place and only recedes, so the list the reader
+// learned does not rearrange under them.
 .ai-reviewer-artifact-resolved {
-  display: block;
-  padding: 0;
   color: var(--content-secondary-themed);
   background: var(--bg-tertiary-themed);
-
-  &[open] {
-    padding-bottom: var(--spacing-02);
-  }
-
-  > :not(summary) {
-    width: auto;
-    max-width: calc(100% - var(--spacing-04));
-    margin-inline: var(--spacing-02);
-  }
-}
-
-.ai-reviewer-artifact-summary {
-  display: grid;
-  grid-template-columns: auto minmax(0, 2fr) minmax(0, 1fr);
-  align-items: center;
-  width: 100%;
-  max-width: 100%;
-  gap: var(--spacing-02);
-  padding: var(--spacing-02);
-  cursor: pointer;
-  list-style: none;
-
-  &::before {
-    content: "›";
-  }
-
-  &::-webkit-details-marker {
-    display: none;
-  }
-}
-
-.ai-reviewer-artifact-summary .ai-reviewer-artifact-status {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-reviewer-artifact-resolved[open] > .ai-reviewer-artifact-summary::before {
-  transform: rotate(90deg);
+  opacity: 0.7;
 }
 
 .ai-reviewer-panel-truncate,
@@ -546,23 +546,137 @@
   line-height: var(--line-height-02);
 }
 
+.ai-reviewer-discussion-thread {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  gap: var(--spacing-03);
+  padding: var(--spacing-02);
+  border: 1px solid var(--border-divider-themed);
+  border-radius: var(--border-radius-base);
+  background: var(--bg-primary-themed);
+  overflow-wrap: anywhere;
+}
+
 .ai-reviewer-discussion-turns {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  max-width: 100%;
   gap: var(--spacing-03);
 }
 
-.ai-reviewer-discussion-turn {
+.ai-reviewer-panel-composer {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
+  width: 100%;
+  max-width: 100%;
   gap: var(--spacing-02);
-  padding: var(--spacing-02);
-  background: var(--bg-primary-themed);
+
+  /*
+   * Sending confirms what is already typed, so it reads as a small action on
+   * the field rather than the panel's widest control. Stretched full width it
+   * outweighed the field it belongs to.
+   */
+
+  /*
+   * No minimum width here: the panel narrows to a rail, and a floor on this
+   * button pushed it past the edge. It sizes to its own label instead.
+   */
+  > .btn {
+    align-self: flex-end;
+    width: auto;
+  }
 }
 
-.ai-reviewer-discussion-composer {
+// Only the tool and its target are ever printed, so one line each is enough.
+.ai-reviewer-tool-lines {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding-inline-start: var(--spacing-05);
+  list-style: none;
+}
+
+.ai-reviewer-tool-line {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--content-secondary-themed);
+  font-family: "DM Mono", monospace;
+  font-size: var(--font-size-01);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// What the run was asked to do, shown as the message it stands for.
+.ai-reviewer-panel-instruction {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  color: var(--content-secondary-themed);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The chip is wrapped in the dropdown's own element, and that wrapper is what
+ * the header lays out. Left at the default `min-width: auto` it refused to
+ * shrink, so the chip kept its full width, ran past the header and was cut off
+ * by the panel's clip — widening the chip alone could never show more of the
+ * name. Letting the wrapper shrink is what gives the chip room to wrap.
+ */
+.ai-reviewer-panel-header > .dropdown {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ai-reviewer-panel-model-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+
+  /*
+   * Half the rail left the name ellipsised to a few characters once the panel
+   * narrowed, which made the current model unreadable. Wrapping over a couple
+   * of short lines keeps it legible instead of truncating it away.
+   */
+  max-width: 100%;
+  color: var(--content-secondary-themed);
+  font-size: var(--font-size-01);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.ai-reviewer-panel-onboarding,
+.ai-reviewer-panel-selection {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
   gap: var(--spacing-02);
+}
+
+.ai-reviewer-panel-selection-scope {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: "DM Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-reviewer-discussion-quote {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  gap: var(--spacing-01);
+  padding-block-end: var(--spacing-02);
+  border-block-end: 1px solid var(--border-divider-themed);
 }
 
 .ai-reviewer-suggestion-preview {
@@ -604,16 +718,16 @@
 @container (min-width: 100px) {
   .ai-reviewer-panel-header,
   .ai-reviewer-panel-body,
+  .ai-reviewer-panel-findings,
   .ai-reviewer-panel-footer,
-  .ai-reviewer-discussion-header,
-  .ai-reviewer-discussion-turns {
+  .ai-reviewer-discussion-header {
     padding: var(--spacing-03);
   }
 
   .ai-reviewer-run,
-  .ai-reviewer-artifact:not(.ai-reviewer-artifact-resolved),
-  .ai-reviewer-discussion-row,
-  .ai-reviewer-discussion-turn {
+  .ai-reviewer-artifact,
+  .ai-reviewer-discussion-thread,
+  .ai-reviewer-discussion-row {
     padding: var(--spacing-03);
   }
 }
@@ -626,16 +740,6 @@
     > .btn {
       width: auto;
     }
-  }
-
-  .ai-reviewer-run-header {
-    flex-direction: row;
-    align-items: flex-start;
-    justify-content: space-between;
-  }
-
-  .ai-reviewer-run-header > .ai-reviewer-panel-actions {
-    width: auto;
   }
 }
 
@@ -657,12 +761,15 @@
   0% {
     content: "";
   }
+
   25% {
     content: ".";
   }
+
   50% {
     content: "..";
   }
+
   75% {
     content: "...";
   }
@@ -673,4 +780,66 @@
     animation: none;
     content: "...";
   }
+}
+
+/*
+ * A provider can list dozens of models. Without a ceiling the menu runs past
+ * the panel and the entries below the fold cannot be reached at all.
+ */
+.ai-reviewer-panel-model-menu,
+.ai-reviewer-panel-mode-menu,
+.ai-reviewer-panel-overflow-menu {
+  max-height: min(60vh, 20rem);
+  overflow-y: auto;
+  min-width: 0;
+  max-width: calc(100vw - (2 * var(--spacing-04)));
+  width: max-content;
+}
+
+/* The menu lives beside the editor so the rail cannot clip it. Its own width
+ * still needs a viewport ceiling because provider labels are untrusted text. */
+.ai-reviewer-panel-portaled-menu {
+  box-sizing: border-box;
+
+  .dropdown-item {
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    align-items: flex-start;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/*
+ * The chat pane dresses its composer under `.chat`, so none of it reached this
+ * one: the field kept the browser's default width and sat as a narrow box with
+ * a live resize handle, next to a panel that styles everything else. Repeating
+ * the chat pane's own construction here makes the two read as one control.
+ */
+.ai-reviewer-panel-composer .new-message {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ai-reviewer-panel-composer textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: var(--spacing-13);
+  padding: var(--spacing-03);
+  border: 1px solid var(--border-divider-themed);
+  border-radius: var(--border-radius-base);
+  color: var(--content-primary-themed);
+  background: var(--bg-primary-themed);
+  font-family: inherit;
+  font-size: var(--font-size-02);
+  line-height: var(--line-height-02);
+
+  // The panel is itself a draggable column, so a second handle here fights it.
+  resize: none;
+  overflow: auto;
 }

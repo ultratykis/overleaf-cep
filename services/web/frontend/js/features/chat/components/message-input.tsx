@@ -3,9 +3,19 @@ import { useTranslation } from 'react-i18next'
 type MessageInputProps = {
   resetUnreadMessages: () => void
   sendMessage: (message: string) => void
+  // The AI reviewer reuses this input to talk to a model rather than to
+  // collaborators, and can be mounted beside the chat pane, so both the
+  // wording and the element id have to be overridable.
+  placeholder?: string
+  inputId?: string
 }
 
-function MessageInput({ resetUnreadMessages, sendMessage }: MessageInputProps) {
+function MessageInput({
+  resetUnreadMessages,
+  sendMessage,
+  placeholder,
+  inputId = 'chat-input',
+}: MessageInputProps) {
   const { t } = useTranslation()
 
   function handleKeyDown(event: React.KeyboardEvent) {
@@ -24,14 +34,16 @@ function MessageInput({ resetUnreadMessages, sendMessage }: MessageInputProps) {
     }
   }
 
+  const label = placeholder ?? `${t('your_message_to_collaborators')}…`
+
   return (
     <form className="new-message">
-      <label htmlFor="chat-input" className="visually-hidden">
-        {`${t('your_message_to_collaborators')}…`}
+      <label htmlFor={inputId} className="visually-hidden">
+        {label}
       </label>
       <textarea
-        id="chat-input"
-        placeholder={`${t('your_message_to_collaborators')}…`}
+        id={inputId}
+        placeholder={label}
         onKeyDown={handleKeyDown}
         onClick={resetUnreadMessages}
       />

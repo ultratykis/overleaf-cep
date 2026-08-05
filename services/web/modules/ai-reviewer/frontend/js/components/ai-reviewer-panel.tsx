@@ -1,3 +1,4 @@
+import MessageInput from "@/features/chat/components/message-input";
 import { useFileTreePathContext } from "@/features/file-tree/contexts/file-tree-path";
 import GenericConfirmModal from "@/features/ide-react/components/modals/generic-confirm-modal";
 import { useEditorManagerContext } from "@/features/ide-react/context/editor-manager-context";
@@ -12,19 +13,21 @@ import MaterialIcon from "@/shared/components/material-icon";
 import OLButton from "@/shared/components/ol/ol-button";
 import OLDropdownMenuItem from "@/shared/components/ol/ol-dropdown-menu-item";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
-import OLFormSelect from "@/shared/components/ol/ol-form-select";
-import OLIconButton from "@/shared/components/ol/ol-icon-button";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
 import { useProjectContext } from "@/shared/context/project-context";
 import type { TFunction } from "i18next";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { v4 as uuid } from "uuid";
 
@@ -33,13 +36,13 @@ import type {
   AgentEvent,
   AgentRequest,
   AiReviewerWorkspace,
-  DiscussionEvent,
-  DiscussionRequest,
   DiscussionSubject,
   DiscussionTurn,
   Finding,
+  ToolCall,
   UnresolvedSuggestion,
   WorkspaceDiscussion,
+  WorkspaceModelSelection,
   WorkspaceRun,
 } from "../../../shared/contract-types";
 import {
@@ -54,12 +57,16 @@ import {
   type RegisterSuggestionPreviewLease,
   type SuggestionPreviewDisposer,
 } from "./ai-reviewer-suggestion-preview";
+import {
+  AiReviewerDiscussionMessages,
+  type AiReviewerToolLine,
+} from "./ai-reviewer-discussion-messages";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
-  AgentStreamError,
-  streamAgentEvents,
-  streamDiscussionEvents,
-} from "../services/agent-stream";
+  useEditorSelectionPreview,
+  type EditorSelectionScopeDescriptor,
+} from "../hooks/use-editor-selection-preview";
+import { AgentStreamError, streamAgentEvents } from "../services/agent-stream";
 import {
   createEditorEvidenceNavigationTarget,
   createProjectEditorEvidenceNavigationTarget,
@@ -80,6 +87,7 @@ import {
   initialReviewWorkspaceState,
   reduceReviewWorkspaceState,
   type FindingArtifactStatus,
+  type ReviewScopeKind,
   type SelectionWorkspaceState,
   type SelectionSuggestionDecision,
   type SelectionWorkspaceStatus,
@@ -98,7 +106,6 @@ import {
 } from "../services/editor-artifact-comment-posting";
 import { readEditorSuggestionLiveContext } from "../services/editor-suggestion-host-application";
 import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
-import { partitionDocumentReview } from "../services/document-review-partition";
 import {
   getAiProviderConnections,
   getAiProviderModels,
@@ -109,8 +116,11 @@ import {
 
 import "../../stylesheets/ai-reviewer.scss";
 
+// Loaded on demand: the settings modal is only reached from the panel when
+// there is no connection yet.
+const AiIntegrationDetails = lazy(() => import("./ai-integration-details"));
+
 type StreamRequest = typeof streamAgentEvents;
-type StreamDiscussionRequest = typeof streamDiscussionEvents;
 type NavigateEvidence = typeof navigateToEditorEvidence;
 type CaptureSelectionRequest = {
   requestId: string;
@@ -147,6 +157,7 @@ type ActiveRun = {
   invalidated: boolean;
   terminal: "completed" | "error" | null;
   errorCode: string | null;
+  subjectReceived: boolean;
   session: EditorSelectionSession | null;
   findingIds: Set<string>;
   suggestionIds: Set<string>;
@@ -194,7 +205,10 @@ type CitationCopyNotice = {
 };
 
 type DiscussionStatus = "idle" | "streaming" | "error";
-type ReviewScopeKind = AgentRequest["scope"]["kind"];
+type SubjectQuote = {
+  location: string | null;
+  text: string;
+};
 
 type Discussion = {
   id: string;
@@ -205,6 +219,7 @@ type Discussion = {
   sourceGeneration: number | null;
   sourceSession: EditorSelectionSession | null;
   turns: DiscussionTurn[];
+  toolCalls: Array<{ position: number; call: ToolCall }>;
   suggestions: UnresolvedSuggestion[];
   suggestionStatuses: Readonly<
     Record<string, SuggestionArtifactStatus | undefined>
@@ -228,6 +243,8 @@ type PersistenceOperation = {
   controller: AbortController;
 };
 
+type ReviewMode = "referee-review" | "brainstorm" | null;
+
 const selectionActions: Array<{
   action: EditorSelectionSessionAction;
   instruction: string;
@@ -246,13 +263,13 @@ const selectionActions: Array<{
   },
 ];
 
-const projectReviewInstruction =
-  "Review this project and identify the most important issue.";
-const documentReviewInstruction = "Review the current document.";
-
 function cancellationReason(message: string) {
   return new DOMException(message, "AbortError");
 }
+
+// A private reviewer transcript has no unread state to clear, but the host
+// message input still asks for the callback.
+function noUnreadMessages() {}
 
 /**
  * The same model id can be reachable through more than one connection, so an
@@ -260,6 +277,42 @@ function cancellationReason(message: string) {
  */
 function modelKey(model: { connectionId: string; id: string }) {
   return JSON.stringify([model.connectionId, model.id]);
+}
+
+const portaledMenuPopperConfig = {
+  strategy: "fixed" as const,
+  modifiers: [
+    {
+      name: "preventOverflow",
+      options: { rootBoundary: "viewport" as const, padding: 8 },
+    },
+    {
+      name: "flip",
+      options: { rootBoundary: "viewport" as const, padding: 8 },
+    },
+  ],
+};
+
+function AiReviewerPortaledMenu({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className: string;
+}) {
+  if (typeof document === "undefined") {
+    return null;
+  }
+  return createPortal(
+    <DropdownMenu
+      flip
+      className={`ai-reviewer-panel-portaled-menu ${className}`}
+      popperConfig={portaledMenuPopperConfig}
+    >
+      {children}
+    </DropdownMenu>,
+    document.body,
+  );
 }
 
 function runStatusLabel(
@@ -300,20 +353,6 @@ function selectionActionLabel(
   }
 }
 
-function reviewActionLabel(
-  scopeKind: ReviewScopeKind,
-  t: TFunction<"translation">,
-) {
-  switch (scopeKind) {
-    case "selection":
-      return selectionActionLabel("review", t);
-    case "document":
-      return t("ai_reviewer_review_current_document");
-    case "project":
-      return t("ai_reviewer_run_review");
-  }
-}
-
 function agentErrorGuidance(
   error: AgentError,
   t: TFunction<"translation">,
@@ -329,6 +368,12 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_network");
     case "configuration:AI_PROJECT_CONTENT_NOT_AVAILABLE":
       return t("ai_reviewer_error_guidance_project_content");
+    // Waiting fixes a busy model but never fixes a withdrawn one, so the two
+    // are told apart by the action they call for rather than by their text.
+    case "rate-limit:AI_PROVIDER_MODEL_BUSY":
+      return t("ai_reviewer_error_guidance_model_busy");
+    case "configuration:AI_PROVIDER_MODEL_UNAVAILABLE":
+      return t("ai_reviewer_error_guidance_model_unavailable");
     case "network:AI_STREAM_NETWORK_ERROR":
     case "network:AI_HTTP_ERROR":
     case "network:AI_STREAM_BODY_MISSING":
@@ -560,7 +605,7 @@ function artifactStatusLabel(
 }
 
 function reviewScopeLabel(
-  scopeKind: AgentRequest["scope"]["kind"] | null,
+  scopeKind: ReviewScopeKind | null,
   t: TFunction<"translation">,
 ) {
   switch (scopeKind) {
@@ -572,6 +617,17 @@ function reviewScopeLabel(
       return t("ai_reviewer_scope_project");
     default:
       return t("ai_reviewer_scope");
+  }
+}
+
+function reviewModeLabel(mode: ReviewMode, t: TFunction<"translation">) {
+  switch (mode) {
+    case "referee-review":
+      return t("ai_reviewer_mode_review");
+    case "brainstorm":
+      return t("ai_reviewer_mode_brainstorm");
+    default:
+      return t("ai_reviewer_mode_none");
   }
 }
 
@@ -597,9 +653,71 @@ function discussionSubjectLabel(
       });
     case "scope":
       return t("ai_reviewer_discussion_subject_scope", {
-        scope: reviewScopeLabel(subject.sourceRequest.scope.kind, t),
+        scope: reviewScopeLabel(subject.sourceRequest.scope?.kind ?? null, t),
       });
   }
+}
+
+/**
+ * A discussion opened from the review list loses its context unless the text it
+ * is about travels with it, so the subject is quoted at the top of the thread.
+ */
+function discussionSubjectQuote(
+  subject: DiscussionSubject | null,
+): SubjectQuote | null {
+  if (subject == null) {
+    return null;
+  }
+  if (subject.kind === "suggestion") {
+    return { location: null, text: subject.artifact.original };
+  }
+  const scope = subject.sourceRequest.scope;
+  if (scope == null || scope.kind === "project") {
+    return null;
+  }
+  if (subject.kind === "scope") {
+    return { location: scope.path, text: scope.text };
+  }
+  // Evidence ranges are document offsets, while the scope text of a selection
+  // starts at the selection, so the slice is taken relative to the scope.
+  const reference = subject.artifact.evidence[0];
+  const scopeFrom = scope.kind === "selection" ? scope.range.from : 0;
+  const location = reference == null ? scope.path : evidenceLocation(reference);
+  const quoted =
+    reference?.range == null
+      ? ""
+      : scope.text.slice(
+          reference.range.from - scopeFrom,
+          reference.range.to - scopeFrom,
+        );
+  return { location, text: quoted === "" ? scope.text : quoted };
+}
+
+/**
+ * Only the tool and the one thing it was pointed at. The remaining arguments
+ * and every result carry manuscript text, so neither reaches the panel.
+ */
+function toolCallLabel(call: ToolCall) {
+  const target =
+    call.name === "read_project_file"
+      ? call.arguments.path
+      : call.arguments.query;
+  return `${call.name} \u00b7 ${target}`;
+}
+
+/**
+ * The pinned subject is something the agent already said, so it travels to the
+ * model as the assistant turn it was rather than as a new instruction. A scope
+ * subject needs no text: its scope rides along on the request itself.
+ */
+function discussionSubjectSummary(subject: DiscussionSubject) {
+  if (subject.kind === "scope") {
+    return "";
+  }
+  if (subject.kind === "suggestion") {
+    return `${subject.artifact.rationale}\n\n${subject.artifact.replacement}`;
+  }
+  return `${subject.artifact.title}\n\n${subject.artifact.message}`;
 }
 
 function persistenceErrorMessage(error: unknown, t: TFunction<"translation">) {
@@ -639,6 +757,7 @@ function workspaceRunFromState(
       ? { provider: runState.provider, model: runState.model }
       : {}),
     ...(runState.group == null ? {} : { group: runState.group }),
+    ...(runState.subject == null ? {} : { subject: runState.subject }),
     text: runState.text,
     findings: runState.findings.map((finding) => ({
       artifact: finding,
@@ -696,6 +815,7 @@ function workspaceDiscussionFromState(
 function persistedWorkspaceFromState(
   workspace: { runs: SelectionWorkspaceState[] },
   discussions: Discussion[],
+  selectedModel: WorkspaceModelSelection | null,
 ): AiReviewerWorkspace | null {
   if (discussions.some((discussion) => discussion.status === "streaming")) {
     return null;
@@ -705,6 +825,9 @@ function persistedWorkspaceFromState(
       .map(workspaceRunFromState)
       .filter((run): run is WorkspaceRun => run != null),
     discussions: discussions.map(workspaceDiscussionFromState),
+    // Omitting rather than nulling an absent choice keeps a workspace written
+    // before this field existed byte-identical through a load and a save.
+    ...(selectedModel == null ? {} : { selectedModel }),
   };
 }
 
@@ -719,13 +842,13 @@ function dropEmptyUnboundRuns(
     ),
   );
   return {
+    ...workspace,
     runs: workspace.runs.filter(
       (run) =>
         run.findings.length > 0 ||
         run.suggestions.length > 0 ||
         boundRequestIds.has(run.request.requestId),
     ),
-    discussions: workspace.discussions,
   };
 }
 
@@ -946,6 +1069,7 @@ function mergeWorkspaceDecisionChanges(
   }
   return {
     workspace: {
+      ...persisted,
       runs,
       discussions,
     },
@@ -966,6 +1090,8 @@ function discussionFromWorkspace(
     sourceGeneration: discussion.sourceGeneration,
     sourceSession: null,
     turns: discussion.turns,
+    // Tool lines belong to the live stream; the stored workspace keeps turns.
+    toolCalls: [],
     suggestions: discussion.suggestions.map((entry) => ({
       ...entry.artifact,
       status: "unresolved",
@@ -1007,10 +1133,9 @@ export function AiReviewerPanelView({
   createDiscussionRequestId = uuid,
   now = () => new Date().toISOString(),
   streamRequest = streamAgentEvents,
-  streamDiscussionRequest = streamDiscussionEvents,
   captureSelectionSession,
-  captureDocumentSession,
   getSelectionContext,
+  selectionPreview = null,
   navigateEvidence = navigateToEditorEvidence,
   resolveEvidenceDocument,
   openEvidenceDocument,
@@ -1028,10 +1153,9 @@ export function AiReviewerPanelView({
   createDiscussionRequestId?: () => string;
   now?: () => string;
   streamRequest?: StreamRequest;
-  streamDiscussionRequest?: StreamDiscussionRequest;
   captureSelectionSession?: CaptureSelectionSession;
-  captureDocumentSession?: CaptureSelectionSession;
   getSelectionContext?: () => EditorSelectionSessionContext;
+  selectionPreview?: EditorSelectionScopeDescriptor | null;
   navigateEvidence?: NavigateEvidence;
   resolveEvidenceDocument?: ResolveEditorEvidenceDocument;
   openEvidenceDocument?: OpenEditorEvidenceDocument;
@@ -1053,33 +1177,24 @@ export function AiReviewerPanelView({
   >(() => new Set());
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
-  const reviewScopes = useMemo<ReviewScopeKind[]>(() => {
-    const scopes: ReviewScopeKind[] = [];
-    if (captureSelectionSession != null) {
-      scopes.push("selection");
-    }
-    if (captureDocumentSession != null) {
-      scopes.push("document");
-    }
-    scopes.push("project");
-    return scopes;
-  }, [captureDocumentSession, captureSelectionSession]);
-  const [reviewScope, setReviewScope] = useState<ReviewScopeKind>(
-    reviewScopes[0] ?? "project",
-  );
+  const selectedModelRef = useRef<WorkspaceModelSelection | null>(null);
   const [connections, setConnections] = useState<AiProviderConnection[]>([]);
+  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
+  const [showProviderSettings, setShowProviderSettings] = useState(false);
   const [models, setModels] = useState<AiProviderModel[]>([]);
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
     [],
   );
-  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] =
+    useState<WorkspaceModelSelection | null>(null);
+  selectedModelRef.current = selectedModel;
+  const [selectedMode, setSelectedMode] = useState<ReviewMode>(null);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
     null,
   );
   const activeDiscussionIdRef = useRef<string | null>(activeDiscussionId);
   activeDiscussionIdRef.current = activeDiscussionId;
-  const [discussionInput, setDiscussionInput] = useState("");
   const [showDeleteWorkspaceConfirmation, setShowDeleteWorkspaceConfirmation] =
     useState(false);
   const [activeSuggestionPreview, setActiveSuggestionPreview] =
@@ -1127,22 +1242,18 @@ export function AiReviewerPanelView({
   } | null>(null);
 
   useEffect(() => {
-    if (!reviewScopes.includes(reviewScope)) {
-      setReviewScope(reviewScopes[0] ?? "project");
-    }
-  }, [reviewScope, reviewScopes]);
-
-  useEffect(() => {
     if (loadProviderConnections == null) {
       return;
     }
     const controller = new AbortController();
-    // The connections are not offered as a choice: they are read only for the
-    // context length override, the one context-length signal a client can see.
+    // The connections decide whether the panel has anything to offer at all,
+    // and they carry the context length override, the one context-length
+    // signal a client can see.
     loadProviderConnections(projectId, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
           setConnections(response.connections);
+          setConnectionsLoaded(true);
         }
       })
       .catch(() => {
@@ -1163,11 +1274,6 @@ export function AiReviewerPanelView({
         }
         setModels(catalog.models);
         setModelFailures(catalog.failures);
-        // A model carries its connection, so selecting the first entry is a
-        // complete choice rather than half of one.
-        setSelectedModelKey(
-          catalog.models[0] == null ? null : modelKey(catalog.models[0]),
-        );
       })
       .catch(() => {
         // An omitted model leaves the choice to the server, which still works
@@ -1177,16 +1283,28 @@ export function AiReviewerPanelView({
   }, [loadProviderModels, projectId]);
 
   const runModel = useMemo(
-    () => models.find((model) => modelKey(model) === selectedModelKey) ?? null,
-    [models, selectedModelKey],
-  );
-  const runContextLength = useMemo(
     () =>
-      connections.find((entry) => entry.id === runModel?.connectionId)?.config
-        .contextLengthOverride ?? null,
-    [connections, runModel],
+      models.find(
+        (model) =>
+          selectedModel != null &&
+          model.connectionId === selectedModel.connectionId &&
+          model.id === selectedModel.model,
+      ) ?? null,
+    [models, selectedModel],
   );
 
+  useEffect(() => {
+    // A stored choice can name a connection or model the user has since
+    // removed. Falling back to the head of the list keeps every later request
+    // pointed somewhere real, and writing it back records what actually ran.
+    if (!persistenceReady || models.length === 0 || runModel != null) {
+      return;
+    }
+    setSelectedModel({
+      connectionId: models[0].connectionId,
+      model: models[0].id,
+    });
+  }, [models, persistenceReady, runModel]);
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
       setDiscussions((current) => {
@@ -1320,6 +1438,7 @@ export function AiReviewerPanelView({
             (maximum, entry) => Math.max(maximum, entry.createdOrder),
             0,
           );
+          setSelectedModel(storedWorkspace.selectedModel ?? null);
           lastQueuedWorkspace.current = JSON.stringify(storedWorkspace);
           persistenceRevision.current = storedSnapshot.revision;
           persistenceSaveFailedRef.current = false;
@@ -1372,7 +1491,11 @@ export function AiReviewerPanelView({
     ) {
       return;
     }
-    const storedWorkspace = persistedWorkspaceFromState(workspace, discussions);
+    const storedWorkspace = persistedWorkspaceFromState(
+      workspace,
+      discussions,
+      selectedModel,
+    );
     if (storedWorkspace == null) {
       return;
     }
@@ -1432,6 +1555,7 @@ export function AiReviewerPanelView({
     persistenceMutationPending,
     persistenceReady,
     projectId,
+    selectedModel,
     t,
     workspace,
     workspacePersistence,
@@ -1517,7 +1641,7 @@ export function AiReviewerPanelView({
   const beginRun = useCallback(
     (
       status: "capturing" | "streaming",
-      scopeKind: AgentRequest["scope"]["kind"],
+      scopeKind: ReviewScopeKind,
       group?: WorkspaceRun["group"],
     ) => {
       clearCitationCopy();
@@ -1542,6 +1666,7 @@ export function AiReviewerPanelView({
         invalidated: false,
         terminal: null,
         errorCode: null,
+        subjectReceived: false,
         session: null,
         findingIds: new Set(),
         suggestionIds: new Set(),
@@ -1673,13 +1798,27 @@ export function AiReviewerPanelView({
           );
           return;
         }
-        if (event.type === "suggestion" && request.scope.kind === "project") {
+        if (
+          event.type === "suggestion" &&
+          (request.scope == null || request.scope.kind === "project")
+        ) {
           failRun(
             run,
             "AI_PROJECT_SUGGESTION_NOT_ALLOWED",
             t("ai_reviewer_error_project_suggestion_not_allowed"),
           );
           return;
+        }
+        if (event.type === "subject") {
+          if (run.subjectReceived) {
+            failRun(
+              run,
+              "AI_WORKSPACE_DUPLICATE_SUBJECT",
+              t("ai_reviewer_error_data_after_terminal_event"),
+            );
+            return;
+          }
+          run.subjectReceived = true;
         }
         if (event.type === "finding") {
           if (run.findingIds.has(event.finding.id)) {
@@ -1788,34 +1927,6 @@ export function AiReviewerPanelView({
     [failRun, isActiveRun, streamRequest, t],
   );
 
-  const runProjectReview = useCallback(() => {
-    if (persistenceConflictRef.current) {
-      return;
-    }
-    const run = beginRun("streaming", "project");
-    const request: AgentRequest = Object.freeze({
-      requestId: run.requestId,
-      projectId,
-      action: "review",
-      instruction: projectReviewInstruction,
-      skill: "referee-review",
-      ...(runModel == null
-        ? {}
-        : { connectionId: runModel.connectionId, model: runModel.id }),
-      scope: Object.freeze({
-        kind: "project",
-      }),
-    });
-
-    dispatch({
-      type: "request",
-      generation: run.generation,
-      requestId: run.requestId,
-      request,
-    });
-    void executeStream(run, request);
-  }, [beginRun, executeStream, projectId, runModel]);
-
   const runDocumentBoundReview = useCallback(
     async ({
       action,
@@ -1886,7 +1997,7 @@ export function AiReviewerPanelView({
         request.projectId !== projectId ||
         request.action !== action ||
         request.instruction !== instructionSnapshot ||
-        request.scope.kind !== scopeKind
+        request.scope?.kind !== scopeKind
       ) {
         failRun(
           run,
@@ -1894,111 +2005,6 @@ export function AiReviewerPanelView({
           t("ai_reviewer_error_capture_scope_invalid"),
         );
         return;
-      }
-
-      if (
-        scopeKind === "document" &&
-        request.scope.kind === "document" &&
-        runContextLength != null
-      ) {
-        const inputBudget = Math.floor(runContextLength * 0.5);
-        if (JSON.stringify(request).length > inputBudget) {
-          const selectionOverhead = JSON.stringify({
-            ...request,
-            scope: {
-              ...request.scope,
-              kind: "selection",
-              range: {
-                from: request.scope.text.length,
-                to: request.scope.text.length,
-              },
-              text: "",
-            },
-          }).length;
-          const partition = partitionDocumentReview(
-            request.scope.text,
-            inputBudget - selectionOverhead,
-          );
-          if (partition != null) {
-            if (partition.omitted > 0) {
-              setActionNotice(
-                t(
-                  "ai_reviewer_split_omitted",
-                  { count: partition.omitted },
-                ),
-              );
-            }
-            if (partition.parts.length === 0) {
-              failRun(
-                run,
-                "AI_DOCUMENT_SECTION_TOO_LARGE",
-                t(
-                  "ai_reviewer_split_none",
-                  "The document sections are too large to review, even by subsection.",
-                ),
-              );
-              return;
-            }
-            const groupId = run.requestId;
-            for (const [index, part] of partition.parts.entries()) {
-              const partRun =
-                index === 0
-                  ? run
-                  : beginRun("capturing", "selection", {
-                      id: groupId,
-                      position: index + 1,
-                      total: partition.parts.length,
-                    });
-              const partRequest = Object.freeze({
-                ...request,
-                requestId: partRun.requestId,
-                scope: Object.freeze({
-                  ...request.scope,
-                  kind: "selection" as const,
-                  range: Object.freeze(part.range),
-                  text: part.text,
-                }),
-              });
-              const partSession = Object.freeze({
-                ...session,
-                request: partRequest,
-              });
-              if (index === 0) {
-                dispatch({
-                  type: "group",
-                  generation: partRun.generation,
-                  requestId: partRun.requestId,
-                  group: {
-                    id: groupId,
-                    position: 1,
-                    total: partition.parts.length,
-                  },
-                });
-              }
-              partRun.session = partSession;
-              dispatch({
-                type: "session",
-                generation: partRun.generation,
-                requestId: partRun.requestId,
-                session: partSession,
-              });
-              const errorCode = await executeStream(partRun, partRequest);
-              if (errorCode === "AI_REVIEWER_CONCURRENCY_LIMITED") {
-                const remaining = partition.parts.length - index - 1;
-                if (remaining > 0) {
-                  setActionNotice(
-                    t(
-                      "ai_reviewer_split_concurrency_rejected",
-                      { count: remaining },
-                    ),
-                  );
-                }
-                break;
-              }
-            }
-            return;
-          }
-        }
       }
 
       run.session = session;
@@ -2017,7 +2023,6 @@ export function AiReviewerPanelView({
       invalidateRun,
       isActiveRun,
       projectId,
-      runContextLength,
       runModel,
       t,
     ],
@@ -2041,38 +2046,14 @@ export function AiReviewerPanelView({
     [captureSelectionSession, runDocumentBoundReview],
   );
 
-  const runCurrentDocumentReview = useCallback(
-    () =>
-      runDocumentBoundReview({
-        action: "review",
-        instruction: documentReviewInstruction,
-        captureSession: captureDocumentSession,
-        scopeKind: "document",
-      }),
-    [captureDocumentSession, runDocumentBoundReview],
-  );
-
-  const runSelectedReview = useCallback(() => {
-    switch (reviewScope) {
-      case "selection":
-        void runSelectionReview("review");
-        return;
-      case "document":
-        void runCurrentDocumentReview();
-        return;
-      case "project":
-        runProjectReview();
-    }
-  }, [
-    reviewScope,
-    runCurrentDocumentReview,
-    runProjectReview,
-    runSelectionReview,
-  ]);
-
   const rebindSuggestionSession = useCallback(
     (request: AgentRequest): EditorSelectionSession | null => {
-      if (request.scope.kind === "project" || getSelectionContext == null) {
+      const scope = request.scope;
+      if (
+        scope == null ||
+        scope.kind === "project" ||
+        getSelectionContext == null
+      ) {
         return null;
       }
       let liveContext: ReturnType<typeof readEditorSuggestionLiveContext>;
@@ -2084,8 +2065,8 @@ export function AiReviewerPanelView({
       if (
         liveContext.status === "conflict" ||
         liveContext.context.projectId !== request.projectId ||
-        liveContext.context.documentId !== request.scope.documentId ||
-        liveContext.context.path !== request.scope.path
+        liveContext.context.documentId !== scope.documentId ||
+        liveContext.context.path !== scope.path
       ) {
         return null;
       }
@@ -2104,7 +2085,12 @@ export function AiReviewerPanelView({
 
   const rebindEvidenceSession = useCallback(
     (request: AgentRequest): EditorSelectionSession | null => {
-      if (request.scope.kind === "project" || getSelectionContext == null) {
+      const scope = request.scope;
+      if (
+        scope == null ||
+        scope.kind === "project" ||
+        getSelectionContext == null
+      ) {
         return null;
       }
       try {
@@ -2113,10 +2099,10 @@ export function AiReviewerPanelView({
         const shareDocument = currentDocument?.doc;
         if (
           context.projectId !== request.projectId ||
-          context.currentDocumentId !== request.scope.documentId ||
-          context.path !== request.scope.path ||
+          context.currentDocumentId !== scope.documentId ||
+          context.path !== scope.path ||
           currentDocument == null ||
-          currentDocument.doc_id !== request.scope.documentId ||
+          currentDocument.doc_id !== scope.documentId ||
           shareDocument == null
         ) {
           return null;
@@ -2160,7 +2146,7 @@ export function AiReviewerPanelView({
         return null;
       }
 
-      if (request.scope.kind === "project") {
+      if (request.scope == null || request.scope.kind === "project") {
         if (resolveEvidenceDocument == null || openEvidenceDocument == null) {
           return null;
         }
@@ -2532,6 +2518,9 @@ export function AiReviewerPanelView({
       run.status === "streaming" ||
       run.status === "finalizing",
   );
+  const answerStreaming = discussions.some(
+    (discussion) => discussion.status === "streaming",
+  );
   const busy =
     (workspacePersistence != null && !persistenceReady) ||
     persistenceMutationPending ||
@@ -2561,6 +2550,7 @@ export function AiReviewerPanelView({
         session == null ||
         requestId == null ||
         getSelectionContext == null ||
+        session.request.scope == null ||
         session.request.scope.kind === "project" ||
         session.request.requestId !== requestId ||
         suggestion.requestId !== requestId ||
@@ -2569,7 +2559,7 @@ export function AiReviewerPanelView({
       ) {
         if (
           runState.status === "completed" &&
-          runState.request?.scope.kind !== "project" &&
+          runState.request?.scope?.kind !== "project" &&
           session == null
         ) {
           setActionNotice(
@@ -2747,6 +2737,7 @@ export function AiReviewerPanelView({
         sourceSession:
           runState.session ?? rebindSuggestionSession(runState.request),
         turns: [],
+        toolCalls: [],
         suggestions: [],
         suggestionStatuses: {},
         suggestionConflictCodes: {},
@@ -2786,18 +2777,56 @@ export function AiReviewerPanelView({
     [now, updateDiscussions],
   );
 
-  const submitDiscussionMessage = useCallback(() => {
-    const text = discussionInput.trim();
-    if (text === "") {
-      return;
-    }
-    let discussion =
-      activeDiscussionId == null
+  /**
+   * The composer is always on screen, so a message that arrives with nothing to
+   * continue starts a subject-less conversation rather than being dropped.
+   */
+  const openConversation = useCallback((): Discussion | null => {
+    const active =
+      activeDiscussionIdRef.current == null
         ? null
         : (discussionsRef.current.find(
-            (candidate) => candidate.id === activeDiscussionId,
+            (candidate) => candidate.id === activeDiscussionIdRef.current,
           ) ?? null);
-    if (discussion == null && activeDiscussionId == null) {
+    if (active != null) {
+      return active;
+    }
+    if (
+      discussionsRef.current.length >= AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT
+    ) {
+      setActionNotice(t("ai_reviewer_workspace_limit_reached"));
+      return null;
+    }
+    const discussion: Discussion = {
+      id: createDiscussionId(),
+      createdOrder: nextWorkspaceOrder.current + 1,
+      subjectKey: null,
+      subject: null,
+      subjectLabel: discussionSubjectLabel(null, t),
+      sourceGeneration: null,
+      sourceSession: null,
+      turns: [],
+      toolCalls: [],
+      suggestions: [],
+      suggestionStatuses: {},
+      suggestionConflictCodes: {},
+      status: "idle",
+      error: null,
+      updatedAt: now(),
+    };
+    nextWorkspaceOrder.current += 1;
+    updateDiscussions((current) => [...current, discussion]);
+    setActionNotice(null);
+    setActiveDiscussionId(discussion.id);
+    return discussion;
+  }, [createDiscussionId, now, t, updateDiscussions]);
+
+  const submitConversationMessage = useCallback(
+    (message: string) => {
+      const text = message.trim();
+      if (text === "") {
+        return;
+      }
       if (
         persistenceConflictRef.current ||
         persistenceMutationPendingRef.current ||
@@ -2807,213 +2836,94 @@ export function AiReviewerPanelView({
       ) {
         return;
       }
-      if (
-        discussionsRef.current.length >= AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT
-      ) {
+      const discussion = openConversation();
+      if (discussion == null) {
+        return;
+      }
+      const discussionId = discussion.id;
+      if (discussion.turns.length + 2 > AI_REVIEWER_WORKSPACE_TURN_LIMIT) {
         setActionNotice(t("ai_reviewer_workspace_limit_reached"));
         return;
       }
 
-      const id = createDiscussionId();
-      nextWorkspaceOrder.current += 1;
-      discussion = {
-        id,
-        createdOrder: nextWorkspaceOrder.current,
-        subjectKey: null,
-        subject: null,
-        subjectLabel: discussionSubjectLabel(null, t),
-        sourceGeneration: null,
-        sourceSession: null,
-        turns: [],
-        suggestions: [],
-        suggestionStatuses: {},
-        suggestionConflictCodes: {},
-        status: "idle",
-        error: null,
-        updatedAt: now(),
-      };
-      const openDiscussion = discussion;
-      updateDiscussions((current) => [...current, openDiscussion]);
-      setActionNotice(null);
-      setActiveDiscussionId(id);
-    }
-    if (
-      persistenceConflictRef.current ||
-      persistenceMutationPendingRef.current ||
-      discussion == null ||
-      discussion.status === "streaming"
-    ) {
-      return;
-    }
-    const discussionId = discussion.id;
-    if (discussion.turns.length + 2 > AI_REVIEWER_WORKSPACE_TURN_LIMIT) {
-      setActionNotice(t("ai_reviewer_workspace_limit_reached"));
-      return;
-    }
-
-    const previous = activeDiscussionRequest.current;
-    if (previous != null) {
-      activeDiscussionRequest.current = null;
-      if (!previous.controller.signal.aborted) {
-        previous.controller.abort(
-          cancellationReason("Another discussion response was requested."),
+      const previous = activeDiscussionRequest.current;
+      if (previous != null) {
+        activeDiscussionRequest.current = null;
+        if (!previous.controller.signal.aborted) {
+          previous.controller.abort(
+            cancellationReason("Another discussion response was requested."),
+          );
+        }
+        updateDiscussions((current) =>
+          current.map((candidate) =>
+            candidate.id === previous.discussionId
+              ? {
+                  ...candidate,
+                  status: "idle",
+                  error: null,
+                  updatedAt: now(),
+                }
+              : candidate,
+          ),
         );
       }
+
+      const requestId = createDiscussionRequestId();
+      const userTurn: DiscussionTurn = {
+        role: "user",
+        text,
+      };
+      const subject = discussion.subject;
+      const sourceRequest = subject?.sourceRequest ?? null;
+      const subjectSummary =
+        subject == null ? "" : discussionSubjectSummary(subject);
+      // `instruction` is the message just sent, so `turns` carries only what was
+      // said before it. A pinned subject leads that history as the assistant
+      // turn it was.
+      const turns = [
+        ...(subjectSummary === ""
+          ? []
+          : [{ role: "assistant" as const, text: subjectSummary }]),
+        ...discussion.turns,
+      ].slice(-DISCUSSION_CONTEXT_TURN_LIMIT);
+      // A typed request is governed by the premise visible beside the
+      // composer. Its range stays in the author's wording so the agent reads
+      // only the project files it actually needs.
+      const request: AgentRequest = {
+        requestId,
+        projectId,
+        action: sourceRequest?.action ?? "review",
+        instruction: text,
+        skill: selectedMode,
+        ...(runModel == null
+          ? {}
+          : { connectionId: runModel.connectionId, model: runModel.id }),
+        ...(turns.length === 0 ? {} : { turns }),
+      };
+      const active: ActiveDiscussionRequest = {
+        discussionId,
+        requestId,
+        controller: new AbortController(),
+        terminal: null,
+        suggestionIds: new Set(),
+      };
+      activeDiscussionRequest.current = active;
+      setActionNotice(null);
       updateDiscussions((current) =>
         current.map((candidate) =>
-          candidate.id === previous.discussionId
+          candidate.id === discussionId
             ? {
                 ...candidate,
-                status: "idle",
+                turns: [...candidate.turns, userTurn],
+                status: "streaming",
                 error: null,
                 updatedAt: now(),
               }
             : candidate,
         ),
       );
-    }
 
-    const requestId = createDiscussionRequestId();
-    const userTurn: DiscussionTurn = {
-      role: "user",
-      text,
-    };
-    const turns = [...discussion.turns, userTurn].slice(
-      -DISCUSSION_CONTEXT_TURN_LIMIT,
-    );
-    const request: DiscussionRequest = {
-      requestId,
-      discussionId: discussion.id,
-      projectId,
-      subject: discussion.subject,
-      turns,
-    };
-    const active: ActiveDiscussionRequest = {
-      discussionId,
-      requestId,
-      controller: new AbortController(),
-      terminal: null,
-      suggestionIds: new Set(),
-    };
-    activeDiscussionRequest.current = active;
-    setActionNotice(null);
-    setDiscussionInput("");
-    updateDiscussions((current) =>
-      current.map((candidate) =>
-        candidate.id === discussionId
-          ? {
-              ...candidate,
-              turns: [...candidate.turns, userTurn],
-              status: "streaming",
-              error: null,
-              updatedAt: now(),
-            }
-          : candidate,
-      ),
-    );
-
-    const onEvent = (event: DiscussionEvent) => {
-      if (
-        !mounted.current ||
-        activeDiscussionRequest.current !== active ||
-        active.controller.signal.aborted
-      ) {
-        return;
-      }
-      if (event.requestId !== active.requestId) {
-        failDiscussionRequest(
-          active,
-          t("ai_reviewer_error_discussion_event_request_mismatch"),
-        );
-        return;
-      }
-      if (active.terminal != null) {
-        failDiscussionRequest(
-          active,
-          t("ai_reviewer_error_discussion_data_after_terminal"),
-        );
-        return;
-      }
-      if (event.type === "text.delta") {
-        updateDiscussions((current) =>
-          current.map((candidate) => {
-            if (candidate.id !== discussionId) {
-              return candidate;
-            }
-            const lastTurn = candidate.turns[candidate.turns.length - 1];
-            const nextTurns =
-              lastTurn?.role === "assistant"
-                ? [
-                    ...candidate.turns.slice(0, -1),
-                    {
-                      role: "assistant" as const,
-                      text: `${lastTurn.text}${event.delta}`,
-                    },
-                  ]
-                : [
-                    ...candidate.turns,
-                    {
-                      role: "assistant" as const,
-                      text: event.delta,
-                    },
-                  ];
-            return {
-              ...candidate,
-              turns: nextTurns,
-              updatedAt: now(),
-            };
-          }),
-        );
-      } else if (event.type === "suggestion") {
-        if (active.suggestionIds.has(event.suggestion.id)) {
-          failDiscussionRequest(
-            active,
-            t("ai_reviewer_error_duplicate_discussion_suggestion"),
-          );
-          return;
-        }
-        active.suggestionIds.add(event.suggestion.id);
-        updateDiscussions((current) =>
-          current.map((candidate) =>
-            candidate.id === discussionId
-              ? {
-                  ...candidate,
-                  suggestions: [...candidate.suggestions, event.suggestion],
-                  suggestionStatuses: {
-                    ...candidate.suggestionStatuses,
-                    [event.suggestion.id]: "unresolved",
-                  },
-                  updatedAt: now(),
-                }
-              : candidate,
-          ),
-        );
-      } else if (event.type === "completed") {
-        active.terminal = "completed";
-      } else if (event.type === "error") {
-        active.terminal = "error";
-        updateDiscussions((current) =>
-          current.map((candidate) =>
-            candidate.id === discussionId
-              ? {
-                  ...candidate,
-                  status: "error",
-                  error: agentErrorGuidance(event.error, t),
-                  updatedAt: now(),
-                }
-              : candidate,
-          ),
-        );
-      }
-    };
-
-    void streamDiscussionRequest({
-      projectId,
-      request,
-      signal: active.controller.signal,
-      onEvent,
-    })
-      .then(() => {
+      const onEvent = (event: AgentEvent) => {
         if (
           !mounted.current ||
           activeDiscussionRequest.current !== active ||
@@ -3021,80 +2931,202 @@ export function AiReviewerPanelView({
         ) {
           return;
         }
-        if (active.terminal == null) {
+        if (event.requestId !== active.requestId) {
           failDiscussionRequest(
             active,
-            t("ai_reviewer_error_discussion_incomplete"),
+            t("ai_reviewer_error_discussion_event_request_mismatch"),
           );
           return;
         }
-        if (active.terminal === "completed") {
+        if (active.terminal != null) {
+          failDiscussionRequest(
+            active,
+            t("ai_reviewer_error_discussion_data_after_terminal"),
+          );
+          return;
+        }
+        if (event.type === "text.delta") {
+          updateDiscussions((current) =>
+            current.map((candidate) => {
+              if (candidate.id !== discussionId) {
+                return candidate;
+              }
+              const lastTurn = candidate.turns[candidate.turns.length - 1];
+              const nextTurns =
+                lastTurn?.role === "assistant"
+                  ? [
+                      ...candidate.turns.slice(0, -1),
+                      {
+                        role: "assistant" as const,
+                        text: `${lastTurn.text}${event.delta}`,
+                      },
+                    ]
+                  : [
+                      ...candidate.turns,
+                      {
+                        role: "assistant" as const,
+                        text: event.delta,
+                      },
+                    ];
+              return {
+                ...candidate,
+                turns: nextTurns,
+                updatedAt: now(),
+              };
+            }),
+          );
+        } else if (event.type === "tool.call") {
           updateDiscussions((current) =>
             current.map((candidate) =>
               candidate.id === discussionId
                 ? {
                     ...candidate,
-                    status: "idle",
-                    error: null,
+                    toolCalls: [
+                      ...candidate.toolCalls,
+                      { position: candidate.turns.length, call: event.call },
+                    ],
+                    updatedAt: now(),
+                  }
+                : candidate,
+            ),
+          );
+        } else if (event.type === "suggestion") {
+          if (active.suggestionIds.has(event.suggestion.id)) {
+            failDiscussionRequest(
+              active,
+              t("ai_reviewer_error_duplicate_discussion_suggestion"),
+            );
+            return;
+          }
+          active.suggestionIds.add(event.suggestion.id);
+          updateDiscussions((current) =>
+            current.map((candidate) =>
+              candidate.id === discussionId
+                ? {
+                    ...candidate,
+                    suggestions: [...candidate.suggestions, event.suggestion],
+                    suggestionStatuses: {
+                      ...candidate.suggestionStatuses,
+                      [event.suggestion.id]: "unresolved",
+                    },
+                    updatedAt: now(),
+                  }
+                : candidate,
+            ),
+          );
+        } else if (event.type === "completed") {
+          active.terminal = "completed";
+        } else if (event.type === "error") {
+          active.terminal = "error";
+          updateDiscussions((current) =>
+            current.map((candidate) =>
+              candidate.id === discussionId
+                ? {
+                    ...candidate,
+                    status: "error",
+                    error: agentErrorGuidance(event.error, t),
                     updatedAt: now(),
                   }
                 : candidate,
             ),
           );
         }
-      })
-      .catch((error: unknown) => {
-        if (
-          !mounted.current ||
-          activeDiscussionRequest.current !== active ||
-          active.controller.signal.aborted
-        ) {
-          return;
-        }
-        failDiscussionRequest(active, streamErrorGuidance(error, t));
-      })
-      .finally(() => {
-        if (activeDiscussionRequest.current === active) {
-          activeDiscussionRequest.current = null;
-        }
-      });
-  }, [
-    activeDiscussionId,
-    createDiscussionId,
-    createDiscussionRequestId,
-    discussionInput,
-    failDiscussionRequest,
-    now,
-    projectId,
-    streamDiscussionRequest,
-    t,
-    updateDiscussions,
-  ]);
+      };
 
-  const cancelDiscussionResponse = useCallback(() => {
+      void streamRequest({
+        projectId,
+        request,
+        signal: active.controller.signal,
+        onEvent,
+      })
+        .then(() => {
+          if (
+            !mounted.current ||
+            activeDiscussionRequest.current !== active ||
+            active.controller.signal.aborted
+          ) {
+            return;
+          }
+          if (active.terminal == null) {
+            failDiscussionRequest(
+              active,
+              t("ai_reviewer_error_discussion_incomplete"),
+            );
+            return;
+          }
+          if (active.terminal === "completed") {
+            updateDiscussions((current) =>
+              current.map((candidate) =>
+                candidate.id === discussionId
+                  ? {
+                      ...candidate,
+                      status: "idle",
+                      error: null,
+                      updatedAt: now(),
+                    }
+                  : candidate,
+              ),
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          if (
+            !mounted.current ||
+            activeDiscussionRequest.current !== active ||
+            active.controller.signal.aborted
+          ) {
+            return;
+          }
+          failDiscussionRequest(active, streamErrorGuidance(error, t));
+        })
+        .finally(() => {
+          if (activeDiscussionRequest.current === active) {
+            activeDiscussionRequest.current = null;
+          }
+        });
+    },
+    [
+      createDiscussionRequestId,
+      failDiscussionRequest,
+      now,
+      openConversation,
+      projectId,
+      runModel,
+      selectedMode,
+      streamRequest,
+      t,
+      updateDiscussions,
+    ],
+  );
+
+  /**
+   * One control stops whatever is running, because the panel only ever runs one
+   * thing: a review or the answer to a message.
+   */
+  const stopActiveWork = useCallback(() => {
     const active = activeDiscussionRequest.current;
-    if (active == null || active.discussionId !== activeDiscussionId) {
-      return;
-    }
-    activeDiscussionRequest.current = null;
-    if (!active.controller.signal.aborted) {
-      active.controller.abort(
-        cancellationReason("The discussion response was cancelled."),
+    if (active != null) {
+      activeDiscussionRequest.current = null;
+      if (!active.controller.signal.aborted) {
+        active.controller.abort(
+          cancellationReason("The response was stopped."),
+        );
+      }
+      updateDiscussions((current) =>
+        current.map((discussion) =>
+          discussion.id === active.discussionId
+            ? {
+                ...discussion,
+                status: "idle",
+                error: null,
+                updatedAt: now(),
+              }
+            : discussion,
+        ),
       );
     }
-    updateDiscussions((current) =>
-      current.map((discussion) =>
-        discussion.id === active.discussionId
-          ? {
-              ...discussion,
-              status: "idle",
-              error: null,
-              updatedAt: now(),
-            }
-          : discussion,
-      ),
-    );
-  }, [activeDiscussionId, now, updateDiscussions]);
+    cancel();
+  }, [cancel, now, updateDiscussions]);
 
   useEffect(() => {
     if (!persistenceConflict) {
@@ -3150,13 +3182,14 @@ export function AiReviewerPanelView({
         persistenceConflictRef.current ||
         session == null ||
         getSelectionContext == null ||
+        sourceRequest.scope == null ||
         sourceRequest.scope.kind === "project" ||
         session.request !== sourceRequest ||
         !discussion.suggestions.includes(suggestion) ||
         suggestionStatus(discussion.suggestionStatuses, suggestion.id) !==
           "unresolved"
       ) {
-        if (sourceRequest.scope.kind !== "project" && session == null) {
+        if (sourceRequest.scope?.kind !== "project" && session == null) {
           setActionNotice(
             t("ai_reviewer_open_reviewed_document_in_source_mode"),
           );
@@ -3244,7 +3277,6 @@ export function AiReviewerPanelView({
       discussionId: string,
       persistedAfterDeletion: AiReviewerWorkspace | null = null,
       beforeDeletion: AiReviewerWorkspace | null = null,
-      clearDiscussionInput = false,
     ) => {
       let remainingDiscussions = discussionsRef.current.filter(
         (discussion) => discussion.id !== discussionId,
@@ -3254,6 +3286,7 @@ export function AiReviewerPanelView({
         const currentAfterDeletion = persistedWorkspaceFromState(
           workspaceRef.current,
           remainingDiscussions,
+          selectedModelRef.current,
         );
         const mergeResult =
           beforeDeletion == null || currentAfterDeletion == null
@@ -3287,6 +3320,7 @@ export function AiReviewerPanelView({
         const storedWorkspace = persistedWorkspaceFromState(
           workspaceRef.current,
           remainingDiscussions,
+          selectedModelRef.current,
         );
         const prunedWorkspace =
           storedWorkspace == null
@@ -3333,9 +3367,6 @@ export function AiReviewerPanelView({
       if (activeDiscussionIdRef.current === discussionId) {
         setActiveDiscussionId(null);
       }
-      if (clearDiscussionInput) {
-        setDiscussionInput("");
-      }
       return mergeConflicted;
     },
     [disposeActiveSuggestion, t, updateDiscussions],
@@ -3359,15 +3390,8 @@ export function AiReviewerPanelView({
           cancellationReason("The discussion was deleted."),
         );
       }
-      const clearDiscussionInput =
-        activeDiscussionIdRef.current === discussion.id;
       if (workspacePersistence == null) {
-        finishDiscussionDeletion(
-          discussion.id,
-          null,
-          null,
-          clearDiscussionInput,
-        );
+        finishDiscussionDeletion(discussion.id);
         return;
       }
       const scope = hydratedPersistenceScope.current;
@@ -3381,6 +3405,7 @@ export function AiReviewerPanelView({
       const beforeDeletion = persistedWorkspaceFromState(
         workspaceRef.current,
         discussionsRef.current,
+        selectedModelRef.current,
       );
       if (beforeDeletion == null) {
         return;
@@ -3413,7 +3438,6 @@ export function AiReviewerPanelView({
             discussion.id,
             snapshot.workspace,
             beforeDeletion,
-            clearDiscussionInput,
           );
           persistenceMutationPendingRef.current = false;
           setPersistenceMutationPending(false);
@@ -3490,7 +3514,6 @@ export function AiReviewerPanelView({
     });
     updateDiscussions(() => []);
     setActiveDiscussionId(null);
-    setDiscussionInput("");
     nextGeneration.current = 0;
     nextWorkspaceOrder.current = 0;
   }, [
@@ -3577,18 +3600,6 @@ export function AiReviewerPanelView({
     workspacePersistence,
   ]);
 
-  const activeDiscussion =
-    activeDiscussionId == null
-      ? null
-      : (discussions.find(
-          (discussion) => discussion.id === activeDiscussionId,
-        ) ?? null);
-  const activeDiscussionSourceRequest =
-    activeDiscussion?.subject?.sourceRequest ?? null;
-  const hasActiveDiscussionSuggestions =
-    activeDiscussionSourceRequest != null &&
-    activeDiscussion != null &&
-    activeDiscussion.suggestions.length > 0;
   const workspaceNotice = persistenceConflict
     ? persistenceNotice
     : (actionNotice ?? persistenceNotice);
@@ -3677,625 +3688,751 @@ export function AiReviewerPanelView({
     );
   };
 
-  const renderRun = (runState: SelectionWorkspaceState) => {
-    const findings = runState.findings.filter(
-      (finding): finding is OrdinaryFinding =>
-        finding.artifactKind === "finding",
-    );
-    const citationFindings = runState.findings.filter(
-      (finding): finding is CitationFinding =>
-        finding.artifactKind === "citation-finding",
-    );
-    const canDiscuss =
-      !persistenceConflict &&
-      runState.status === "completed" &&
-      runState.request != null;
+  const renderArtifact = (
+    key: string,
+    title: string | null,
+    status: FindingArtifactStatus | SuggestionArtifactStatus,
+    body: ReactNode,
+  ) => (
+    <article
+      key={key}
+      // A resolved artifact stays in place and only dims, so the list keeps the
+      // shape the reader learned instead of rearranging under them.
+      className={`ai-reviewer-artifact${
+        isTerminalArtifactStatus(status) ? " ai-reviewer-artifact-resolved" : ""
+      }`}
+    >
+      {title != null && <h5 className="ai-reviewer-artifact-title">{title}</h5>}
+      <p className="ai-reviewer-artifact-status">
+        {t("ai_reviewer_artifact_status", {
+          status: artifactStatusLabel(status, t),
+        })}
+      </p>
+      {body}
+    </article>
+  );
 
-    const renderFinding = (finding: OrdinaryFinding) => {
-      const status = findingStatus(runState.findingStatuses, finding.id);
-      const commentDraftKey = `run:${runState.generation}:finding:${finding.id}`;
-      const body = (
-        <>
-          <ExpandableContent
-            className="ai-reviewer-panel-prose"
-            content={finding.message}
-            contentLimit={240}
-            checkNewLines
-            translate="no"
-          />
-          <ul className="ai-reviewer-panel-locations">
-            {finding.evidence.map((reference, index) => {
-              const navigationTarget =
-                prepareFindingEvidenceNavigation(runState, finding, index)
-                  ?.target ?? null;
-              const location = evidenceLocation(reference);
-              return (
-                <li key={`${finding.id}-evidence-${index}`}>
-                  <code className="ai-reviewer-panel-location" title={location}>
-                    {location}
-                  </code>
-                  {navigationTarget != null && (
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      onClick={() =>
-                        openFindingEvidence(runState, finding, index)
-                      }
-                    >
-                      {finding.evidence.length > 1
-                        ? t("ai_reviewer_go_to_location", {
-                            index: index + 1,
-                          })
-                        : t("ai_reviewer_go_to_location_single", "Go to text")}
-                    </OLButton>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-          <div className="ai-reviewer-panel-actions">
-            {canDiscuss && runState.request != null && (
+  const renderEvidence = (
+    runState: SelectionWorkspaceState,
+    artifact: Finding,
+  ) => (
+    <ul className="ai-reviewer-panel-locations">
+      {artifact.evidence.map((reference, index) => {
+        const navigationTarget =
+          prepareFindingEvidenceNavigation(runState, artifact, index)?.target ??
+          null;
+        const location = evidenceLocation(reference);
+        return (
+          <li key={`${artifact.id}-evidence-${index}`}>
+            <code className="ai-reviewer-panel-location" title={location}>
+              {location}
+            </code>
+            {navigationTarget != null && (
+              <OLButton
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => openFindingEvidence(runState, artifact, index)}
+              >
+                {artifact.evidence.length > 1
+                  ? t("ai_reviewer_go_to_location", { index: index + 1 })
+                  : t("ai_reviewer_go_to_location_single", "Go to text")}
+              </OLButton>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  const canDiscussRun = (runState: SelectionWorkspaceState) =>
+    !persistenceConflict &&
+    runState.status === "completed" &&
+    runState.request != null;
+
+  const renderFinding = (
+    runState: SelectionWorkspaceState,
+    finding: OrdinaryFinding,
+  ) => {
+    const status = findingStatus(runState.findingStatuses, finding.id);
+    const commentDraftKey = `run:${runState.generation}:finding:${finding.id}`;
+    return renderArtifact(
+      commentDraftKey,
+      finding.title,
+      status,
+      <>
+        <ExpandableContent
+          className="ai-reviewer-panel-prose"
+          content={finding.message}
+          contentLimit={240}
+          checkNewLines
+          translate="no"
+        />
+        {renderEvidence(runState, finding)}
+        <div className="ai-reviewer-panel-actions">
+          {canDiscussRun(runState) && runState.request != null && (
+            <OLButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "finding",
+                    sourceRequest: runState.request!,
+                    artifact: finding,
+                  },
+                  `finding:${finding.id}`,
+                )
+              }
+            >
+              {t("ai_reviewer_discuss_finding")}
+            </OLButton>
+          )}
+          {status === "unresolved" &&
+            runState.status === "completed" &&
+            runState.request != null &&
+            postEditorComment != null &&
+            getSelectionContext != null && (
               <OLButton
                 type="button"
                 variant="secondary"
                 size="sm"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
                 onClick={() =>
-                  openDiscussion(
-                    runState,
-                    {
-                      kind: "finding",
-                      sourceRequest: runState.request!,
-                      artifact: finding,
-                    },
-                    `finding:${finding.id}`,
-                  )
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation: runState.generation,
+                    request: runState.request!,
+                    artifact: finding,
+                  })
                 }
               >
-                {t("ai_reviewer_discuss_finding")}
+                {t("ai_reviewer_post_finding_as_comment")}
               </OLButton>
             )}
-            {status === "unresolved" &&
-              runState.status === "completed" &&
-              runState.request != null &&
-              postEditorComment != null &&
-              getSelectionContext != null && (
-                <OLButton
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={
-                    persistenceConflict ||
-                    (commentDraft != null &&
-                      commentDraft.key !== commentDraftKey)
-                  }
-                  onClick={() =>
-                    openCommentDraft({
-                      key: commentDraftKey,
-                      generation: runState.generation,
-                      request: runState.request!,
-                      artifact: finding,
-                    })
-                  }
-                >
-                  {t("ai_reviewer_post_finding_as_comment")}
-                </OLButton>
-              )}
-            {status === "unresolved" && (
+          {status === "unresolved" && (
+            <OLButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={
+                persistenceConflict || commentDraft?.key === commentDraftKey
+              }
+              onClick={() => discardFinding(runState, finding)}
+            >
+              {t("ai_reviewer_discard_finding")}
+            </OLButton>
+          )}
+        </div>
+        {renderCommentDraft(commentDraftKey)}
+        {evidenceNavigationNotice?.identity.generation ===
+          runState.generation &&
+          evidenceNavigationNotice.identity.finding === finding && (
+            <p aria-live="polite">
+              {evidenceNavigationMessage(evidenceNavigationNotice, t)}
+            </p>
+          )}
+      </>,
+    );
+  };
+
+  const renderCitationFinding = (
+    runState: SelectionWorkspaceState,
+    finding: CitationFinding,
+  ) => {
+    const status = findingStatus(runState.findingStatuses, finding.id);
+    const commentDraftKey = `run:${runState.generation}:citation:${finding.id}`;
+    const copyNotice =
+      citationCopyNotice?.generation === runState.generation &&
+      citationCopyNotice.finding === finding
+        ? citationCopyNotice
+        : null;
+    return renderArtifact(
+      commentDraftKey,
+      finding.title,
+      status,
+      <>
+        <ExpandableContent
+          className="ai-reviewer-panel-prose"
+          content={finding.message}
+          contentLimit={240}
+          checkNewLines
+          translate="no"
+        />
+        <p className="ai-reviewer-panel-quoted-source">
+          {t("ai_reviewer_proposed_text", {
+            proposedText: finding.proposedText,
+          })}
+        </p>
+        {renderEvidence(runState, finding)}
+        <div className="ai-reviewer-panel-actions">
+          {canDiscussRun(runState) && runState.request != null && (
+            <OLButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "citation-finding",
+                    sourceRequest: runState.request!,
+                    artifact: finding,
+                  },
+                  `citation-finding:${finding.id}`,
+                )
+              }
+            >
+              {t("ai_reviewer_discuss_citation_finding")}
+            </OLButton>
+          )}
+          {status === "unresolved" && (
+            <>
+              <OLButton
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={
+                  persistenceConflict || copyNotice?.status === "copying"
+                }
+                onClick={() => copyCitationProposedText(runState, finding)}
+              >
+                {t("ai_reviewer_copy_proposed_text")}
+              </OLButton>
               <OLButton
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={
-                  persistenceConflict || commentDraft?.key === commentDraftKey
-                }
+                disabled={persistenceConflict}
                 onClick={() => discardFinding(runState, finding)}
               >
-                {t("ai_reviewer_discard_finding")}
+                {t("ai_reviewer_discard_citation_finding")}
               </OLButton>
-            )}
-          </div>
-          {renderCommentDraft(commentDraftKey)}
-        </>
-      );
-      return isTerminalArtifactStatus(status) ? (
-        <details
-          key={finding.id}
-          className="ai-reviewer-artifact ai-reviewer-artifact-resolved"
-        >
-          <summary className="ai-reviewer-artifact-summary">
-            <span className="ai-reviewer-panel-truncate" title={finding.title}>
-              {finding.title}
-            </span>
-            <span className="ai-reviewer-artifact-status">
-              {t("ai_reviewer_artifact_status", {
-                status: artifactStatusLabel(status, t),
-              })}
-            </span>
-          </summary>
-          {body}
-        </details>
-      ) : (
-        <article key={finding.id} className="ai-reviewer-artifact">
-          <h5 className="ai-reviewer-artifact-title">{finding.title}</h5>
-          <p className="ai-reviewer-artifact-status">
-            {t("ai_reviewer_artifact_status", {
-              status: artifactStatusLabel(status, t),
-            })}
+            </>
+          )}
+        </div>
+        {copyNotice != null && (
+          <p aria-live="polite">
+            {copyNotice.status === "copying"
+              ? t("ai_reviewer_copying_proposed_text")
+              : copyNotice.status === "copied"
+                ? t("ai_reviewer_proposed_text_copied")
+                : t("ai_reviewer_proposed_text_copy_failed")}
           </p>
-          {body}
-        </article>
-      );
-    };
-
-    const renderCitationFinding = (finding: CitationFinding) => {
-      const status = findingStatus(runState.findingStatuses, finding.id);
-      const copyNotice =
-        citationCopyNotice?.generation === runState.generation &&
-        citationCopyNotice.finding === finding
-          ? citationCopyNotice
-          : null;
-      const body = (
-        <>
-          <ExpandableContent
-            className="ai-reviewer-panel-prose"
-            content={finding.message}
-            contentLimit={240}
-            checkNewLines
-            translate="no"
-          />
-          <p className="ai-reviewer-panel-quoted-source">
-            {t("ai_reviewer_proposed_text", {
-              proposedText: finding.proposedText,
-            })}
-          </p>
-          <ul className="ai-reviewer-panel-locations">
-            {finding.evidence.map((reference, index) => {
-              const navigationTarget =
-                prepareFindingEvidenceNavigation(runState, finding, index)
-                  ?.target ?? null;
-              const location = evidenceLocation(reference);
-              return (
-                <li key={`${finding.id}-evidence-${index}`}>
-                  <code className="ai-reviewer-panel-location" title={location}>
-                    {location}
-                  </code>
-                  {navigationTarget != null && (
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      onClick={() =>
-                        openFindingEvidence(runState, finding, index)
-                      }
-                    >
-                      {finding.evidence.length > 1
-                        ? t("ai_reviewer_go_to_location", {
-                            index: index + 1,
-                          })
-                        : t("ai_reviewer_go_to_location_single", "Go to text")}
-                    </OLButton>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-          <div className="ai-reviewer-panel-actions">
-            {canDiscuss && runState.request != null && (
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() =>
-                  openDiscussion(
-                    runState,
-                    {
-                      kind: "citation-finding",
-                      sourceRequest: runState.request!,
-                      artifact: finding,
-                    },
-                    `citation-finding:${finding.id}`,
-                  )
-                }
-              >
-                {t("ai_reviewer_discuss_citation_finding")}
-              </OLButton>
-            )}
-            {status === "unresolved" && (
-              <>
-                <OLButton
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={
-                    persistenceConflict || copyNotice?.status === "copying"
-                  }
-                  onClick={() => copyCitationProposedText(runState, finding)}
-                >
-                  {t("ai_reviewer_copy_proposed_text")}
-                </OLButton>
-                <OLButton
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  disabled={persistenceConflict}
-                  onClick={() => discardFinding(runState, finding)}
-                >
-                  {t("ai_reviewer_discard_citation_finding")}
-                </OLButton>
-              </>
-            )}
-          </div>
-          {copyNotice != null && (
+        )}
+        {evidenceNavigationNotice?.identity.generation ===
+          runState.generation &&
+          evidenceNavigationNotice.identity.finding === finding && (
             <p aria-live="polite">
-              {copyNotice.status === "copying"
-                ? t("ai_reviewer_copying_proposed_text")
-                : copyNotice.status === "copied"
-                  ? t("ai_reviewer_proposed_text_copied")
-                  : t("ai_reviewer_proposed_text_copy_failed")}
+              {evidenceNavigationMessage(evidenceNavigationNotice, t)}
             </p>
           )}
-        </>
-      );
-      return isTerminalArtifactStatus(status) ? (
-        <details
-          key={finding.id}
-          className="ai-reviewer-artifact ai-reviewer-artifact-resolved"
-        >
-          <summary className="ai-reviewer-artifact-summary">
-            <span className="ai-reviewer-panel-truncate" title={finding.title}>
-              {finding.title}
-            </span>
-            <span className="ai-reviewer-artifact-status">
-              {t("ai_reviewer_artifact_status", {
-                status: artifactStatusLabel(status, t),
-              })}
-            </span>
-          </summary>
-          {body}
-        </details>
-      ) : (
-        <article key={finding.id} className="ai-reviewer-artifact">
-          <h5 className="ai-reviewer-artifact-title">{finding.title}</h5>
-          <p className="ai-reviewer-artifact-status">
-            {t("ai_reviewer_artifact_status", {
-              status: artifactStatusLabel(status, t),
-            })}
-          </p>
-          {body}
-        </article>
-      );
-    };
+      </>,
+    );
+  };
 
-    const renderSuggestion = (
-      suggestion: UnresolvedSuggestion,
-      index: number,
-    ) => {
-      const commentDraftKey = `run:${runState.generation}:suggestion:${suggestion.id}`;
-      const status = suggestionStatus(
-        runState.suggestionStatuses,
-        suggestion.id,
-      );
-      const previewAvailable =
-        runState.status === "completed" &&
-        runState.request != null &&
-        getSelectionContext != null &&
-        runState.request.scope.kind !== "project" &&
-        runState.request.requestId === runState.requestId &&
-        suggestion.requestId === runState.requestId &&
-        status === "unresolved";
-      const discardAvailable =
-        runState.status === "completed" &&
-        suggestion.requestId === runState.requestId &&
-        (status === "unresolved" || status === "conflict");
-      const previewActive =
-        status === "unresolved" &&
-        activeSuggestionPreview != null &&
-        activeSuggestionPreview.discussionId == null &&
-        activeSuggestionPreview.generation === runState.generation &&
-        activeSuggestionPreview.requestId === runState.requestId &&
-        activeSuggestionPreview.suggestion === suggestion;
-      const body = (
-        <>
-          <p className="ai-reviewer-panel-quoted-source">
-            {t("ai_reviewer_suggestion_original", {
-              original: suggestion.original,
-            })}
-          </p>
-          <p className="ai-reviewer-panel-quoted-source">
-            {t("ai_reviewer_suggestion_replacement", {
-              replacement: suggestion.replacement,
-            })}
-          </p>
-          <p className="ai-reviewer-panel-prose">
-            {t("ai_reviewer_suggestion_rationale", {
-              rationale: suggestion.rationale,
-            })}
-          </p>
-          <ul className="ai-reviewer-panel-locations">
-            {suggestion.evidence.map((reference, evidenceIndex) => {
-              const location = evidenceLocation(reference);
-              return (
-                <li key={`${suggestion.id}-evidence-${evidenceIndex}`}>
-                  <code className="ai-reviewer-panel-location" title={location}>
-                    {location}
-                  </code>
-                </li>
-              );
-            })}
-          </ul>
-          <div className="ai-reviewer-panel-actions">
-            {canDiscuss && runState.request != null && (
+  const renderRunSuggestion = (
+    runState: SelectionWorkspaceState,
+    suggestion: UnresolvedSuggestion,
+    index: number,
+  ) => {
+    const commentDraftKey = `run:${runState.generation}:suggestion:${suggestion.id}`;
+    const status = suggestionStatus(runState.suggestionStatuses, suggestion.id);
+    const previewAvailable =
+      runState.status === "completed" &&
+      runState.request != null &&
+      getSelectionContext != null &&
+      runState.request.scope != null &&
+      runState.request.scope.kind !== "project" &&
+      runState.request.requestId === runState.requestId &&
+      suggestion.requestId === runState.requestId &&
+      status === "unresolved";
+    const discardAvailable =
+      runState.status === "completed" &&
+      suggestion.requestId === runState.requestId &&
+      (status === "unresolved" || status === "conflict");
+    const previewActive =
+      status === "unresolved" &&
+      activeSuggestionPreview != null &&
+      activeSuggestionPreview.discussionId == null &&
+      activeSuggestionPreview.generation === runState.generation &&
+      activeSuggestionPreview.requestId === runState.requestId &&
+      activeSuggestionPreview.suggestion === suggestion;
+    return renderArtifact(
+      commentDraftKey,
+      null,
+      status,
+      <>
+        <p className="ai-reviewer-panel-quoted-source">
+          {t("ai_reviewer_suggestion_original", {
+            original: suggestion.original,
+          })}
+        </p>
+        <p className="ai-reviewer-panel-quoted-source">
+          {t("ai_reviewer_suggestion_replacement", {
+            replacement: suggestion.replacement,
+          })}
+        </p>
+        <p className="ai-reviewer-panel-prose">
+          {t("ai_reviewer_suggestion_rationale", {
+            rationale: suggestion.rationale,
+          })}
+        </p>
+        <ul className="ai-reviewer-panel-locations">
+          {suggestion.evidence.map((reference, evidenceIndex) => {
+            const location = evidenceLocation(reference);
+            return (
+              <li key={`${suggestion.id}-evidence-${evidenceIndex}`}>
+                <code className="ai-reviewer-panel-location" title={location}>
+                  {location}
+                </code>
+              </li>
+            );
+          })}
+        </ul>
+        <div className="ai-reviewer-panel-actions">
+          {canDiscussRun(runState) && runState.request != null && (
+            <OLButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "suggestion",
+                    sourceRequest: runState.request!,
+                    artifact: suggestion,
+                  },
+                  `suggestion:${suggestion.id}`,
+                )
+              }
+            >
+              {t("ai_reviewer_discuss_suggestion")}
+            </OLButton>
+          )}
+          {previewAvailable && (
+            <OLButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={persistenceConflict}
+              onClick={() => openSuggestionPreview(runState, suggestion)}
+            >
+              {t("ai_reviewer_preview_diff", { index: index + 1 })}
+            </OLButton>
+          )}
+          {status === "unresolved" &&
+            runState.status === "completed" &&
+            runState.request != null &&
+            postEditorComment != null &&
+            getSelectionContext != null && (
               <OLButton
                 type="button"
                 variant="secondary"
                 size="sm"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
                 onClick={() =>
-                  openDiscussion(
-                    runState,
-                    {
-                      kind: "suggestion",
-                      sourceRequest: runState.request!,
-                      artifact: suggestion,
-                    },
-                    `suggestion:${suggestion.id}`,
-                  )
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation: runState.generation,
+                    request: runState.request!,
+                    artifact: suggestion,
+                  })
                 }
               >
-                {t("ai_reviewer_discuss_suggestion")}
+                {t("ai_reviewer_post_suggestion_as_comment")}
               </OLButton>
             )}
-            {previewAvailable && (
+          {discardAvailable && (
+            <OLButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={
+                persistenceConflict || commentDraft?.key === commentDraftKey
+              }
+              onClick={() => discardSuggestion(runState, suggestion)}
+            >
+              {t("ai_reviewer_discard_suggestion")}
+            </OLButton>
+          )}
+        </div>
+        {renderCommentDraft(commentDraftKey)}
+        {previewActive &&
+          activeSuggestionPreview != null &&
+          renderSuggestionPreview(activeSuggestionPreview, suggestion)}
+        {status === "conflict" && (
+          <p aria-live="polite">
+            {runState.suggestionConflictCodes[suggestion.id] == null
+              ? t("ai_reviewer_suggestion_conflict")
+              : t("ai_reviewer_suggestion_conflict_with_code", {
+                  code: runState.suggestionConflictCodes[suggestion.id],
+                })}
+          </p>
+        )}
+      </>,
+    );
+  };
+
+  const renderToolLines = (calls: readonly ToolCall[], keyPrefix: string) =>
+    calls.length === 0 ? null : (
+      <ul
+        className="ai-reviewer-tool-lines"
+        aria-label={t("ai_reviewer_tools_used")}
+      >
+        {calls.map((call, index) => {
+          const label = toolCallLabel(call);
+          return (
+            <li key={`${keyPrefix}:tool:${index}`}>
+              <code className="ai-reviewer-tool-line" title={label}>
+                {label}
+              </code>
+            </li>
+          );
+        })}
+      </ul>
+    );
+
+  /**
+   * A run is one exchange in the conversation: what was asked, what the agent
+   * read, what it said, and any edit it proposed. Its findings are pinned in
+   * the band above instead, so they do not scroll away with the thread.
+   */
+  const renderRun = (runState: SelectionWorkspaceState) => (
+    <article
+      key={`run:${runState.generation}`}
+      aria-label={t("ai_reviewer_review_run", {
+        generation: runState.generation,
+      })}
+      className="ai-reviewer-run"
+    >
+      <header className="ai-reviewer-run-header">
+        <div className="ai-reviewer-run-heading">
+          <h3 className="ai-reviewer-run-title">
+            {runState.status === "error"
+              ? t("ai_reviewer_response_failed")
+              : (runState.subject ?? t("ai_reviewer_discussion_no_subject"))}
+            {runState.group != null &&
+              ` ${runState.group.position}/${runState.group.total}`}
+          </h3>
+          <span className="ai-reviewer-run-status" aria-live="polite">
+            {runStatusLabel(runState.status, t)}
+          </span>
+          {runState.provider != null && runState.model != null && (
+            <span className="text-muted">
+              {runState.provider} · {runState.model}
+            </span>
+          )}
+        </div>
+        <div
+          className="ai-reviewer-run-header-action"
+          data-testid="ai-reviewer-run-header-action"
+        >
+          {(runState.status === "capturing" ||
+            runState.status === "streaming" ||
+            runState.status === "finalizing") && (
+            <OLButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={stopActiveWork}
+            >
+              {t("ai_reviewer_stop")}
+            </OLButton>
+          )}
+          {canDiscussRun(runState) && runState.request != null && (
+            <OLButton
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "scope",
+                    sourceRequest: runState.request!,
+                  },
+                  "scope",
+                )
+              }
+            >
+              {t("ai_reviewer_discuss")}
+            </OLButton>
+          )}
+        </div>
+      </header>
+      {runState.request != null && (
+        <p className="ai-reviewer-panel-instruction">
+          {runState.request.instruction}
+        </p>
+      )}
+      {renderToolLines(runState.toolCalls, `run:${runState.generation}`)}
+      {runState.text !== "" && (
+        <ExpandableContent
+          className="ai-reviewer-panel-prose"
+          content={runState.text}
+          contentLimit={320}
+          checkNewLines
+          translate="no"
+        />
+      )}
+      {runState.suggestions.length > 0 && (
+        <section
+          className="ai-reviewer-run-artifacts"
+          aria-label={t("ai_reviewer_review_suggestions")}
+        >
+          <h4 className="ai-reviewer-run-section-title">
+            {t("ai_reviewer_suggestions")}
+          </h4>
+          {runState.suggestions.map((suggestion, index) =>
+            renderRunSuggestion(runState, suggestion, index),
+          )}
+        </section>
+      )}
+      {runState.conflict != null && (
+        <div
+          className="alert alert-warning ai-reviewer-panel-notice"
+          role="alert"
+        >
+          {t("ai_reviewer_selection_conflict", { code: runState.conflict })}
+        </div>
+      )}
+      {contextTruncatedRuns.has(runState.generation) && (
+        <div
+          className="alert alert-warning ai-reviewer-panel-notice"
+          role="alert"
+        >
+          {t("ai_reviewer_error_guidance_project_content")}
+        </div>
+      )}
+      {runState.error != null && (
+        <div
+          className="alert alert-danger ai-reviewer-panel-notice"
+          role="alert"
+        >
+          {runState.error}
+        </div>
+      )}
+    </article>
+  );
+
+  const renderDiscussionSuggestion = (
+    discussion: Discussion,
+    suggestion: UnresolvedSuggestion,
+    index: number,
+  ) => {
+    const sourceRequest = discussion.subject?.sourceRequest ?? null;
+    const commentDraftKey = `discussion:${discussion.id}:suggestion:${suggestion.id}`;
+    const status = suggestionStatus(
+      discussion.suggestionStatuses,
+      suggestion.id,
+    );
+    const previewActive =
+      status === "unresolved" &&
+      activeSuggestionPreview?.discussionId === discussion.id &&
+      activeSuggestionPreview.suggestion === suggestion;
+    return renderArtifact(
+      commentDraftKey,
+      null,
+      status,
+      <>
+        <p className="ai-reviewer-panel-quoted-source">
+          {t("ai_reviewer_suggestion_original", {
+            original: suggestion.original,
+          })}
+        </p>
+        <p className="ai-reviewer-panel-quoted-source">
+          {t("ai_reviewer_suggestion_replacement", {
+            replacement: suggestion.replacement,
+          })}
+        </p>
+        <p className="ai-reviewer-panel-prose">
+          {t("ai_reviewer_suggestion_rationale", {
+            rationale: suggestion.rationale,
+          })}
+        </p>
+        <div className="ai-reviewer-panel-actions">
+          {status === "unresolved" &&
+            getSelectionContext != null &&
+            sourceRequest?.scope != null &&
+            sourceRequest.scope.kind !== "project" && (
               <OLButton
                 type="button"
                 variant="secondary"
                 size="sm"
                 disabled={persistenceConflict}
-                onClick={() => openSuggestionPreview(runState, suggestion)}
-              >
-                {t("ai_reviewer_preview_diff", {
-                  index: index + 1,
-                })}
-              </OLButton>
-            )}
-            {status === "unresolved" &&
-              runState.status === "completed" &&
-              runState.request != null &&
-              postEditorComment != null &&
-              getSelectionContext != null && (
-                <OLButton
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={
-                    persistenceConflict ||
-                    (commentDraft != null &&
-                      commentDraft.key !== commentDraftKey)
-                  }
-                  onClick={() =>
-                    openCommentDraft({
-                      key: commentDraftKey,
-                      generation: runState.generation,
-                      request: runState.request!,
-                      artifact: suggestion,
-                    })
-                  }
-                >
-                  {t("ai_reviewer_post_suggestion_as_comment")}
-                </OLButton>
-              )}
-            {discardAvailable && (
-              <OLButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={
-                  persistenceConflict || commentDraft?.key === commentDraftKey
+                onClick={() =>
+                  openDiscussionSuggestionPreview(discussion, suggestion)
                 }
-                onClick={() => discardSuggestion(runState, suggestion)}
               >
-                {t("ai_reviewer_discard_suggestion")}
+                {t("ai_reviewer_preview_discussion_diff", { index: index + 1 })}
               </OLButton>
             )}
-          </div>
-          {renderCommentDraft(commentDraftKey)}
-          {previewActive &&
-            activeSuggestionPreview != null &&
-            renderSuggestionPreview(activeSuggestionPreview, suggestion)}
-          {status === "conflict" && (
-            <p aria-live="polite">
-              {runState.suggestionConflictCodes[suggestion.id] == null
-                ? t("ai_reviewer_suggestion_conflict")
-                : t("ai_reviewer_suggestion_conflict_with_code", {
-                    code: runState.suggestionConflictCodes[suggestion.id],
-                  })}
-            </p>
-          )}
-        </>
-      );
-      return isTerminalArtifactStatus(status) ? (
-        <details
-          key={suggestion.id}
-          className="ai-reviewer-artifact ai-reviewer-artifact-resolved"
-        >
-          <summary className="ai-reviewer-artifact-summary">
-            <span
-              className="ai-reviewer-panel-truncate"
-              title={suggestion.rationale}
-            >
-              {suggestion.rationale}
-            </span>
-            <span className="ai-reviewer-artifact-status">
-              {t("ai_reviewer_artifact_status", {
-                status: artifactStatusLabel(status, t),
-              })}
-            </span>
-          </summary>
-          {body}
-        </details>
-      ) : (
-        <article key={suggestion.id} className="ai-reviewer-artifact">
-          <p className="ai-reviewer-artifact-status">
-            {t("ai_reviewer_artifact_status", {
-              status: artifactStatusLabel(status, t),
-            })}
-          </p>
-          {body}
-        </article>
-      );
-    };
-
-    return (
-      <article
-        key={`run:${runState.generation}`}
-        aria-label={t("ai_reviewer_review_run", {
-          generation: runState.generation,
-        })}
-        className="ai-reviewer-run"
-      >
-        <header className="ai-reviewer-run-header">
-          <div className="ai-reviewer-run-heading">
-            <h3 className="ai-reviewer-run-title">
-              {reviewScopeLabel(runState.scopeKind, t)}
-              {runState.group != null &&
-                ` ${runState.group.position}/${runState.group.total}`}
-            </h3>
-            <span className="ai-reviewer-run-status" aria-live="polite">
-              {runStatusLabel(runState.status, t)}
-            </span>
-            {runState.provider != null && runState.model != null && (
-              <span className="text-muted">
-                {runState.provider} · {runState.model}
-              </span>
-            )}
-          </div>
-          <div className="ai-reviewer-panel-actions">
-            {canDiscuss && runState.request != null && (
+          {status === "unresolved" &&
+            sourceRequest != null &&
+            postEditorComment != null &&
+            getSelectionContext != null && (
               <OLButton
                 type="button"
                 variant="secondary"
                 size="sm"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
                 onClick={() =>
-                  openDiscussion(
-                    runState,
-                    {
-                      kind: "scope",
-                      sourceRequest: runState.request!,
-                    },
-                    "scope",
-                  )
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation: discussion.sourceGeneration ?? 0,
+                    request: sourceRequest,
+                    artifact: suggestion,
+                    discussionId: discussion.id,
+                  })
                 }
               >
-                {t("ai_reviewer_discuss_review_scope")}
+                {t("ai_reviewer_post_suggestion_as_comment")}
               </OLButton>
             )}
-            {activeRun.current?.generation === runState.generation &&
-              runInProgress && (
-                <OLButton
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={cancel}
-                >
-                  {t("ai_reviewer_cancel_review")}
-                </OLButton>
-              )}
-          </div>
-        </header>
-        {runState.text !== "" && (
-          <ExpandableContent
-            className="ai-reviewer-panel-prose"
-            content={runState.text}
-            contentLimit={320}
-            checkNewLines
-            translate="no"
-          />
-        )}
-        {findings.length > 0 && (
-          <section
-            className="ai-reviewer-run-artifacts"
-            aria-label={t("ai_reviewer_review_findings")}
-          >
-            <h4 className="ai-reviewer-run-section-title">
-              {t("ai_reviewer_findings")}
-            </h4>
-            {findings.map(renderFinding)}
-          </section>
-        )}
-        {citationFindings.length > 0 && (
-          <section
-            className="ai-reviewer-run-artifacts"
-            aria-label={t("ai_reviewer_review_citation_findings")}
-          >
-            <h4 className="ai-reviewer-run-section-title">
-              {t("ai_reviewer_citation_findings")}
-            </h4>
-            {citationFindings.map(renderCitationFinding)}
-          </section>
-        )}
-        {evidenceNavigationNotice?.identity.generation ===
-          runState.generation && (
+          {(status === "unresolved" || status === "conflict") && (
+            <OLButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={
+                persistenceConflict || commentDraft?.key === commentDraftKey
+              }
+              onClick={() =>
+                discardDiscussionSuggestion(discussion, suggestion)
+              }
+            >
+              {t("ai_reviewer_discard_suggestion")}
+            </OLButton>
+          )}
+        </div>
+        {renderCommentDraft(commentDraftKey)}
+        {previewActive &&
+          activeSuggestionPreview != null &&
+          renderSuggestionPreview(activeSuggestionPreview, suggestion)}
+        {status === "conflict" && (
           <p aria-live="polite">
-            {evidenceNavigationMessage(evidenceNavigationNotice, t)}
+            {discussion.suggestionConflictCodes[suggestion.id] == null
+              ? t("ai_reviewer_suggestion_conflict")
+              : t("ai_reviewer_suggestion_conflict_with_code", {
+                  code: discussion.suggestionConflictCodes[suggestion.id],
+                })}
           </p>
         )}
-        {runState.suggestions.length > 0 && (
-          <section
-            className="ai-reviewer-run-artifacts"
-            aria-label={t("ai_reviewer_review_suggestions")}
-          >
-            <h4 className="ai-reviewer-run-section-title">
-              {t("ai_reviewer_suggestions")}
-            </h4>
-            {runState.suggestions.map(renderSuggestion)}
-          </section>
-        )}
-        {runState.conflict != null && (
-          <div
-            className="alert alert-warning ai-reviewer-panel-notice"
-            role="alert"
-          >
-            {t("ai_reviewer_selection_conflict", {
-              code: runState.conflict,
-            })}
-          </div>
-        )}
-        {contextTruncatedRuns.has(runState.generation) && (
-          <div
-            className="alert alert-warning ai-reviewer-panel-notice"
-            role="alert"
-          >
-            {t("ai_reviewer_error_guidance_project_content")}
-          </div>
-        )}
-        {runState.error != null && (
-          <div
-            className="alert alert-danger ai-reviewer-panel-notice"
-            role="alert"
-          >
-            {runState.error}
-          </div>
-        )}
-      </article>
+      </>,
     );
   };
 
-  if (activeDiscussion != null) {
+  /**
+   * The conversation the composer writes into is shown in full; any other one
+   * stays a single row that opens it, so the thread in view is unambiguous.
+   */
+  const renderDiscussion = (discussion: Discussion) => {
+    if (discussion.id !== activeDiscussionId) {
+      return (
+        <article
+          key={`discussion:${discussion.id}`}
+          aria-label={t("ai_reviewer_discussion_summary")}
+          className="ai-reviewer-discussion-row"
+        >
+          <OLTooltip
+            id={`ai-reviewer-discussion-${discussion.id}-subject`}
+            description={discussion.subjectLabel}
+            overlayProps={{ placement: "right" }}
+          >
+            <span className="ai-reviewer-discussion-row-subject-wrap">
+              <OLButton
+                type="button"
+                variant="link"
+                className="ai-reviewer-discussion-row-subject"
+                onClick={() => setActiveDiscussionId(discussion.id)}
+              >
+                {discussion.subjectLabel}
+              </OLButton>
+            </span>
+          </OLTooltip>
+          <span className="ai-reviewer-discussion-row-status">
+            {discussion.status === "streaming"
+              ? t("ai_reviewer_discussion_status_responding")
+              : t("ai_reviewer_discussion_status_idle")}
+          </span>
+          <time
+            className="ai-reviewer-discussion-row-updated"
+            dateTime={discussion.updatedAt}
+            title={discussion.updatedAt}
+          >
+            {t("ai_reviewer_last_updated", {
+              updatedAt: discussion.updatedAt,
+            })}
+          </time>
+          <OLButton
+            type="button"
+            variant="danger-ghost"
+            size="sm"
+            disabled={
+              busy || persistenceSaveFailed || discussion.status === "streaming"
+            }
+            onClick={() => deleteDiscussion(discussion)}
+          >
+            {t("ai_reviewer_delete_discussion")}
+          </OLButton>
+        </article>
+      );
+    }
+    const quote = discussionSubjectQuote(discussion.subject);
+    const toolLines: AiReviewerToolLine[] = discussion.toolCalls.map(
+      (entry) => ({
+        position: entry.position,
+        label: toolCallLabel(entry.call),
+      }),
+    );
     return (
-      <section
+      <article
+        key={`discussion:${discussion.id}`}
         aria-label={t("ai_reviewer_discussion")}
-        className="ai-reviewer-panel ai-reviewer-panel-discussion"
+        className="ai-reviewer-discussion-thread"
       >
         <header className="ai-reviewer-discussion-header">
+          <h3
+            className="ai-reviewer-discussion-subject"
+            data-testid="discussion-subject"
+            title={discussion.subjectLabel}
+          >
+            {discussion.subjectLabel}
+          </h3>
           <div className="ai-reviewer-discussion-header-actions">
-            <OLButton
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={() => setActiveDiscussionId(null)}
-            >
-              {t("ai_reviewer_back_to_review_list")}
-            </OLButton>
+            {discussion.status === "streaming" && (
+              <OLButton
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={stopActiveWork}
+              >
+                {t("ai_reviewer_stop")}
+              </OLButton>
+            )}
+            {discussion.subject != null && (
+              <OLButton
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => setActiveDiscussionId(null)}
+              >
+                {t("ai_reviewer_clear_subject")}
+              </OLButton>
+            )}
             <OLButton
               type="button"
               variant="danger-ghost"
@@ -4303,281 +4440,78 @@ export function AiReviewerPanelView({
               disabled={
                 busy ||
                 persistenceSaveFailed ||
-                activeDiscussion.status === "streaming"
+                discussion.status === "streaming"
               }
-              onClick={() => deleteDiscussion(activeDiscussion)}
+              onClick={() => deleteDiscussion(discussion)}
             >
               {t("ai_reviewer_delete_discussion")}
             </OLButton>
           </div>
-          <h2
-            className="ai-reviewer-discussion-subject"
-            data-testid="discussion-subject"
-            title={activeDiscussion.subjectLabel}
-          >
-            {activeDiscussion.subjectLabel}
-          </h2>
         </header>
-        {workspaceNotice != null && (
+        {quote != null && (
           <div
-            className="alert alert-warning ai-reviewer-panel-notice"
-            role="alert"
+            className="ai-reviewer-discussion-quote"
+            data-testid="discussion-quote"
           >
-            {workspaceNotice}
+            <span className="ai-reviewer-run-status">
+              {t("ai_reviewer_discussion_about")}
+            </span>
+            {quote.location != null && (
+              <code className="ai-reviewer-panel-location">
+                {quote.location}
+              </code>
+            )}
+            <ExpandableContent
+              className="ai-reviewer-panel-quoted-source"
+              content={quote.text}
+              contentLimit={240}
+              checkNewLines
+              translate="no"
+            />
           </div>
         )}
         <div
-          className="ai-reviewer-discussion-turns"
+          className="ai-reviewer-discussion-turns messages"
           aria-label={t("ai_reviewer_discussion_turns")}
         >
-          {activeDiscussion.turns.map((turn, index) => (
-            <article
-              key={`${turn.role}:${index}`}
-              className="ai-reviewer-discussion-turn"
-              aria-label={
-                turn.role === "user"
-                  ? t("ai_reviewer_your_message")
-                  : t("ai_reviewer_ai_response")
-              }
-            >
-              <h3 className="ai-reviewer-discussion-turn-author">
-                {turn.role === "user"
-                  ? t("ai_reviewer_you")
-                  : t("ai_reviewer_title")}
-              </h3>
-              <ExpandableContent
-                className="ai-reviewer-panel-prose"
-                content={turn.text}
-                contentLimit={320}
-                checkNewLines
-                translate="no"
-              />
-            </article>
-          ))}
-          {hasActiveDiscussionSuggestions && (
-            <section
-              className="ai-reviewer-run-artifacts"
-              aria-label={t("ai_reviewer_discussion_suggestions")}
-            >
-              <h3 className="ai-reviewer-run-section-title">
-                {t("ai_reviewer_suggestions")}
-              </h3>
-              {activeDiscussion.suggestions.map((suggestion, index) => {
-                const commentDraftKey = `discussion:${activeDiscussion.id}:suggestion:${suggestion.id}`;
-                const status = suggestionStatus(
-                  activeDiscussion.suggestionStatuses,
-                  suggestion.id,
-                );
-                const previewActive =
-                  status === "unresolved" &&
-                  activeSuggestionPreview?.discussionId ===
-                    activeDiscussion.id &&
-                  activeSuggestionPreview.suggestion === suggestion;
-                const body = (
-                  <>
-                    <p className="ai-reviewer-panel-quoted-source">
-                      {t("ai_reviewer_suggestion_original", {
-                        original: suggestion.original,
-                      })}
-                    </p>
-                    <p className="ai-reviewer-panel-quoted-source">
-                      {t("ai_reviewer_suggestion_replacement", {
-                        replacement: suggestion.replacement,
-                      })}
-                    </p>
-                    <p className="ai-reviewer-panel-prose">
-                      {t("ai_reviewer_suggestion_rationale", {
-                        rationale: suggestion.rationale,
-                      })}
-                    </p>
-                    <div className="ai-reviewer-panel-actions">
-                      {status === "unresolved" &&
-                        getSelectionContext != null &&
-                        activeDiscussionSourceRequest?.scope.kind !==
-                          "project" && (
-                          <OLButton
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled={persistenceConflict}
-                            onClick={() =>
-                              openDiscussionSuggestionPreview(
-                                activeDiscussion,
-                                suggestion,
-                              )
-                            }
-                          >
-                            {t("ai_reviewer_preview_discussion_diff", {
-                              index: index + 1,
-                            })}
-                          </OLButton>
-                        )}
-                      {status === "unresolved" &&
-                        activeDiscussionSourceRequest != null &&
-                        postEditorComment != null &&
-                        getSelectionContext != null && (
-                          <OLButton
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled={
-                              persistenceConflict ||
-                              (commentDraft != null &&
-                                commentDraft.key !== commentDraftKey)
-                            }
-                            onClick={() =>
-                              openCommentDraft({
-                                key: commentDraftKey,
-                                generation:
-                                  activeDiscussion.sourceGeneration ?? 0,
-                                request: activeDiscussionSourceRequest,
-                                artifact: suggestion,
-                                discussionId: activeDiscussion.id,
-                              })
-                            }
-                          >
-                            {t("ai_reviewer_post_suggestion_as_comment")}
-                          </OLButton>
-                        )}
-                      {(status === "unresolved" || status === "conflict") && (
-                        <OLButton
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={
-                            persistenceConflict ||
-                            commentDraft?.key === commentDraftKey
-                          }
-                          onClick={() =>
-                            discardDiscussionSuggestion(
-                              activeDiscussion,
-                              suggestion,
-                            )
-                          }
-                        >
-                          {t("ai_reviewer_discard_suggestion")}
-                        </OLButton>
-                      )}
-                    </div>
-                    {renderCommentDraft(commentDraftKey)}
-                    {previewActive &&
-                      activeSuggestionPreview != null &&
-                      renderSuggestionPreview(
-                        activeSuggestionPreview,
-                        suggestion,
-                      )}
-                    {status === "conflict" && (
-                      <p aria-live="polite">
-                        {activeDiscussion.suggestionConflictCodes[
-                          suggestion.id
-                        ] == null
-                          ? t("ai_reviewer_suggestion_conflict")
-                          : t("ai_reviewer_suggestion_conflict_with_code", {
-                              code: activeDiscussion.suggestionConflictCodes[
-                                suggestion.id
-                              ],
-                            })}
-                      </p>
-                    )}
-                  </>
-                );
-                return isTerminalArtifactStatus(status) ? (
-                  <details
-                    key={suggestion.id}
-                    className="ai-reviewer-artifact ai-reviewer-artifact-resolved"
-                  >
-                    <summary className="ai-reviewer-artifact-summary">
-                      <span
-                        className="ai-reviewer-panel-truncate"
-                        title={suggestion.rationale}
-                      >
-                        {suggestion.rationale}
-                      </span>
-                      <span className="ai-reviewer-artifact-status">
-                        {t("ai_reviewer_artifact_status", {
-                          status: artifactStatusLabel(status, t),
-                        })}
-                      </span>
-                    </summary>
-                    {body}
-                  </details>
-                ) : (
-                  <article key={suggestion.id} className="ai-reviewer-artifact">
-                    <p className="ai-reviewer-artifact-status">
-                      {t("ai_reviewer_artifact_status", {
-                        status: artifactStatusLabel(status, t),
-                      })}
-                    </p>
-                    {body}
-                  </article>
-                );
-              })}
-            </section>
-          )}
-          {activeDiscussion.error != null && (
-            <div
-              className="alert alert-danger ai-reviewer-panel-notice"
-              role="alert"
-            >
-              {activeDiscussion.error}
-            </div>
-          )}
+          <AiReviewerDiscussionMessages
+            turns={discussion.turns}
+            toolLines={toolLines}
+          />
         </div>
-        <form
-          className="ai-reviewer-panel-footer ai-reviewer-discussion-composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submitDiscussionMessage();
-          }}
-        >
-          <OLFormLabel htmlFor="ai-reviewer-discussion-input">
-            {t("ai_reviewer_discussion_message")}
-          </OLFormLabel>
-          <div className="ai-reviewer-panel-composer-input">
-            <AutoExpandingTextArea
-              id="ai-reviewer-discussion-input"
-              className="form-control ai-reviewer-panel-textarea"
-              value={discussionInput}
-              disabled={busy || activeDiscussion.status === "streaming"}
-              onChange={(event) => setDiscussionInput(event.target.value)}
-            />
-            <OLIconButton
-              type="submit"
-              variant="ghost"
-              size="sm"
-              icon="send"
-              className="ai-reviewer-panel-send"
-              accessibilityLabel={t("ai_reviewer_send_message")}
-              disabled={
-                busy ||
-                activeDiscussion.status === "streaming" ||
-                discussionInput.trim() === ""
-              }
-            />
+        {discussion.suggestions.length > 0 && (
+          <section
+            className="ai-reviewer-run-artifacts"
+            aria-label={t("ai_reviewer_discussion_suggestions")}
+          >
+            <h4 className="ai-reviewer-run-section-title">
+              {t("ai_reviewer_suggestions")}
+            </h4>
+            {discussion.suggestions.map((suggestion, index) =>
+              renderDiscussionSuggestion(discussion, suggestion, index),
+            )}
+          </section>
+        )}
+        {discussion.status === "streaming" && (
+          <span
+            className="ai-reviewer-discussion-responding"
+            role="status"
+            data-testid="discussion-responding"
+          >
+            {t("ai_reviewer_discussion_status_responding")}
+          </span>
+        )}
+        {discussion.error != null && (
+          <div
+            className="alert alert-danger ai-reviewer-panel-notice"
+            role="alert"
+          >
+            {discussion.error}
           </div>
-          {activeDiscussion.status === "streaming" && (
-            <div className="ai-reviewer-panel-actions">
-              <span
-                className="ai-reviewer-discussion-responding"
-                role="status"
-                data-testid="discussion-responding"
-              >
-                {t("ai_reviewer_discussion_status_responding")}
-              </span>
-              <OLButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={cancelDiscussionResponse}
-              >
-                {t("ai_reviewer_cancel_response")}
-              </OLButton>
-            </div>
-          )}
-        </form>
-      </section>
+        )}
+      </article>
     );
-  }
+  };
 
   const timeline = [
     ...workspace.runs.map((run) => ({
@@ -4592,13 +4526,23 @@ export function AiReviewerPanelView({
     })),
   ].sort((left, right) => left.createdOrder - right.createdOrder);
 
+  const findingEntries = workspace.runs.flatMap((runState) =>
+    runState.findings.map((finding) => ({ runState, finding })),
+  );
+  const unresolvedFindingCount = findingEntries.filter(
+    ({ runState, finding }) =>
+      findingStatus(runState.findingStatuses, finding.id) === "unresolved",
+  ).length;
+
   const workspaceIsEmpty =
     workspace.runs.length === 0 && discussions.length === 0;
-  const workspaceDeletionDisabled =
-    busy ||
-    workspaceIsEmpty ||
-    discussions.some((discussion) => discussion.status === "streaming");
-
+  const workspaceDeletionDisabled = busy || workspaceIsEmpty || answerStreaming;
+  // Only a completed lookup proves there is nowhere to send a review. Without
+  // a lookup the panel cannot claim that, so it keeps offering its controls.
+  const noConnections =
+    loadProviderConnections != null &&
+    connectionsLoaded &&
+    connections.length === 0;
   return (
     <section
       aria-label={t("ai_reviewer_title")}
@@ -4607,7 +4551,40 @@ export function AiReviewerPanelView({
     >
       <header className="ai-reviewer-panel-header">
         <h2 className="ai-reviewer-panel-title">{t("ai_reviewer_title")}</h2>
-        <Dropdown align="end">
+        {/* Models from every connection sit in one list: choosing a model is
+            what chooses the connection, so no separate picker is offered. With
+            no connection at all there is nothing to choose between. */}
+        {models.length > 0 && (
+          <Dropdown align="start">
+            <DropdownToggle
+              bsPrefix="ai-reviewer-panel-model-chip"
+              variant="ghost"
+              size="sm"
+              aria-label={t("ai_reviewer_provider_model")}
+              disabled={busy}
+            >
+              {runModel?.displayName ?? t("ai_reviewer_provider_model")}
+            </DropdownToggle>
+            <AiReviewerPortaledMenu className="ai-reviewer-panel-model-menu">
+              {models.map((candidate) => (
+                <OLDropdownMenuItem
+                  key={modelKey(candidate)}
+                  as="button"
+                  active={candidate === runModel}
+                  onClick={() =>
+                    setSelectedModel({
+                      connectionId: candidate.connectionId,
+                      model: candidate.id,
+                    })
+                  }
+                >
+                  {`${candidate.displayName} (${candidate.connectionLabel})`}
+                </OLDropdownMenuItem>
+              ))}
+            </AiReviewerPortaledMenu>
+          </Dropdown>
+        )}
+        <Dropdown align="start">
           <OLTooltip
             id="ai-reviewer-more-options"
             description={t("more_options")}
@@ -4623,7 +4600,7 @@ export function AiReviewerPanelView({
               </DropdownToggle>
             </span>
           </OLTooltip>
-          <DropdownMenu flip={false} popperConfig={{ strategy: "fixed" }}>
+          <AiReviewerPortaledMenu className="ai-reviewer-panel-overflow-menu">
             <OLDropdownMenuItem
               as="button"
               variant="danger"
@@ -4632,216 +4609,178 @@ export function AiReviewerPanelView({
             >
               {t("ai_reviewer_delete_all_saved_review_work")}
             </OLDropdownMenuItem>
-          </DropdownMenu>
+          </AiReviewerPortaledMenu>
         </Dropdown>
       </header>
 
-      <div
-        className="ai-reviewer-panel-body"
-        aria-label={t("ai_reviewer_review_list")}
-      >
-        {workspaceNotice != null && (
-          <div
-            className="alert alert-warning ai-reviewer-panel-notice"
-            role="alert"
-          >
-            {workspaceNotice}
-          </div>
-        )}
-        {timeline.length === 0 && persistenceReady && (
-          <p className="ai-reviewer-panel-empty-state">
-            {t("ai_reviewer_empty_state")}
-          </p>
-        )}
-        <div className="ai-reviewer-panel-timeline">
-          {timeline.map((entry) =>
-            entry.kind === "run" ? (
-              renderRun(entry.run)
-            ) : (
-              <article
-                key={`discussion:${entry.discussion.id}`}
-                aria-label={t("ai_reviewer_discussion_summary")}
-                className="ai-reviewer-discussion-row"
-              >
-                <OLTooltip
-                  id={`ai-reviewer-discussion-${entry.discussion.id}-subject`}
-                  description={entry.discussion.subjectLabel}
-                  overlayProps={{ placement: "right" }}
-                >
-                  <span className="ai-reviewer-discussion-row-subject-wrap">
-                    <OLButton
-                      type="button"
-                      variant="link"
-                      className="ai-reviewer-discussion-row-subject"
-                      onClick={() => setActiveDiscussionId(entry.discussion.id)}
-                    >
-                      {entry.discussion.subjectLabel}
-                    </OLButton>
-                  </span>
-                </OLTooltip>
-                <span className="ai-reviewer-discussion-row-status">
-                  {entry.discussion.status === "streaming"
-                    ? t("ai_reviewer_discussion_status_responding")
-                    : t("ai_reviewer_discussion_status_idle")}
-                </span>
-                <time
-                  className="ai-reviewer-discussion-row-updated"
-                  dateTime={entry.discussion.updatedAt}
-                  title={entry.discussion.updatedAt}
-                >
-                  {t("ai_reviewer_last_updated", {
-                    updatedAt: entry.discussion.updatedAt,
-                  })}
-                </time>
-                <OLButton
-                  type="button"
-                  variant="danger-ghost"
-                  size="sm"
-                  disabled={
-                    busy ||
-                    persistenceSaveFailed ||
-                    entry.discussion.status === "streaming"
-                  }
-                  onClick={() => deleteDiscussion(entry.discussion)}
-                >
-                  {t("ai_reviewer_delete_discussion")}
-                </OLButton>
-              </article>
-            ),
-          )}
-        </div>
-      </div>
-
-      {!runInProgress && (
+      {/* With nowhere to send a review, every other control would only be a
+          dead end, so the panel offers the one step that unblocks it. */}
+      {noConnections ? (
         <div
-          className="ai-reviewer-panel-footer"
-          data-testid="ai-reviewer-bottom-controls"
+          className="ai-reviewer-panel-onboarding"
+          data-testid="ai-reviewer-onboarding"
         >
-          <div className="ai-reviewer-panel-scope">
-            <OLFormLabel htmlFor="ai-reviewer-scope">
-              {t("ai_reviewer_scope")}
-            </OLFormLabel>
-            <OLFormSelect
-              id="ai-reviewer-scope"
-              value={reviewScope}
-              disabled={busy}
-              onChange={(event) =>
-                setReviewScope(event.target.value as ReviewScopeKind)
-              }
-            >
-              {reviewScopes.map((scope) => (
-                <option key={scope} value={scope}>
-                  {reviewScopeLabel(scope, t)}
-                </option>
-              ))}
-            </OLFormSelect>
-          </div>
-          {/* Models from every connection sit in one list: choosing a model is
-              what chooses the connection, so no separate picker is offered. */}
-          {runModel != null && (
-            <div className="ai-reviewer-panel-scope">
-              <OLFormLabel htmlFor="ai-reviewer-run-model">
-                {t("ai_reviewer_provider_model")}
-              </OLFormLabel>
-              <OLFormSelect
-                id="ai-reviewer-run-model"
-                value={selectedModelKey ?? ""}
-                disabled={busy}
-                onChange={(event) => setSelectedModelKey(event.target.value)}
-              >
-                {models.map((candidate) => (
-                  <option key={modelKey(candidate)} value={modelKey(candidate)}>
-                    {`${candidate.displayName} (${candidate.connectionLabel})`}
-                  </option>
-                ))}
-              </OLFormSelect>
-            </div>
-          )}
-          {modelFailures.length > 0 && (
-            <p
-              className="ai-reviewer-panel-model-failures form-text mb-0"
-              data-testid="ai-reviewer-model-failures"
-            >
-              {t("ai_reviewer_provider_models_unavailable_for", {
-                connections: modelFailures
-                  .map((failure) => failure.connectionLabel)
-                  .join(", "),
-              })}
-            </p>
-          )}
+          <p className="ai-reviewer-panel-empty-state">
+            {t("ai_reviewer_provider_not_configured")}
+          </p>
           <OLButton
             type="button"
             variant="primary"
-            className="ai-reviewer-panel-review-action"
-            disabled={busy}
-            onClick={runSelectedReview}
+            onClick={() => setShowProviderSettings(true)}
           >
-            {reviewActionLabel(reviewScope, t)}
+            {t("ai_reviewer_connection_add")}
           </OLButton>
-          {reviewScope === "selection" && captureSelectionSession != null && (
-            <div
-              className="ai-reviewer-panel-auxiliary-actions"
-              data-testid="ai-reviewer-selection-transforms"
-            >
-              {selectionActions
-                .filter(({ action }) => action !== "review")
-                .map(({ action }) => (
-                  <OLButton
-                    key={action}
-                    type="button"
-                    variant="link"
-                    className="btn-inline-link ai-reviewer-panel-auxiliary-action"
-                    disabled={busy}
-                    onClick={() => {
-                      void runSelectionReview(action);
-                    }}
-                  >
-                    {selectionActionLabel(action, t)}
-                  </OLButton>
-                ))}
-            </div>
-          )}
-          <form
-            className="ai-reviewer-panel-composer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              submitDiscussionMessage();
-            }}
-          >
-            <OLFormLabel htmlFor="ai-reviewer-discussion-input">
-              {t("ai_reviewer_discussion_message")}
-            </OLFormLabel>
-            <div className="ai-reviewer-panel-composer-input">
-              <AutoExpandingTextArea
-                id="ai-reviewer-discussion-input"
-                className="form-control ai-reviewer-panel-textarea"
-                value={discussionInput}
-                disabled={
-                  busy ||
-                  discussions.some(
-                    (discussion) => discussion.status === "streaming",
-                  )
-                }
-                onChange={(event) => setDiscussionInput(event.target.value)}
-              />
-              <OLIconButton
-                type="submit"
-                variant="ghost"
-                size="sm"
-                icon="send"
-                className="ai-reviewer-panel-send"
-                accessibilityLabel={t("ai_reviewer_send_message")}
-                disabled={
-                  busy ||
-                  discussions.some(
-                    (discussion) => discussion.status === "streaming",
-                  ) ||
-                  discussionInput.trim() === ""
-                }
-              />
-            </div>
-          </form>
         </div>
+      ) : (
+        <>
+          {/* The findings sit above the conversation and keep their own scroll,
+              so a long thread never carries them off screen. */}
+          {selectedMode !== "brainstorm" && findingEntries.length > 0 && (
+            <section
+              className="ai-reviewer-panel-findings"
+              aria-label={t("ai_reviewer_review_findings")}
+              data-testid="ai-reviewer-findings"
+            >
+              <h3 className="ai-reviewer-run-section-title">
+                {t("ai_reviewer_findings_unresolved", {
+                  count: unresolvedFindingCount,
+                })}
+              </h3>
+              {findingEntries.map(({ runState, finding }) =>
+                finding.artifactKind === "citation-finding"
+                  ? renderCitationFinding(runState, finding)
+                  : renderFinding(runState, finding),
+              )}
+            </section>
+          )}
+
+          <div
+            className="ai-reviewer-panel-body"
+            aria-label={t("ai_reviewer_conversation")}
+            data-testid="ai-reviewer-conversation"
+          >
+            {workspaceNotice != null && (
+              <div
+                className="alert alert-warning ai-reviewer-panel-notice"
+                role="alert"
+              >
+                {workspaceNotice}
+              </div>
+            )}
+            {timeline.length === 0 && (
+              <p className="ai-reviewer-panel-empty-state">
+                {t("ai_reviewer_empty_state")}
+              </p>
+            )}
+            <div className="ai-reviewer-panel-timeline">
+              {timeline.map((entry) =>
+                entry.kind === "run"
+                  ? renderRun(entry.run)
+                  : renderDiscussion(entry.discussion),
+              )}
+            </div>
+          </div>
+
+          <div
+            className="ai-reviewer-panel-footer"
+            data-testid="ai-reviewer-bottom-controls"
+          >
+            {modelFailures.length > 0 && (
+              <p
+                className="ai-reviewer-panel-model-failures form-text mb-0"
+                data-testid="ai-reviewer-model-failures"
+              >
+                {t("ai_reviewer_provider_models_unavailable_for", {
+                  connections: modelFailures
+                    .map((failure) => failure.connectionLabel)
+                    .join(", "),
+                })}
+              </p>
+            )}
+            {/* Selecting text is an intent to act on it, so these sit directly
+                above the composer and stay there whether or not results exist. */}
+            {selectionPreview != null && captureSelectionSession != null && (
+              <div
+                className="ai-reviewer-panel-selection"
+                data-testid="ai-reviewer-selection-transforms"
+              >
+                <p
+                  className="ai-reviewer-panel-selection-scope"
+                  data-testid="ai-reviewer-selection-scope"
+                  title={t("ai_reviewer_selection_scope_descriptor", {
+                    ...selectionPreview,
+                    count: selectionPreview.wordCount,
+                  })}
+                >
+                  {t("ai_reviewer_selection_scope_descriptor", {
+                    ...selectionPreview,
+                    count: selectionPreview.wordCount,
+                  })}
+                </p>
+                <div className="ai-reviewer-panel-actions">
+                  {selectionActions.map(({ action }) => (
+                    <OLButton
+                      key={action}
+                      type="button"
+                      variant={action === "review" ? "primary" : "secondary"}
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => {
+                        void runSelectionReview(action);
+                      }}
+                    >
+                      {selectionActionLabel(action, t)}
+                    </OLButton>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div
+              className="ai-reviewer-panel-mode-row"
+              data-testid="ai-reviewer-mode-row"
+            >
+              <Dropdown align="start">
+                <DropdownToggle
+                  bsPrefix="ai-reviewer-panel-mode-chip"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={t("ai_reviewer_mode")}
+                  disabled={busy || answerStreaming}
+                >
+                  {reviewModeLabel(selectedMode, t)}
+                </DropdownToggle>
+                <AiReviewerPortaledMenu className="ai-reviewer-panel-mode-menu">
+                  {(["referee-review", "brainstorm", null] as const).map(
+                    (mode) => (
+                      <OLDropdownMenuItem
+                        key={mode ?? "none"}
+                        as="button"
+                        active={mode === selectedMode}
+                        onClick={() => setSelectedMode(mode)}
+                      >
+                        {reviewModeLabel(mode, t)}
+                      </OLDropdownMenuItem>
+                    ),
+                  )}
+                </AiReviewerPortaledMenu>
+              </Dropdown>
+            </div>
+            <div className="ai-reviewer-panel-composer">
+              <MessageInput
+                sendMessage={submitConversationMessage}
+                resetUnreadMessages={noUnreadMessages}
+                placeholder={t("ai_reviewer_message_placeholder")}
+                inputId="ai-reviewer-message-input"
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {showProviderSettings && (
+        <Suspense fallback={null}>
+          <AiIntegrationDetails onHide={() => setShowProviderSettings(false)} />
+        </Suspense>
       )}
 
       {showDeleteWorkspaceConfirmation && (
@@ -4899,22 +4838,14 @@ export default function AiReviewerPanel() {
       }),
     [getSelectionContext],
   );
-  const captureDocumentSession = useCallback(
-    (request: CaptureSelectionRequest) =>
-      captureEditorSelectionSession({
-        ...request,
-        target: "document",
-        getContext: getSelectionContext,
-      }),
-    [getSelectionContext],
-  );
+  const selectionPreview = useEditorSelectionPreview(getSelectionContext);
 
   return (
     <AiReviewerPanelView
       projectId={projectId}
       captureSelectionSession={captureSelectionSession}
-      captureDocumentSession={captureDocumentSession}
       getSelectionContext={getSelectionContext}
+      selectionPreview={selectionPreview}
       resolveEvidenceDocument={resolveEvidenceDocument}
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}

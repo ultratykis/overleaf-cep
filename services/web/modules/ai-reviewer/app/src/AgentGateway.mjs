@@ -10,8 +10,6 @@ import {
  *   AgentEvent,
  *   AgentGateway as AgentGatewayContract,
  *   AgentRequest,
- *   DiscussionEvent,
- *   DiscussionRequest,
  *   EvidenceReference,
  *   ToolCall,
  * } from '../../shared/contract-types'
@@ -164,6 +162,18 @@ function assertEventScope(request, event) {
   if (event.type !== "suggestion") {
     return;
   }
+  // An edit is only checkable against the document state the request carried,
+  // so a request without one cannot produce an applicable suggestion.
+  if (request.scope == null) {
+    throw new AgentGatewayError(
+      "A request without a document scope cannot return edit suggestions.",
+      {
+        code: "AI_SUGGESTION_SCOPE_REQUIRED",
+        category: "schema",
+        retryable: false,
+      },
+    );
+  }
   if (request.scope.kind === "project") {
     throw new AgentGatewayError(
       "A project review cannot return edit suggestions.",
@@ -217,7 +227,7 @@ function assertEventScope(request, event) {
  * }} failure
  */
 function assertPathAndRangeWithinRequest(request, reference, failure) {
-  if (request.scope.kind === "project") {
+  if (request.scope == null || request.scope.kind === "project") {
     return;
   }
 
@@ -254,6 +264,7 @@ export function assertEvidenceForRequest(request, evidence) {
       requireSelectionRange: true,
     });
     if (
+      request.scope != null &&
       request.scope.kind !== "project" &&
       ((reference.revision != null &&
         reference.revision !== request.scope.baseRevision) ||
@@ -274,10 +285,15 @@ export function assertEvidenceForRequest(request, evidence) {
 
 /**
  * @param {AgentRequest} request
- * @param {ToolCall["arguments"]} input
+ * @param {ToolCall} call
  */
-export function assertReadProjectFileArgumentsForRequest(request, input) {
-  assertPathAndRangeWithinRequest(request, input, {
+export function assertToolCallForRequest(request, call) {
+  // A Zotero query names no manuscript position, so only the project read is
+  // bound to the active scope.
+  if (call.name !== "read_project_file") {
+    return;
+  }
+  assertPathAndRangeWithinRequest(request, call.arguments, {
     code: "AI_TOOL_SCOPE_MISMATCH",
     message: "The read tool requested data outside the active scope.",
     requireSelectionRange: true,
@@ -343,7 +359,7 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
   } else if (event.type === "suggestion") {
     assertEvidenceForRequest(request, event.suggestion.evidence);
   } else if (event.type === "tool.call") {
-    assertReadProjectFileArgumentsForRequest(request, event.call.arguments);
+    assertToolCallForRequest(request, event.call);
   }
 
   assertEventScope(request, event);
@@ -357,107 +373,6 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
       },
     );
   }
-}
-
-/**
- * Validate the immutable subject before any part of it reaches the discussion
- * prompt. Artifact subjects remain bound to the review request that produced
- * them.
- *
- * @param {DiscussionRequest} request
- */
-export function assertDiscussionSubjectForRequest(request) {
-  const { subject } = request;
-  if (subject == null || subject.kind === "scope") {
-    return;
-  }
-  const { sourceRequest } = subject;
-  const eventBase = {
-    eventId: "discussion-subject",
-    requestId: sourceRequest.requestId,
-    sequence: 0,
-    createdAt: "1970-01-01T00:00:00.000Z",
-  };
-  if (subject.kind === "suggestion") {
-    assertAgentEventForRequest(
-      sourceRequest,
-      {
-        type: "suggestion",
-        ...eventBase,
-        suggestion: subject.artifact,
-      },
-      0,
-    );
-  } else {
-    assertAgentEventForRequest(
-      sourceRequest,
-      {
-        type: "finding",
-        ...eventBase,
-        finding: subject.artifact,
-      },
-      0,
-    );
-  }
-}
-
-/**
- * Discussion event identity is independent from the source review request.
- * Suggestions are the exception: their nested identity stays bound to the
- * source request so the existing preview and apply path can validate them.
- *
- * @param {DiscussionRequest} request
- * @param {DiscussionEvent} event
- * @param {number} expectedSequence
- */
-export function assertDiscussionEventForRequest(
-  request,
-  event,
-  expectedSequence,
-) {
-  if (event.requestId !== request.requestId) {
-    throw new AgentGatewayError(
-      "The provider discussion event does not belong to the active request.",
-      {
-        code: "AI_DISCUSSION_EVENT_REQUEST_MISMATCH",
-        category: "schema",
-        retryable: false,
-      },
-    );
-  }
-  if (event.sequence !== expectedSequence) {
-    throw new AgentGatewayError(
-      "The provider discussion event sequence is not contiguous.",
-      {
-        code: "AI_DISCUSSION_EVENT_SEQUENCE_INVALID",
-        category: "schema",
-        retryable: false,
-      },
-    );
-  }
-  if (event.type !== "suggestion") {
-    return;
-  }
-
-  if (request.subject == null) {
-    throw new AgentGatewayError(
-      "An open discussion cannot return edit suggestions.",
-      {
-        code: "AI_TOOL_NOT_ALLOWED",
-        category: "schema",
-        retryable: false,
-      },
-    );
-  }
-  const { sourceRequest } = request.subject;
-  assertAgentEventForRequest(
-    sourceRequest,
-    {
-      ...event,
-      requestId: sourceRequest.requestId,
-    },
-    expectedSequence,
-  );
 }
 
 /**
@@ -539,27 +454,5 @@ export class ScriptedFakeAgentGateway {
       this.emittedEventCount += 1;
       yield event;
     }
-  }
-
-  /**
-   * The review fake intentionally has no implicit discussion script. Tests for
-   * the distinct discussion path provide an explicit discussion gateway.
-   *
-   * @returns {AsyncIterable<DiscussionEvent>}
-   */
-  streamDiscussion() {
-    const error = new TypeError(
-      "ScriptedFakeAgentGateway has no configured discussion events.",
-    );
-    /** @type {AsyncIterator<DiscussionEvent> & AsyncIterable<DiscussionEvent>} */
-    const iterator = {
-      [Symbol.asyncIterator]() {
-        return iterator;
-      },
-      async next() {
-        throw error;
-      },
-    };
-    return iterator;
   }
 }

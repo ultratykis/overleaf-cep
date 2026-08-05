@@ -2,7 +2,6 @@
 
 import { expressify } from "@overleaf/promise-utils";
 
-import { DiscussionRequestSchema } from "../../shared/contracts.mjs";
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
@@ -17,6 +16,8 @@ import {
   createAiReviewerProviderConfigStore,
 } from "./AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
+import { createAiReviewerSkillController } from "./AiReviewerSkillController.mjs";
+import { createAiReviewerSkillStore } from "./AiReviewerSkillStore.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
 import { createAiReviewerProviderService } from "./OllamaProviderService.mjs";
@@ -230,9 +231,6 @@ export function createConfiguredAiReviewerController({
         runConfiguration.provider,
         runConfiguration.model,
       );
-      if (DiscussionRequestSchema.safeParse(context.request).success) {
-        return providerService.createDiscussionGateway(runConfiguration);
-      }
       const scope = await requestScopeReader.read(context.httpRequest, {
         signal: context.signal,
         contextLength: runConfiguration.contextLength,
@@ -243,7 +241,14 @@ export function createConfiguredAiReviewerController({
         searchZotero: scope.searchZotero,
         validateEvidence: scope.validateEvidence,
       });
-      return enforceProjectReviewCoverage(gateway, scope);
+      // Coverage is a guard on an explicitly scoped project review: if it read
+      // nothing, it reviewed nothing. A scope-free message may legitimately
+      // answer without opening a file, so its visible mode does not opt it into
+      // this rule.
+      return context.request.skill != null &&
+        context.request.scope?.kind === "project"
+        ? enforceProjectReviewCoverage(gateway, scope)
+        : gateway;
     },
     timeoutSignalFactory,
     now,
@@ -316,6 +321,8 @@ const providerController = createAiReviewerProviderController({
   providerService,
   failureRecorder: recordAiReviewerFailure,
 });
+const skillStore = createAiReviewerSkillStore();
+const skillController = createAiReviewerSkillController({ skillStore });
 const configuredController = createConfiguredAiReviewerController({
   configStore,
   providerService,
@@ -338,8 +345,10 @@ export default {
   createConnection: expressify(providerController.createConnection),
   updateConnection: expressify(providerController.updateConnection),
   deleteConnection: expressify(providerController.deleteConnection),
+  listSkills: expressify(skillController.listSkills),
+  uploadSkill: expressify(skillController.uploadSkill),
+  deleteSkill: expressify(skillController.deleteSkill),
   stream: expressify(configuredController.stream),
-  discussionStream: expressify(configuredController.discussionStream),
   getWorkspace: expressify(workspaceController.getWorkspace),
   saveWorkspace: expressify(workspaceController.saveWorkspace),
   getCommentProvenance: expressify(provenanceController.getCommentProvenance),

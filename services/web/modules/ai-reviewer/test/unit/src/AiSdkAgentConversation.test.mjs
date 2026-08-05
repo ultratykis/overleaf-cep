@@ -1,0 +1,816 @@
+import { simulateReadableStream } from "ai";
+// The SDK publishes this test entrypoint, but the repository resolver does not
+// currently resolve package export subpaths.
+// eslint-disable-next-line import/no-unresolved
+import { MockLanguageModelV3 } from "ai/test";
+import { describe, expect, it, vi } from "vitest";
+
+import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
+import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
+import {
+  DISCUSSION_CONTEXT_TURN_LIMIT,
+  UnresolvedSuggestionSchema,
+} from "../../../shared/contracts.mjs";
+
+const createdAt = "2026-07-30T00:00:00.000Z";
+const contentHash = "a".repeat(64);
+const documentText = "The method is unclear. The result is unclear.";
+const firstSentence = documentText.slice(0, 22);
+
+function documentRequest(overrides = {}) {
+  return {
+    requestId: "conversation-0001",
+    projectId: "project-conversation-0001",
+    action: "review",
+    instruction: "Why is the first sentence unclear?",
+    skill: "line-edit",
+    scope: {
+      kind: "document",
+      documentId: "document-conversation-0001",
+      path: "main.tex",
+      baseRevision: 7,
+      baseTextHash: contentHash,
+      text: documentText,
+    },
+    turns: [
+      { role: "user", text: "What did you find in this file?" },
+      { role: "assistant", text: "One unclear sentence." },
+    ],
+    ...overrides,
+  };
+}
+
+function projectRequest(overrides = {}) {
+  return {
+    requestId: "conversation-project-0001",
+    projectId: "project-conversation-0001",
+    action: "review",
+    instruction: "Review the whole project.",
+    skill: "referee-review",
+    scope: { kind: "project" },
+    ...overrides,
+  };
+}
+
+function openRequest(overrides = {}) {
+  return {
+    requestId: "conversation-open-0001",
+    projectId: "project-conversation-0001",
+    action: "review",
+    instruction: "Which chapter still needs work?",
+    skill: null,
+    turns: [{ role: "user", text: "An earlier question." }],
+    ...overrides,
+  };
+}
+
+function findingDraft(overrides = {}) {
+  return {
+    artifactKind: "finding",
+    severity: "warning",
+    category: "clarity",
+    title: "Unclear antecedent",
+    message: "The pronoun does not identify which method produced the result.",
+    evidence: [
+      {
+        path: "main.tex",
+        range: { from: 0, to: 22 },
+        revision: 7,
+        textHash: contentHash,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function suggestionDraft(overrides = {}) {
+  return {
+    documentId: "document-conversation-0001",
+    path: "main.tex",
+    baseRevision: 7,
+    baseTextHash: contentHash,
+    range: { from: 0, to: 22 },
+    original: firstSentence,
+    replacement: "The bisection method is described in Section 2.",
+    rationale: "Naming the method removes the ambiguity.",
+    evidence: [
+      {
+        path: "main.tex",
+        range: { from: 0, to: 22 },
+        revision: 7,
+        textHash: contentHash,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function usage(inputTokens = 3, outputTokens = 2) {
+  return {
+    inputTokens: {
+      total: inputTokens,
+      noCache: inputTokens,
+      cacheRead: undefined,
+      cacheWrite: undefined,
+    },
+    outputTokens: {
+      total: outputTokens,
+      text: outputTokens,
+      reasoning: undefined,
+    },
+  };
+}
+
+function finish(finishReason, tokenUsage = usage()) {
+  return {
+    type: "finish",
+    finishReason: { unified: finishReason, raw: finishReason },
+    usage: tokenUsage,
+  };
+}
+
+function streamResult(chunks) {
+  return {
+    stream: simulateReadableStream({
+      chunks,
+      initialDelayInMs: null,
+      chunkDelayInMs: null,
+    }),
+  };
+}
+
+function textChunks(text, id = "conversation-text-0001") {
+  return [
+    { type: "text-start", id },
+    { type: "text-delta", id, delta: text },
+    { type: "text-end", id },
+  ];
+}
+
+function toolChunk(toolName, input, toolCallId = `${toolName}-call-0001`) {
+  return {
+    type: "tool-call",
+    toolCallId,
+    toolName,
+    input: JSON.stringify(input),
+  };
+}
+
+function textStep(text, tokenUsage = usage()) {
+  return streamResult([...textChunks(text), finish("stop", tokenUsage)]);
+}
+
+function toolStep(chunks) {
+  return streamResult([...chunks, finish("tool-calls")]);
+}
+
+function strictStreamModel(results) {
+  let index = 0;
+  const model = new MockLanguageModelV3({
+    provider: "fixture",
+    modelId: "fixture-model",
+    doStream: async () => {
+      if (index >= results.length) {
+        throw new Error("Unexpected extra model step.");
+      }
+      const result = results[index];
+      index += 1;
+      return result;
+    },
+  });
+  return { model, consumed: () => index };
+}
+
+function createGateway(model, overrides = {}) {
+  let id = 0;
+  return new AiSdkAgentGateway({
+    model,
+    provider: "fixture-provider",
+    modelId: "fixture-model",
+    contextLength: 8_192,
+    readProjectFile: async () => ({
+      path: "main.tex",
+      range: { from: 0, to: 22 },
+      text: firstSentence,
+    }),
+    now: () => createdAt,
+    createId: (kind) => `${kind}-${String((id += 1)).padStart(4, "0")}`,
+    ...overrides,
+  });
+}
+
+async function collect(stream) {
+  const events = [];
+  for await (const event of stream) {
+    events.push(event);
+  }
+  return events;
+}
+
+async function captureError(work) {
+  try {
+    await work;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the operation to reject.");
+}
+
+function sentPrompt(model) {
+  return model.doStreamCalls[0].prompt[1].content[0].text;
+}
+
+function sentSystemInstruction(model) {
+  return model.doStreamCalls[0].prompt[0].content;
+}
+
+describe("AI reviewer: one agent path for review and conversation", function () {
+  it.each([
+    {
+      label: "review mode",
+      request: () => projectRequest(),
+      included: [
+        "You are reviewing an academic manuscript as a referee.",
+        "For each point: quote the passage, say plainly what is wrong with it",
+      ],
+      excluded: ["You are a thinking partner for work in progress"],
+    },
+    {
+      label: "brainstorm mode",
+      request: () =>
+        openRequest({
+          skill: "brainstorm",
+          instruction: "Help me choose between two research questions.",
+        }),
+      included: [
+        "You are a thinking partner for work in progress, not a reviewer.",
+        "Do not produce findings or verdicts",
+      ],
+      excluded: ["You are reviewing an academic manuscript as a referee."],
+    },
+    {
+      label: "no mode",
+      request: () => openRequest(),
+      included: [],
+      excluded: [
+        "You are reviewing an academic manuscript as a referee.",
+        "You are a thinking partner for work in progress, not a reviewer.",
+      ],
+    },
+  ])("selects the built-in instruction for $label", async function (testCase) {
+    const { model } = strictStreamModel([textStep("Mode selected.")]);
+
+    await collect(createGateway(model).stream(testCase.request()));
+
+    const systemInstruction = sentSystemInstruction(model);
+    for (const text of testCase.included) {
+      expect(systemInstruction).toContain(text);
+    }
+    for (const text of testCase.excluded) {
+      expect(systemInstruction).not.toContain(text);
+    }
+  });
+
+  it.each([
+    {
+      label: "a review run",
+      request: () => projectRequest(),
+    },
+    {
+      label: "a conversation turn",
+      request: () =>
+        openRequest({
+          skill: "brainstorm",
+          instruction: "この研究課題を一緒に考えてください。",
+        }),
+    },
+    {
+      label: "a no-mode turn",
+      request: () => openRequest({ skill: null }),
+    },
+  ])("carries the shared language rule into $label", async function (testCase) {
+    const { model } = strictStreamModel([textStep("Language selected.")]);
+
+    await collect(createGateway(model).stream(testCase.request()));
+
+    expect(sentSystemInstruction(model)).toContain(
+      [
+        "Answer in the language the author writes in. Judge that from the author's own",
+        "latest message. When the only instruction is a built-in English one, use the",
+        "main language of the manuscript instead.",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps review artifact tools out of brainstorm mode", async function () {
+    const { model } = strictStreamModel([textStep("One question first.")]);
+
+    await collect(
+      createGateway(model, { searchZotero: async () => [] }).stream(
+        openRequest({ skill: "brainstorm" }),
+      ),
+    );
+
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toEqual(["read_project_file", "search_zotero", "report_subject"]);
+  });
+
+  it("reads a project file while answering a conversation turn", async function () {
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      range: { from: 0, to: 22 },
+      text: firstSentence,
+    }));
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk("read_project_file", {
+          path: "main.tex",
+          range: { from: 0, to: 22 },
+        }),
+      ]),
+      textStep("The subject of the sentence is never named."),
+    ]);
+    const gateway = createGateway(model, { readProjectFile });
+
+    const events = await collect(gateway.stream(documentRequest()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "tool.call",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      call: {
+        name: "read_project_file",
+        arguments: { path: "main.tex", range: { from: 0, to: 22 } },
+      },
+    });
+    expect(readProjectFile).toHaveBeenCalledExactlyOnceWith(
+      { path: "main.tex", range: { from: 0, to: 22 } },
+      { request: documentRequest(), signal: undefined },
+    );
+  });
+
+  it("searches Zotero while answering a conversation turn", async function () {
+    const searchZotero = vi.fn(async () => [
+      { itemKey: "ITEM1", title: "Synthetic result" },
+    ]);
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("search_zotero", { query: "greenwade" })]),
+      textStep("The library has one matching entry."),
+    ]);
+    const gateway = createGateway(model, { searchZotero });
+    const request = documentRequest();
+
+    const events = await collect(gateway.stream(request));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "tool.call",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      call: { name: "search_zotero", arguments: { query: "greenwade" } },
+    });
+    expect(searchZotero).toHaveBeenCalledExactlyOnceWith(
+      { query: "greenwade" },
+      { request, signal: undefined },
+    );
+  });
+
+  it("withholds the Zotero tool when no library is connected", async function () {
+    const { model } = strictStreamModel([textStep("No library available.")]);
+
+    await collect(createGateway(model).stream(documentRequest()));
+
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toEqual([
+      "read_project_file",
+      "report_subject",
+      "report_finding",
+      "propose_suggestion",
+    ]);
+  });
+
+  it("interleaves free text and structured findings in one stream", async function () {
+    const { model } = strictStreamModel([
+      toolStep([
+        ...textChunks("Two sentences share the same problem.", "text-a"),
+        toolChunk("report_finding", findingDraft(), "finding-call-a"),
+      ]),
+      toolStep([
+        ...textChunks("The second one repeats it.", "text-b"),
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            title: "Repeated wording",
+            evidence: [
+              {
+                path: "main.tex",
+                range: { from: 23, to: 45 },
+                revision: 7,
+                textHash: contentHash,
+              },
+            ],
+          }),
+          "finding-call-b",
+        ),
+      ]),
+      textStep("Both are worth fixing together."),
+    ]);
+
+    const events = await collect(
+      createGateway(model).stream(documentRequest()),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "finding",
+      "text.delta",
+      "finding",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events.map((event) => event.sequence)).toEqual([
+      0, 1, 2, 3, 4, 5, 6,
+    ]);
+    expect(events[2]).toMatchObject({
+      finding: {
+        artifactKind: "finding",
+        title: "Unclear antecedent",
+        requestId: "conversation-0001",
+        projectId: "project-conversation-0001",
+        suggestionIds: [],
+      },
+    });
+    expect(events[4]).toMatchObject({
+      finding: { title: "Repeated wording" },
+    });
+  });
+
+  it("announces a tool by name and target without its arguments or result", async function () {
+    const manuscript = "PRIVATE_MANUSCRIPT_SENTENCE";
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      range: { from: 0, to: 22 },
+      text: manuscript,
+    }));
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk("read_project_file", {
+          path: "main.tex",
+          range: { from: 0, to: 22 },
+        }),
+      ]),
+      textStep("Answered."),
+    ]);
+    const gateway = createGateway(model, { readProjectFile });
+
+    const events = await collect(gateway.stream(documentRequest()));
+    const toolCall = events.find((event) => event.type === "tool.call");
+
+    expect(Object.keys(toolCall.call).sort()).toEqual([
+      "arguments",
+      "id",
+      "name",
+    ]);
+    expect(toolCall.call).not.toHaveProperty("result");
+    expect(JSON.stringify(events)).not.toContain(manuscript);
+    expect(JSON.stringify(events)).not.toContain(documentText);
+  });
+
+  it("does not announce the artifact tools as conversation tool lines", async function () {
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("propose_suggestion", suggestionDraft())]),
+      textStep("Proposed one edit."),
+    ]);
+
+    const events = await collect(
+      createGateway(model).stream(documentRequest()),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "suggestion",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events.some((event) => event.type === "tool.call")).toBe(false);
+  });
+
+  it("keeps a conversation suggestion applicable under the existing contract", async function () {
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("propose_suggestion", suggestionDraft())]),
+      textStep("That wording names the method."),
+    ]);
+
+    const events = await collect(
+      createGateway(model).stream(documentRequest()),
+    );
+    const { suggestion } = events.find((event) => event.type === "suggestion");
+
+    expect(UnresolvedSuggestionSchema.parse(suggestion)).toEqual(suggestion);
+    expect(suggestion).toMatchObject({
+      requestId: "conversation-0001",
+      projectId: "project-conversation-0001",
+      documentId: "document-conversation-0001",
+      path: "main.tex",
+      baseRevision: 7,
+      baseTextHash: contentHash,
+      range: { from: 0, to: 22 },
+      original: firstSentence,
+      provider: "fixture-provider",
+      model: "fixture-model",
+      skill: "line-edit",
+      status: "unresolved",
+    });
+  });
+
+  it("shifts a selection-relative suggestion into absolute document positions", async function () {
+    const selectionRequest = documentRequest({
+      scope: {
+        kind: "selection",
+        documentId: "document-conversation-0001",
+        path: "main.tex",
+        baseRevision: 7,
+        baseTextHash: contentHash,
+        range: { from: 23, to: 45 },
+        text: documentText.slice(23, 45),
+      },
+    });
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "propose_suggestion",
+          suggestionDraft({
+            range: { from: 0, to: 22 },
+            original: documentText.slice(23, 45),
+            evidence: [
+              {
+                path: "main.tex",
+                range: { from: 0, to: 22 },
+                revision: 7,
+                textHash: contentHash,
+              },
+            ],
+          }),
+        ),
+      ]),
+      textStep("Rewritten."),
+    ]);
+
+    const events = await collect(createGateway(model).stream(selectionRequest));
+    const { suggestion } = events.find((event) => event.type === "suggestion");
+
+    expect(suggestion.range).toEqual({ from: 23, to: 45 });
+    expect(suggestion.evidence[0].range).toEqual({ from: 23, to: 45 });
+  });
+
+  it("rejects evidence outside the requested document state", async function () {
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [
+              {
+                path: "other.tex",
+                range: { from: 0, to: 22 },
+                revision: 7,
+                textHash: contentHash,
+              },
+            ],
+          }),
+        ),
+      ]),
+      textStep("Unreachable."),
+    ]);
+
+    expect(
+      await captureError(
+        collect(createGateway(model).stream(documentRequest())),
+      ),
+    ).toMatchObject({
+      code: "AI_EVIDENCE_SCOPE_MISMATCH",
+      category: "schema",
+      retryable: false,
+    });
+  });
+
+  it("runs the project evidence callback for a reported finding", async function () {
+    const validateEvidence = vi.fn();
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("report_finding", findingDraft())]),
+      textStep("Reported."),
+    ]);
+    const gateway = createGateway(model, { validateEvidence });
+    const request = documentRequest();
+
+    await collect(gateway.stream(request));
+
+    expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
+      findingDraft().evidence,
+      { request, signal: undefined },
+    );
+  });
+
+  it.each([
+    {
+      label: "a project scope",
+      request: () => projectRequest(),
+      code: "AI_PROJECT_SUGGESTION_NOT_ALLOWED",
+    },
+    {
+      label: "no selected skill",
+      request: () => documentRequest({ skill: null }),
+      code: "AI_SUGGESTION_SKILL_REQUIRED",
+    },
+    {
+      label: "no scope at all",
+      request: () => openRequest(),
+      code: "AI_SUGGESTION_SCOPE_REQUIRED",
+    },
+  ])("refuses a suggestion for $label", async function ({ request, code }) {
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("propose_suggestion", suggestionDraft())]),
+    ]);
+
+    expect(
+      await captureError(collect(createGateway(model).stream(request()))),
+    ).toMatchObject({ code, category: "schema", retryable: false });
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).not.toContain("propose_suggestion");
+  });
+
+  it("sends a readable prompt instead of the request envelope", async function () {
+    const { model } = strictStreamModel([textStep("Readable.")]);
+    const request = documentRequest();
+
+    await collect(createGateway(model).stream(request));
+
+    const prompt = sentPrompt(model);
+    expect(prompt).toContain("## Task\n\nAction: review\nSkill: line-edit");
+    expect(prompt).toContain("## Scope\n\nScope: document\nFile: main.tex");
+    expect(prompt).toContain(documentText);
+    expect(prompt).toContain("## Conversation");
+    let previousTurn = -1;
+    for (const turn of [
+      ...request.turns,
+      { role: "user", text: request.instruction },
+    ]) {
+      const rendered = `${turn.role === "user" ? "User" : "Assistant"}:\n${
+        turn.text
+      }`;
+      const position = prompt.indexOf(rendered);
+      expect(position).toBeGreaterThan(previousTurn);
+      previousTurn = position;
+    }
+    for (const wireKey of [
+      "requestId",
+      "projectId",
+      "documentId",
+      "baseRevision",
+      "baseTextHash",
+      '"turns"',
+      '"role"',
+    ]) {
+      expect(prompt).not.toContain(wireKey);
+    }
+  });
+
+  it("keeps all 12 bounded turns in order and rejects a thirteenth", async function () {
+    const turns = Array.from(
+      { length: DISCUSSION_CONTEXT_TURN_LIMIT },
+      (_, index) => ({
+        role: index % 2 === 0 ? "assistant" : "user",
+        text: `Bounded turn ${index + 1}.`,
+      }),
+    );
+    const { model } = strictStreamModel([textStep("All turns received.")]);
+
+    await collect(createGateway(model).stream(openRequest({ turns })));
+
+    expect(DISCUSSION_CONTEXT_TURN_LIMIT).toBe(12);
+    const prompt = sentPrompt(model);
+    let previousTurn = -1;
+    for (const turn of turns) {
+      const position = prompt.indexOf(
+        `${turn.role === "user" ? "User" : "Assistant"}:\n${turn.text}`,
+      );
+      expect(position).toBeGreaterThan(previousTurn);
+      previousTurn = position;
+    }
+
+    const { model: overLimitModel } = strictStreamModel([
+      textStep("Must not run."),
+    ]);
+    expect(
+      await captureError(
+        collect(
+          createGateway(overLimitModel).stream(
+            openRequest({
+              turns: [...turns, { role: "user", text: "Turn 13." }],
+            }),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_REQUEST_SCHEMA_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+    expect(overLimitModel.doStreamCalls).toHaveLength(0);
+  });
+
+  it("measures the context budget against the exact readable prompt", async function () {
+    const request = documentRequest();
+    const { model: captureModel } = strictStreamModel([textStep("Captured.")]);
+
+    await collect(createGateway(captureModel).stream(request));
+
+    const readablePrompt = sentPrompt(captureModel);
+    const exactContextLength = readablePrompt.length * 2;
+    const shortContextLength = (readablePrompt.length - 1) * 2;
+    expect(modelInputCharacterBudget(exactContextLength)).toBe(
+      readablePrompt.length,
+    );
+
+    const { model: shortModel } = strictStreamModel([
+      textStep("Must not run."),
+    ]);
+    expect(
+      await captureError(
+        collect(
+          createGateway(shortModel, {
+            contextLength: shortContextLength,
+          }).stream(request),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(shortModel.doStreamCalls).toHaveLength(0);
+
+    const { model: exactModel } = strictStreamModel([textStep("Exact fit.")]);
+    await collect(
+      createGateway(exactModel, { contextLength: exactContextLength }).stream(
+        request,
+      ),
+    );
+    expect(sentPrompt(exactModel)).toBe(readablePrompt);
+  });
+
+  it("keeps the provider response body and the credential out of a failure", async function () {
+    const secret = "PROVIDER_RESPONSE_BODY_AND_CREDENTIAL_SENTINEL";
+    const model = new MockLanguageModelV3({
+      provider: "fixture",
+      modelId: "fixture-model",
+      doStream: async () => {
+        throw new Error(secret);
+      },
+    });
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const error = await captureError(
+        collect(createGateway(model).stream(documentRequest())),
+      );
+
+      expect(error).toMatchObject({
+        code: "AI_PROVIDER_FAILED",
+        category: "provider",
+        message: "The AI provider failed.",
+      });
+      expect(String(error)).not.toContain(secret);
+      expect(JSON.stringify(error)).not.toContain(secret);
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("offers the read tools to a conversation that names no scope", async function () {
+    const { model } = strictStreamModel([textStep("Chapter three.")]);
+    const gateway = createGateway(model, { searchZotero: async () => [] });
+
+    await collect(gateway.stream(openRequest()));
+
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toEqual([
+      "read_project_file",
+      "search_zotero",
+      "report_subject",
+      "report_finding",
+    ]);
+  });
+});

@@ -6,8 +6,6 @@ import {
   AgentRequestSchema,
   AiReviewerWorkspaceSnapshotSchema,
   AiReviewerWorkspaceSchema,
-  DiscussionEventSchema,
-  DiscussionRequestSchema,
   DiscussionSubjectSchema,
   DiscussionTurnSchema,
   EvidenceReferenceSchema,
@@ -22,8 +20,10 @@ import {
   WorkspaceDiscussionSchema,
   WorkspaceFindingSchema,
   WorkspaceFindingStatusSchema,
+  WorkspaceModelSelectionSchema,
   WorkspaceRunSchema,
   WorkspaceSuggestionSchema,
+  ZoteroSearchArgumentsSchema,
 } from "./contracts.mjs";
 
 export type AgentError = z.infer<typeof AgentErrorSchema>;
@@ -33,8 +33,6 @@ export type AiReviewerWorkspaceSnapshot = z.infer<
   typeof AiReviewerWorkspaceSnapshotSchema
 >;
 export type AiReviewerWorkspace = z.infer<typeof AiReviewerWorkspaceSchema>;
-export type DiscussionEvent = z.infer<typeof DiscussionEventSchema>;
-export type DiscussionRequest = z.infer<typeof DiscussionRequestSchema>;
 export type DiscussionSubject = z.infer<typeof DiscussionSubjectSchema>;
 export type DiscussionTurn = z.infer<typeof DiscussionTurnSchema>;
 export type EvidenceReference = z.infer<typeof EvidenceReferenceSchema>;
@@ -58,8 +56,12 @@ export type WorkspaceFinding = z.infer<typeof WorkspaceFindingSchema>;
 export type WorkspaceFindingStatus = z.infer<
   typeof WorkspaceFindingStatusSchema
 >;
+export type WorkspaceModelSelection = z.infer<
+  typeof WorkspaceModelSelectionSchema
+>;
 export type WorkspaceRun = z.infer<typeof WorkspaceRunSchema>;
 export type WorkspaceSuggestion = z.infer<typeof WorkspaceSuggestionSchema>;
+export type ZoteroSearchArguments = z.infer<typeof ZoteroSearchArgumentsSchema>;
 
 export interface AgentGatewayOptions {
   signal?: AbortSignal;
@@ -70,8 +72,4 @@ export interface AgentGateway {
     request: AgentRequest,
     options?: AgentGatewayOptions,
   ): AsyncIterable<AgentEvent>;
-  streamDiscussion(
-    request: DiscussionRequest,
-    options?: AgentGatewayOptions,
-  ): AsyncIterable<DiscussionEvent>;
 }

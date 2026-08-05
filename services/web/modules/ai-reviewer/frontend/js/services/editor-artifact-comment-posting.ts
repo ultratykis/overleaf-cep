@@ -76,7 +76,8 @@ function expectedFindingText(
   request: AgentRequest,
   range: Readonly<{ from: number; to: number }>,
 ) {
-  if (request.scope.kind === "project") {
+  // A scopeless request carries no manuscript text to quote back.
+  if (request.scope == null || request.scope.kind === "project") {
     return null;
   }
   const offset =
@@ -122,7 +123,9 @@ function targetForArtifact(
       return null;
     }
     const scope =
-      request.scope.kind !== "project" && request.scope.path === reference.path
+      request.scope != null &&
+      request.scope.kind !== "project" &&
+      request.scope.path === reference.path
         ? request.scope
         : null;
     const revision = reference.revision ?? scope?.baseRevision;

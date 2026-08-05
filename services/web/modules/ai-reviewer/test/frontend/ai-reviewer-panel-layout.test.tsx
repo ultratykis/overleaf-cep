@@ -42,23 +42,19 @@ const listLayoutSelectors = [
   ".ai-reviewer-panel-body",
   ".ai-reviewer-panel-timeline",
   ".ai-reviewer-panel-footer",
-  ".ai-reviewer-panel-scope",
-  ".ai-reviewer-panel-composer",
-  ".ai-reviewer-panel-composer-input",
+  ".ai-reviewer-panel-actions",
   ".ai-reviewer-panel .btn",
-  ".ai-reviewer-panel .form-select",
-  ".ai-reviewer-panel .form-control",
 ];
 const emptyLayoutSelectors = [
   ...listLayoutSelectors,
-  ".ai-reviewer-panel-auxiliary-actions",
+  ".ai-reviewer-panel-selection",
 ];
 const workspaceLayoutSelectors = [
   ...listLayoutSelectors,
+  ".ai-reviewer-panel-findings",
   ".ai-reviewer-run",
   ".ai-reviewer-artifact",
   ".ai-reviewer-discussion-row",
-  ".ai-reviewer-panel-actions",
 ];
 const failureLayoutSelectors = [
   ...listLayoutSelectors,
@@ -67,15 +63,14 @@ const failureLayoutSelectors = [
   ".ai-reviewer-panel-notice",
 ];
 const discussionLayoutSelectors = [
+  ".ai-reviewer-discussion-thread",
   ".ai-reviewer-discussion-header",
   ".ai-reviewer-discussion-header-actions",
   ".ai-reviewer-discussion-turns",
-  ".ai-reviewer-discussion-turn",
+  ".ai-reviewer-discussion-quote",
   ".ai-reviewer-panel-footer",
-  ".ai-reviewer-discussion-composer",
-  ".ai-reviewer-panel-composer-input",
+  ".ai-reviewer-panel-composer",
   ".ai-reviewer-panel .btn",
-  ".ai-reviewer-panel .form-control",
 ];
 const settingsLayoutSelectors = [
   ".modal-content",
@@ -231,6 +226,15 @@ function assertNarrowLayoutContract(
       `${element.className} uses the border box`,
     ).to.equal("border-box");
   }
+}
+
+function assertRunHeaderGridContract() {
+  const runHeader = declarationsFor(".ai-reviewer-run-header");
+  expect(runHeader.get("display")).to.equal("grid");
+  expect(runHeader.get("grid-template-columns")).to.equal(
+    "minmax(0, 1fr) auto",
+  );
+  expect(runHeader.get("max-width")).to.equal("100%");
 }
 
 function assertSettingsNarrowLayoutContract(
@@ -468,6 +472,13 @@ describe("AI reviewer panel width", function () {
             modelCount: 2,
             classification: "remote",
           })}
+          listSkills={async () => ({ skills: [] })}
+          uploadSkill={async () => ({
+            id: "layout-skill",
+            name: "Layout skill",
+            description: "A layout test skill.",
+          })}
+          deleteSkill={async () => ({ skills: [] })}
         />,
       );
 
@@ -498,6 +509,12 @@ describe("AI reviewer panel width", function () {
             captureSelectionSession={async () => {
               throw new Error("The width test does not start a review.");
             }}
+            selectionPreview={{
+              fileType: "tex",
+              fromLine: 1,
+              toLine: 32,
+              wordCount: 1200,
+            }}
           />
         </div>,
       );
@@ -523,17 +540,60 @@ describe("AI reviewer panel width", function () {
         <div style={{ width, height: 800 }}>
           <AiReviewerPanelView
             projectId={projectId}
+            captureSelectionSession={async ({ requestId }) => ({
+              status: "ready",
+              session: {
+                request: {
+                  requestId,
+                  projectId,
+                  action: "review",
+                  instruction: "Review the selected phrase.",
+                  skill: "referee-review" as const,
+                  scope: {
+                    kind: "selection",
+                    documentId: "panel-width-document",
+                    path: "main.tex",
+                    baseRevision: 1,
+                    baseTextHash,
+                    range: { from: 0, to: 4 },
+                    text: "Body",
+                  },
+                },
+                binding: {
+                  currentDocument: {
+                    doc_id: "panel-width-document",
+                    joined: true,
+                    getSnapshot: () => "Body",
+                    hasBufferedOps: () => false,
+                    getTrackingChanges: () => false,
+                  },
+                  shareDocument: {
+                    connection: { state: "ready" },
+                    getVersion: () => 1,
+                  },
+                  trackChanges: false,
+                  connectionEpoch: 0,
+                },
+              },
+            })}
+            selectionPreview={{
+              fileType: "tex",
+              fromLine: 1,
+              toLine: 1,
+              wordCount: 1,
+            }}
             streamRequest={streamRequest}
           />
         </div>,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+      fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
       const alert = await screen.findByRole("alert");
 
       expect(alert.textContent).to.equal(longFailureGuidance);
       assertWrapsAnywhere(alert);
       assertNarrowLayoutContract(width, failureLayoutSelectors);
+      assertRunHeaderGridContract();
     });
 
     it(`contains a long path and discussion subject at ${width}px`, async function () {
@@ -563,21 +623,20 @@ describe("AI reviewer panel width", function () {
       expect(subject.textContent?.length ?? 0).to.be.greaterThan(116);
       assertEllipsis(subject);
 
-      const resolved = container.querySelector<HTMLDetailsElement>(
+      // A resolved finding stays open in place, so its long copy is on screen
+      // at every width rather than hidden behind a disclosure.
+      const resolved = container.querySelector<HTMLElement>(
         ".ai-reviewer-artifact-resolved",
       );
-      const summary = resolved?.querySelector<HTMLElement>("summary");
       expect(resolved).not.to.equal(null);
-      expect(summary).not.to.equal(null);
-      if (resolved == null || summary == null) {
+      if (resolved == null) {
         throw new Error("The resolved finding must render.");
       }
-      fireEvent.click(summary);
-      expect(resolved.open).to.equal(true);
+      expect(resolved.querySelector("summary")).to.equal(null);
       assertNarrowLayoutContract(width, workspaceLayoutSelectors);
 
       fireEvent.click(discussion);
-      await screen.findByRole("region", {
+      await screen.findByRole("article", {
         name: "AI reviewer discussion",
       });
       const activeSubject = screen.getByTestId("discussion-subject");
