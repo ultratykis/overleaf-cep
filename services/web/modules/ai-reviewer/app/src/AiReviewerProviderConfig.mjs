@@ -7,19 +7,44 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 
-const CoreProviderConfigSchema = z
-  .object({
-    provider: z.union([z.literal("openai-compatible"), z.literal("ollama")]),
-    baseUrl: z.string(),
-    model: z.string(),
-    contextLength: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  })
-  .strict();
+const ContextLengthSchema = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER);
+const ContextLengthSourceSchema = z.enum([
+  "derived",
+  "detected",
+  "default",
+  "override",
+]);
+const CoreProviderConfigSchema = z.discriminatedUnion("provider", [
+  z
+    .object({
+      provider: z.literal("openai-compatible"),
+      baseUrl: z.string(),
+      model: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      provider: z.literal("gemini"),
+      model: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      provider: z.literal("claude"),
+      model: z.string(),
+    })
+    .strict(),
+]);
 const CredentialSchema = z
   .string()
   .min(1)
   .max(4_096)
   .refine(
+    // eslint-disable-next-line no-control-regex -- credentials reject ASCII controls
     (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value),
   );
 
@@ -30,14 +55,45 @@ export function parseAiReviewerProviderCredential(input) {
 
 /** @param {unknown} input */
 function parseCoreProviderConfig(input) {
-  const value = CoreProviderConfigSchema.parse(input);
-  const endpoint = parseOpenAiCompatibleBaseUrl(value.baseUrl);
-  return Object.freeze({
-    provider: /** @type {const} */ ("openai-compatible"),
-    baseUrl: endpoint.baseUrl,
-    model: parseOpenAiCompatibleModelId(value.model),
-    contextLength: value.contextLength,
-  });
+  if (input == null || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("AI provider configuration must be an object.");
+  }
+  const candidate = /** @type {Record<string, unknown>} */ ({ ...input });
+  if (candidate.provider === "ollama") {
+    candidate.provider = "openai-compatible";
+  }
+  const value = CoreProviderConfigSchema.parse(candidate);
+  switch (value.provider) {
+    case "openai-compatible": {
+      const endpoint = parseOpenAiCompatibleBaseUrl(value.baseUrl);
+      return Object.freeze({
+        provider: value.provider,
+        baseUrl: endpoint.baseUrl,
+        model: parseOpenAiCompatibleModelId(value.model),
+      });
+    }
+    case "gemini":
+    case "claude":
+      return Object.freeze({
+        provider: value.provider,
+        model: parseOpenAiCompatibleModelId(value.model),
+      });
+  }
+}
+
+/**
+ * Reconstruct only the provider-specific connection fields before the
+ * discriminated-union parse. In particular, a native provider carrying a
+ * base URL remains an invalid shape rather than having the field ignored.
+ *
+ * @param {Record<string, unknown>} value
+ */
+function coreProviderConfigInput(value) {
+  return {
+    provider: value.provider,
+    ...(Object.hasOwn(value, "baseUrl") ? { baseUrl: value.baseUrl } : {}),
+    model: value.model,
+  };
 }
 
 /** @param {unknown} input */
@@ -74,6 +130,7 @@ export function parseAiReviewerProviderConfig(input) {
     "baseUrl",
     "model",
     "contextLength",
+    "contextLengthSource",
     "credential",
     "credentialUpdatedAt",
   ]);
@@ -84,12 +141,21 @@ export function parseAiReviewerProviderConfig(input) {
   ) {
     throw new TypeError("AI provider configuration has unknown fields.");
   }
-  const config = parseCoreProviderConfig({
-    provider: value.provider,
-    baseUrl: value.baseUrl,
-    model: value.model,
-    contextLength: value.contextLength,
-  });
+  const config = parseCoreProviderConfig(coreProviderConfigInput(value));
+  const contextLength = ContextLengthSchema.parse(value.contextLength);
+  const contextLengthSource = Object.hasOwn(value, "contextLengthSource")
+    ? ContextLengthSourceSchema.parse(value.contextLengthSource)
+    : undefined;
+  if (
+    (contextLengthSource === "derived" &&
+      config.provider === "openai-compatible") ||
+    (contextLengthSource === "detected" &&
+      config.provider !== "openai-compatible")
+  ) {
+    throw new TypeError(
+      "The AI provider context length source is inconsistent.",
+    );
+  }
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -100,9 +166,12 @@ export function parseAiReviewerProviderConfig(input) {
     : undefined;
   return Object.freeze({
     provider: config.provider,
-    baseUrl: config.baseUrl,
+    ...(config.provider === "openai-compatible"
+      ? { baseUrl: config.baseUrl }
+      : {}),
     model: config.model,
-    contextLength: config.contextLength,
+    contextLength,
+    ...(contextLengthSource === undefined ? {} : { contextLengthSource }),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
   });
@@ -124,6 +193,7 @@ export function parseAiReviewerProviderConfigUpdate(input) {
     "baseUrl",
     "model",
     "contextLength",
+    "contextLengthOverride",
     "credential",
   ]);
   if (
@@ -133,12 +203,21 @@ export function parseAiReviewerProviderConfigUpdate(input) {
   ) {
     throw new TypeError("AI provider configuration has unknown fields.");
   }
-  const config = parseCoreProviderConfig({
-    provider: value.provider,
-    baseUrl: value.baseUrl,
-    model: value.model,
-    contextLength: value.contextLength,
-  });
+  if (
+    Object.hasOwn(value, "contextLength") &&
+    Object.hasOwn(value, "contextLengthOverride")
+  ) {
+    throw new TypeError(
+      "Only one AI provider context length override may be supplied.",
+    );
+  }
+  const config = parseCoreProviderConfig(coreProviderConfigInput(value));
+  const legacyContextLength = Object.hasOwn(value, "contextLength")
+    ? ContextLengthSchema.parse(value.contextLength)
+    : undefined;
+  const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
+    ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
+    : undefined;
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -146,9 +225,14 @@ export function parseAiReviewerProviderConfigUpdate(input) {
     : undefined;
   return Object.freeze({
     provider: config.provider,
-    baseUrl: config.baseUrl,
+    ...(config.provider === "openai-compatible"
+      ? { baseUrl: config.baseUrl }
+      : {}),
     model: config.model,
-    contextLength: config.contextLength,
+    ...(legacyContextLength === undefined
+      ? {}
+      : { contextLength: legacyContextLength }),
+    ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
     ...(credential === undefined ? {} : { credential }),
   });
 }
@@ -165,17 +249,35 @@ export function publicAiReviewerProviderConfig(input) {
     });
   }
   const config = parseAiReviewerProviderConfig(input);
-  const endpoint = parseOpenAiCompatibleBaseUrl(config.baseUrl);
+  const credentialSet = typeof config.credential === "string";
+  const credentialUpdatedAt = config.credentialUpdatedAt ?? null;
+  const contextLengthSource = config.contextLengthSource ?? "override";
+  if (config.provider === "openai-compatible") {
+    const endpoint = parseOpenAiCompatibleBaseUrl(config.baseUrl);
+    return Object.freeze({
+      configured: true,
+      config: Object.freeze({
+        provider: config.provider,
+        baseUrl: config.baseUrl,
+        model: config.model,
+        contextLength: config.contextLength,
+        contextLengthSource,
+        credentialSet,
+        credentialUpdatedAt,
+      }),
+      classification: endpoint.classification,
+    });
+  }
   return Object.freeze({
     configured: true,
     config: Object.freeze({
       provider: config.provider,
-      baseUrl: config.baseUrl,
       model: config.model,
       contextLength: config.contextLength,
-      credentialSet: typeof config.credential === "string",
-      credentialUpdatedAt: config.credentialUpdatedAt ?? null,
+      contextLengthSource,
+      credentialSet,
+      credentialUpdatedAt,
     }),
-    classification: endpoint.classification,
+    classification: "remote",
   });
 }

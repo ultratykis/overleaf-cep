@@ -672,10 +672,15 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         isRetryable,
       });
       const gateway = createGateway(throwingModel(sdkError));
+      const error = await captureError(
+        collect(gateway.stream(projectRequest())),
+      );
 
-      expect(
-        await captureError(collect(gateway.stream(projectRequest()))),
-      ).toMatchObject(expected);
+      expect(error).toMatchObject(expected);
+      expect(error).toMatchObject({
+        providerStatusCode: statusCode ?? null,
+        providerErrorType: "AI_APICallError",
+      });
     },
   );
 
@@ -700,6 +705,8 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       code: "AI_PROVIDER_RATE_LIMITED",
       category: "rate-limit",
       retryable: true,
+      providerStatusCode: 429,
+      providerErrorType: "AI_APICallError",
     });
   });
 
@@ -720,6 +727,8 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       code: "AI_PROVIDER_SCHEMA_INVALID",
       category: "schema",
       retryable: false,
+      providerStatusCode: null,
+      providerErrorType: "AI_NoObjectGeneratedError",
       message: "The AI provider returned an invalid structured response.",
     });
   });
@@ -746,6 +755,8 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       code: "AI_PROVIDER_SCHEMA_INVALID",
       category: "schema",
       retryable: false,
+      providerStatusCode: null,
+      providerErrorType: "AI_NoObjectGeneratedError",
     });
     expect(String(error)).not.toContain(sentinel);
     expect(JSON.stringify(error)).not.toContain(sentinel);

@@ -297,7 +297,7 @@ function reviewActionLabel(
   }
 }
 
-function agentErrorMessage(
+function agentErrorGuidance(
   error: AgentError,
   t: TFunction<"translation">,
 ): string {
@@ -312,92 +312,56 @@ function agentErrorMessage(
       return t("ai_reviewer_error_guidance_network");
     case "configuration:AI_PROJECT_CONTENT_NOT_AVAILABLE":
       return t("ai_reviewer_error_guidance_project_content");
+    case "network:AI_STREAM_NETWORK_ERROR":
+    case "network:AI_HTTP_ERROR":
+    case "network:AI_STREAM_BODY_MISSING":
+    case "network:AI_STREAM_INCOMPLETE":
+      return t("ai_reviewer_error_guidance_stream");
     case "provider:AI_PROVIDER_ERROR":
       return t("ai_reviewer_error_guidance_provider");
     case "rate-limit:AI_PROVIDER_RATE_LIMITED":
       return t("ai_reviewer_error_guidance_rate_limit");
     case "schema:AI_STREAM_PROTOCOL_ERROR":
       return t("ai_reviewer_error_guidance_schema");
+    case "schema:AI_REQUEST_SCHEMA_INVALID":
+    case "schema:AI_REQUEST_PROJECT_MISMATCH":
+    case "schema:AI_STREAM_REQUEST_INVALID":
+    case "schema:AI_DISCUSSION_REQUEST_INVALID":
+      return t("ai_reviewer_error_guidance_request");
+    case "schema:AI_STREAM_AFTER_TERMINAL":
+      return t("ai_reviewer_error_guidance_after_terminal");
     case "timeout:AI_REQUEST_TIMEOUT":
       return t("ai_reviewer_error_guidance_timeout");
     case "unknown:AI_PROVIDER_ERROR":
       return t("ai_reviewer_error_unknown");
   }
 
-  switch (error.message) {
-    case "The AI reviewer request was cancelled.":
-      return t("ai_reviewer_error_request_cancelled");
-    case "The AI provider rejected its credentials.":
-      return t("ai_reviewer_error_provider_credentials_rejected");
-    case "No AI provider is configured.":
-      return t("ai_reviewer_error_provider_not_configured");
-    case "The AI provider could not be reached.":
-      return t("ai_reviewer_error_provider_unreachable");
-    case "The AI provider request failed.":
-      return t("ai_reviewer_error_provider_request_failed");
-    case "The AI provider rate limit was reached.":
-      return t("ai_reviewer_error_provider_rate_limited");
-    case "The AI provider returned invalid stream data.":
-      return t("ai_reviewer_error_provider_invalid_stream");
-    case "The AI reviewer request timed out.":
-      return t("ai_reviewer_error_request_timed_out");
-    case "The project content could not be read for review.":
-      return t("ai_reviewer_error_project_content_unavailable");
-    case "The AI reviewer request is invalid.":
-      return t("ai_reviewer_error_request_invalid");
-    case "The AI reviewer request does not match this project.":
-      return t("ai_reviewer_error_request_project_mismatch");
-    case "The AI reviewer stream could not be read.":
-      return t("ai_reviewer_error_stream_unreadable");
-    case "The AI reviewer returned data outside the requested document scope.":
-      return t("ai_reviewer_error_data_outside_document_scope");
-    case "The AI reviewer returned evidence for another document state.":
-      return t("ai_reviewer_error_evidence_document_state_mismatch");
-    case "The AI reviewer started with a different skill.":
-      return t("ai_reviewer_error_skill_mismatch");
-    case "The AI reviewer returned a finding for another project.":
-      return t("ai_reviewer_error_finding_project_mismatch");
-    case "The AI reviewer returned a suggestion outside the active request.":
-      return t("ai_reviewer_error_suggestion_request_mismatch");
-    case "A project review cannot return edit suggestions.":
-      return t("ai_reviewer_error_project_suggestion_not_allowed");
-    case "The AI reviewer returned a suggestion outside the requested document scope.":
-      return t("ai_reviewer_error_suggestion_outside_document_scope");
-    case "The AI reviewer returned an invalid stream type.":
-      return t("ai_reviewer_error_invalid_stream_type");
-    case "The AI reviewer returned an empty stream.":
-      return t("ai_reviewer_error_empty_stream");
-    case "The AI reviewer returned data after a terminal event.":
-      return t("ai_reviewer_error_data_after_terminal_event");
-    case "The AI reviewer returned malformed stream data.":
-      return t("ai_reviewer_error_malformed_stream_data");
-    case "The AI reviewer returned an invalid stream event.":
-      return t("ai_reviewer_error_invalid_stream_event");
-    case "The AI reviewer stream ended before completion.":
-      return t("ai_reviewer_error_stream_incomplete");
-    case "The AI reviewer request does not match the active project.":
-      return t("ai_reviewer_error_active_project_mismatch");
-    case "An open discussion cannot return edit suggestions.":
-      return t("ai_reviewer_error_open_discussion_suggestion_not_allowed");
-    case "A project discussion cannot return edit suggestions.":
-      return t("ai_reviewer_error_project_discussion_suggestion_not_allowed");
-    case "The AI reviewer returned a discussion suggestion outside the subject scope.":
-      return t("ai_reviewer_error_discussion_suggestion_outside_subject");
-    case "The AI reviewer discussion does not match the active project.":
-      return t("ai_reviewer_error_discussion_project_mismatch");
+  switch (error.category) {
+    case "aborted":
+      return t("ai_reviewer_error_guidance_aborted");
+    case "authentication":
+      return t("ai_reviewer_error_guidance_authentication");
+    case "configuration":
+      return t("ai_reviewer_error_guidance_configuration");
+    case "network":
+      return t("ai_reviewer_error_guidance_network");
+    case "provider":
+      return t("ai_reviewer_error_guidance_provider");
+    case "rate-limit":
+      return t("ai_reviewer_error_guidance_rate_limit");
+    case "schema":
+      return t("ai_reviewer_error_guidance_schema");
+    case "timeout":
+      return t("ai_reviewer_error_guidance_timeout");
+    case "unknown":
+    default:
+      return t("ai_reviewer_error_unknown");
   }
-  const httpStatus = error.message.match(
-    /^The AI reviewer request failed with HTTP ([0-9]+)\.$/,
-  )?.[1];
-  if (httpStatus != null) {
-    return t("ai_reviewer_error_http_status", { status: httpStatus });
-  }
-  return t("ai_reviewer_error_detail", { message: error.message });
 }
 
-function streamErrorMessage(error: unknown, t: TFunction<"translation">) {
+function streamErrorGuidance(error: unknown, t: TFunction<"translation">) {
   return error instanceof AgentStreamError
-    ? agentErrorMessage(error.details, t)
+    ? agentErrorGuidance(error.details, t)
     : t("ai_reviewer_error_request_failed");
 }
 
@@ -1647,7 +1611,7 @@ export function AiReviewerPanelView({
                 ...event,
                 error: {
                   ...event.error,
-                  message: agentErrorMessage(event.error, t),
+                  message: agentErrorGuidance(event.error, t),
                 },
               }
             : event;
@@ -1702,7 +1666,7 @@ export function AiReviewerPanelView({
           error instanceof AgentStreamError
             ? error.details.code
             : "AI_WORKSPACE_STREAM_FAILED",
-          streamErrorMessage(error, t),
+          streamErrorGuidance(error, t),
         );
       } finally {
         if (activeRun.current === run) {
@@ -2802,7 +2766,7 @@ export function AiReviewerPanelView({
               ? {
                   ...candidate,
                   status: "error",
-                  error: agentErrorMessage(event.error, t),
+                  error: agentErrorGuidance(event.error, t),
                   updatedAt: now(),
                 }
               : candidate,
@@ -2855,7 +2819,7 @@ export function AiReviewerPanelView({
         ) {
           return;
         }
-        failDiscussionRequest(active, streamErrorMessage(error, t));
+        failDiscussionRequest(active, streamErrorGuidance(error, t));
       })
       .finally(() => {
         if (activeDiscussionRequest.current === active) {

@@ -17,6 +17,37 @@ import {
  * } from '../../shared/contract-types'
  */
 
+const PROVIDER_ERROR_TYPES = new Set([
+  "AI_APICallError",
+  "AI_InvalidResponseDataError",
+  "AI_InvalidToolInputError",
+  "AI_LoadAPIKeyError",
+  "AI_LoadSettingError",
+  "AI_NoObjectGeneratedError",
+  "AI_NoOutputGeneratedError",
+  "AI_NoSuchModelError",
+  "AI_NoSuchToolError",
+  "AI_RetryError",
+  "AI_TypeValidationError",
+]);
+
+/** @param {unknown} value */
+export function safeProviderStatusCode(value) {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 100 &&
+    value <= 599
+    ? value
+    : null;
+}
+
+/** @param {unknown} value */
+export function safeProviderErrorType(value) {
+  return typeof value === "string" && PROVIDER_ERROR_TYPES.has(value)
+    ? value
+    : null;
+}
+
 export class AgentGatewayError extends Error {
   /**
    * @param {string} message
@@ -26,14 +57,21 @@ export class AgentGatewayError extends Error {
    *     'provider' | 'rate-limit' | 'schema' | 'timeout' | 'unknown',
    *   retryable: boolean,
    *   cause?: unknown,
+   *   providerStatusCode?: unknown,
+   *   providerErrorType?: unknown,
    * }} details
    */
-  constructor(message, { code, category, retryable, cause }) {
+  constructor(
+    message,
+    { code, category, retryable, cause, providerStatusCode, providerErrorType },
+  ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "AgentGatewayError";
     this.code = code;
     this.category = category;
     this.retryable = retryable;
+    this.providerStatusCode = safeProviderStatusCode(providerStatusCode);
+    this.providerErrorType = safeProviderErrorType(providerErrorType);
   }
 }
 

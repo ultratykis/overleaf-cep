@@ -1,45 +1,47 @@
 # AI Reviewer module
 
-This private module is the isolated home of the local, project-aware Overleaf
-reviewer. Phase 0 provides runtime contracts, a deterministic fake gateway, and
-synthetic fixtures. It does not expose an HTTP route, UI, provider connection,
-or background scan.
+このモジュールは、プロジェクトを参照するローカルなAI Reviewerの製品責務をホストから分離する。
 
-## Feature flag
+選択範囲、現在の文書、プロジェクト全体の査読、成果物の確認と適用、議論、保存、接続設定、引用点検、Zotero参照を扱う。
 
-The module is off by default. It is absent from `moduleImportSequence` unless
-the following value is set before the web process starts:
+## 有効化
+
+機能は既定で無効である。
+
+Webプロセスの開始前に次を設定した場合だけ有効になる。
 
 ```sh
 OVERLEAF_AI_REVIEWER_ENABLED=true
 ```
 
-Only case-insensitive `true` and `false` are accepted. Empty or unset values
-mean false; ambiguous values fail during settings loading.
+値は大文字小文字を区別しない`true`または`false`だけを受け付ける。
 
-When disabled, neither this module's entry point nor an enabled shell is
-imported by Overleaf. The entry point independently checks the parsed setting
-as defense in depth.
+未設定または空の値は無効として扱い、曖昧な値は設定読込時に拒否する。
 
-## Current layout
+無効時は、バックエンドのモジュールと有効時の処理を読み込まない。
 
-- `shared/contracts.mjs`: strict runtime schemas for requests, streamed events,
-  findings, evidence, and suggestions.
-- `shared/contract-types.ts`: TypeScript types derived from the runtime schemas.
-- `app/src/AgentGateway.mjs`: classified gateway errors and the deterministic
-  scripted fake.
-- `test/fixtures/synthetic/`: manuscript-free LaTeX, bibliography, stale-edit,
-  and Zotero-linked fixtures.
-- `docs/architecture.md`: host extension map and component boundaries.
-- `docs/upstream-sync.md`: upstream patch-stack rehearsal.
+## 設計資料
 
-## Focused verification
+- 製品範囲と安全境界：`../../../../.loop/SPEC.md`
+- 利用者から見える振る舞い：`../../../../.loop/PRODUCT_DESIGN.md`
+- provider内部設計：`../../../../.loop/ARCHITECTURE.md`
+- 既存状態の移行：`../../../../.loop/MIGRATION.md`
+- 採用済み決定：`../../../../.loop/DECISIONS.md`
+- 機能到達状況：`../../../../.loop/CAPABILITY_STATUS.md`
+- 技術状態：`../../../../.loop/STATE.md`
+- 検証契約：`../../../../.loop/EVALS.md`
+
+現在のモデル通信、型、保存形式、利用SDKは移行対象であり、採用済みの`ARCHITECTURE.md`より優先しない。
+
+ホストとの現在の接続境界は`docs/architecture.md`に記録する。
+
+上流更新の手順は`docs/upstream-sync.md`に記録する。
+
+## 基本確認
 
 ```sh
-PATH=/opt/homebrew/opt/node@24/bin:$PATH \
-  yarn --cwd services/web test:unit:run_dir \
+yarn --cwd services/web test:unit:run_dir \
   modules/ai-reviewer/test/unit/src
 ```
 
-The fake gateway does not read time, randomness, files, network state, or real
-project data. Tests control its event sequence and cancellation checkpoints.
+変更内容に応じた確認範囲は`../../../../.loop/EVALS.md`に従う。

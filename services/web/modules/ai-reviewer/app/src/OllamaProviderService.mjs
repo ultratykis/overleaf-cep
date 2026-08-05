@@ -1,9 +1,18 @@
 // @ts-check
 
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
-import { parseAiReviewerProviderConfig } from "./AiReviewerProviderConfig.mjs";
+import {
+  parseAiReviewerProviderConfig,
+  parseAiReviewerProviderConfigUpdate,
+} from "./AiReviewerProviderConfig.mjs";
+import { resolveModelContextLength } from "./ModelContextLength.mjs";
 import { parseOpenAiCompatibleBaseUrl } from "./OllamaEndpointPolicy.mjs";
-import { OllamaOpenAiTransport } from "./OllamaOpenAiTransport.mjs";
+import {
+  ClaudeAiSdkTransport,
+  detectOpenAiCompatibleContextLength,
+  GeminiAiSdkTransport,
+  OllamaOpenAiTransport,
+} from "./OllamaOpenAiTransport.mjs";
 
 /** @param {AbortSignal | undefined} signal */
 function throwIfAborted(signal) {
@@ -27,7 +36,7 @@ function assertCompatible(result) {
     typeof value.usage !== "object"
   ) {
     throw new AgentGatewayError(
-      "The OpenAI-compatible provider failed the compatibility check.",
+      "The AI provider failed the compatibility check.",
       {
         code: "AI_PROVIDER_COMPATIBILITY_FAILED",
         category: "provider",
@@ -37,14 +46,80 @@ function assertCompatible(result) {
   }
 }
 
+/** @param {ReturnType<typeof parseAiReviewerProviderConfig>} config */
+function requireNativeCredential(config) {
+  if (
+    config.provider !== "openai-compatible" &&
+    typeof config.credential !== "string"
+  ) {
+    throw new AgentGatewayError("The AI provider credential is required.", {
+      code: "AI_PROVIDER_NOT_CONFIGURED",
+      category: "configuration",
+      retryable: false,
+    });
+  }
+  return config.credential;
+}
+
 /** @param {any} [dependencies] */
-export function createOllamaProviderService(dependencies = {}) {
-  const transportFactory =
+export function createAiReviewerProviderService(dependencies = {}) {
+  const contextLengthDetector =
+    dependencies.contextLengthDetector ?? detectOpenAiCompatibleContextLength;
+  const contextLengthDetectionSignalFactory =
+    dependencies.contextLengthDetectionSignalFactory ??
+    (() => AbortSignal.timeout(5_000));
+  const openAiCompatibleTransportFactory =
+    dependencies.openAiCompatibleTransportFactory ??
     dependencies.transportFactory ??
     ((
       /** @type {{ baseUrl: string, credential?: string, modelTag: string }} */ options,
     ) => new OllamaOpenAiTransport(options));
+  const geminiTransportFactory =
+    dependencies.geminiTransportFactory ??
+    ((/** @type {{ credential: string, modelTag: string }} */ options) =>
+      new GeminiAiSdkTransport(options));
+  const claudeTransportFactory =
+    dependencies.claudeTransportFactory ??
+    ((/** @type {{ credential: string, modelTag: string }} */ options) =>
+      new ClaudeAiSdkTransport(options));
+
+  /** @param {ReturnType<typeof parseAiReviewerProviderConfig>} config */
+  function createTransport(config) {
+    switch (config.provider) {
+      case "openai-compatible":
+        return openAiCompatibleTransportFactory({
+          baseUrl: config.baseUrl,
+          credential: config.credential ?? undefined,
+          modelTag: config.model,
+        });
+      case "gemini":
+        return geminiTransportFactory({
+          credential: requireNativeCredential(config),
+          modelTag: config.model,
+        });
+      case "claude":
+        return claudeTransportFactory({
+          credential: requireNativeCredential(config),
+          modelTag: config.model,
+        });
+    }
+  }
+
   return {
+    /**
+     * @param {unknown} input
+     */
+    async resolveContextLength(input) {
+      const config = parseAiReviewerProviderConfigUpdate(input);
+      return await resolveModelContextLength(config, {
+        detectOpenAiCompatibleContextLength: async (candidate) =>
+          await contextLengthDetector({
+            ...candidate,
+            signal: contextLengthDetectionSignalFactory(),
+          }),
+      });
+    },
+
     /**
      * @param {unknown} input
      * @param {{ signal?: AbortSignal }} [options]
@@ -52,11 +127,7 @@ export function createOllamaProviderService(dependencies = {}) {
     async testConnection(input, { signal } = {}) {
       throwIfAborted(signal);
       const config = parseAiReviewerProviderConfig(input);
-      const transport = transportFactory({
-        baseUrl: config.baseUrl,
-        credential: config.credential ?? undefined,
-        modelTag: config.model,
-      });
+      const transport = createTransport(config);
       const result = await transport.generateChat(
         {
           prompt: "Return exactly COMPAT_OK and nothing else.",
@@ -67,10 +138,12 @@ export function createOllamaProviderService(dependencies = {}) {
       assertCompatible(result);
       return Object.freeze({
         ok: true,
-        provider: "openai-compatible",
+        provider: config.provider,
         model: config.model,
-        classification: parseOpenAiCompatibleBaseUrl(config.baseUrl)
-          .classification,
+        classification:
+          config.provider === "openai-compatible"
+            ? parseOpenAiCompatibleBaseUrl(config.baseUrl).classification
+            : "remote",
       });
     },
 
@@ -79,11 +152,7 @@ export function createOllamaProviderService(dependencies = {}) {
      */
     createDiscussionGateway(input) {
       const config = parseAiReviewerProviderConfig(input);
-      return transportFactory({
-        baseUrl: config.baseUrl,
-        credential: config.credential ?? undefined,
-        modelTag: config.model,
-      }).createDiscussionGateway({
+      return createTransport(config).createDiscussionGateway({
         contextLength: config.contextLength,
       });
     },
@@ -105,11 +174,7 @@ export function createOllamaProviderService(dependencies = {}) {
       if (typeof readProjectFile !== "function") {
         throw new TypeError("readProjectFile must be a function.");
       }
-      return transportFactory({
-        baseUrl: config.baseUrl,
-        credential: config.credential ?? undefined,
-        modelTag: config.model,
-      }).createAgentGateway({
+      return createTransport(config).createAgentGateway({
         contextLength: config.contextLength,
         readProjectFile,
         projectContext,
@@ -119,3 +184,5 @@ export function createOllamaProviderService(dependencies = {}) {
     },
   };
 }
+
+export const createOllamaProviderService = createAiReviewerProviderService;

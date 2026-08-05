@@ -8,7 +8,7 @@ export const AiReviewerProviderConfigSchema = new mongoose.Schema(
   {
     _id: { type: ObjectId, ref: "User", required: true },
     provider: { type: String, required: true },
-    baseUrl: { type: String, required: true },
+    baseUrl: { type: String },
     model: { type: String, required: true },
     credentialEncrypted: { type: String },
     credentialUpdatedAt: { type: Date },
@@ -22,6 +22,8 @@ export const AiReviewerProviderConfigSchema = new mongoose.Schema(
         message: "revision must be a non-negative safe integer.",
       },
     },
+    // This is the server-resolved effective value consumed by the prompt
+    // budget, not a required field in the public write contract.
     contextLength: {
       type: Number,
       required: true,
@@ -31,6 +33,10 @@ export const AiReviewerProviderConfigSchema = new mongoose.Schema(
         validator: Number.isSafeInteger,
         message: "contextLength must be a positive safe integer.",
       },
+    },
+    contextLengthSource: {
+      type: String,
+      enum: ["derived", "detected", "default", "override"],
     },
   },
   {

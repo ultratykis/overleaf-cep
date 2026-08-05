@@ -2,7 +2,8 @@
 
 import { AccessTokenEncryptor } from "../../../zotero/app/src/AccessTokenEncryptorHelper.mjs";
 
-const ENVELOPE_KEYS = ["baseUrl", "credential", "provider"];
+const NATIVE_ENVELOPE_KEYS = ["credential", "provider"];
+const OPENAI_COMPATIBLE_ENVELOPE_KEYS = ["baseUrl", "credential", "provider"];
 
 function credentialError() {
   return new TypeError("The AI provider credential could not be read.");
@@ -21,13 +22,25 @@ function exactEnvelope(input) {
   }
   const value = /** @type {Record<string, unknown>} */ (input);
   const keys = Object.keys(value).sort();
+  if (typeof value.credential !== "string" || value.credential.length === 0) {
+    throw credentialError();
+  }
+  if (value.provider === "openai-compatible") {
+    if (
+      keys.length !== OPENAI_COMPATIBLE_ENVELOPE_KEYS.length ||
+      keys.some(
+        (key, index) => key !== OPENAI_COMPATIBLE_ENVELOPE_KEYS[index],
+      ) ||
+      typeof value.baseUrl !== "string"
+    ) {
+      throw credentialError();
+    }
+    return value;
+  }
   if (
-    keys.length !== ENVELOPE_KEYS.length ||
-    keys.some((key, index) => key !== ENVELOPE_KEYS[index]) ||
-    value.provider !== "openai-compatible" ||
-    typeof value.baseUrl !== "string" ||
-    typeof value.credential !== "string" ||
-    value.credential.length === 0
+    (value.provider !== "gemini" && value.provider !== "claude") ||
+    keys.length !== NATIVE_ENVELOPE_KEYS.length ||
+    keys.some((key, index) => key !== NATIVE_ENVELOPE_KEYS[index])
   ) {
     throw credentialError();
   }
@@ -45,18 +58,25 @@ export function createAiReviewerProviderCredentialManager({
   return Object.freeze({
     /**
      * @param {{
-     *   provider: "openai-compatible",
-     *   baseUrl: string,
+     *   provider: "openai-compatible" | "gemini" | "claude",
+     *   baseUrl?: string,
      *   credential: string,
      * }} input
      */
     async encrypt(input) {
       try {
-        const encrypted = await encryptor.encryptJson({
-          provider: input.provider,
-          baseUrl: input.baseUrl,
-          credential: input.credential,
-        });
+        const envelope =
+          input.provider === "openai-compatible"
+            ? {
+                provider: input.provider,
+                baseUrl: input.baseUrl,
+                credential: input.credential,
+              }
+            : {
+                provider: input.provider,
+                credential: input.credential,
+              };
+        const encrypted = await encryptor.encryptJson(envelope);
         if (typeof encrypted !== "string" || encrypted.length === 0) {
           throw credentialError();
         }
@@ -68,7 +88,10 @@ export function createAiReviewerProviderCredentialManager({
 
     /**
      * @param {unknown} encrypted
-     * @param {{ provider: "openai-compatible", baseUrl: string }} destination
+     * @param {{
+     *   provider: "openai-compatible" | "gemini" | "claude",
+     *   baseUrl?: string,
+     * }} destination
      */
     async decrypt(encrypted, destination) {
       if (typeof encrypted !== "string" || encrypted.length === 0) {
@@ -80,7 +103,8 @@ export function createAiReviewerProviderCredentialManager({
         );
         if (
           envelope.provider !== destination.provider ||
-          envelope.baseUrl !== destination.baseUrl
+          (destination.provider === "openai-compatible" &&
+            envelope.baseUrl !== destination.baseUrl)
         ) {
           throw credentialError();
         }

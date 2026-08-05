@@ -2,6 +2,11 @@
 
 import logger from "@overleaf/logger";
 
+import {
+  safeProviderErrorType,
+  safeProviderStatusCode,
+} from "./AgentGateway.mjs";
+
 export const AI_REVIEWER_FAILURE_LOG_MESSAGE = "AI reviewer request failed";
 
 /**
@@ -10,13 +15,15 @@ export const AI_REVIEWER_FAILURE_LOG_MESSAGE = "AI reviewer request failed";
  * or raw error fields.
  *
  * @param {{
- *   requestId: string,
+ *   requestId: string | null,
  *   provider: string | null,
  *   model: string | null,
  *   scopeKind: 'selection' | 'document' | 'project' | 'none',
  *   failureCategory: 'aborted' | 'authentication' | 'configuration' |
  *     'network' | 'provider' | 'rate-limit' | 'schema' | 'timeout' | 'unknown',
  *   failureCode: string,
+ *   providerStatusCode: unknown,
+ *   providerErrorType: unknown,
  *   elapsedMs: number,
  * }} record
  */
@@ -29,6 +36,8 @@ export function recordAiReviewerFailure(record) {
       scopeKind: record.scopeKind,
       failureCategory: record.failureCategory,
       failureCode: record.failureCode,
+      providerStatusCode: safeProviderStatusCode(record.providerStatusCode),
+      providerErrorType: safeProviderErrorType(record.providerErrorType),
       elapsedMs: record.elapsedMs,
     },
     AI_REVIEWER_FAILURE_LOG_MESSAGE,

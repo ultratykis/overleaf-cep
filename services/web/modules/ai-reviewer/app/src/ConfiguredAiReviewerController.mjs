@@ -14,7 +14,7 @@ import { createAiReviewerProviderConfigStore } from "./AiReviewerProviderConfigS
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
-import { createOllamaProviderService } from "./OllamaProviderService.mjs";
+import { createAiReviewerProviderService } from "./OllamaProviderService.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
 import {
   authenticatedUserId,
@@ -141,8 +141,10 @@ async function loadProjectDocuments(projectId, { signal } = {}) {
   );
 }
 
-const configStore = createAiReviewerProviderConfigStore();
-const providerService = createOllamaProviderService();
+const providerService = createAiReviewerProviderService();
+const configStore = createAiReviewerProviderConfigStore({
+  resolveContextLength: providerService.resolveContextLength,
+});
 const requestScopeReader = createRequestScopeReader({
   loadProjectDocuments,
   isZoteroLinked(userId) {
@@ -158,6 +160,7 @@ const requestScopeReader = createRequestScopeReader({
 const providerController = createAiReviewerProviderController({
   configStore,
   providerService,
+  failureRecorder: recordAiReviewerFailure,
 });
 const configuredController = createConfiguredAiReviewerController({
   configStore,

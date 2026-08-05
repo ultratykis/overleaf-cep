@@ -1,62 +1,57 @@
-# AI Reviewer host boundary
+# AI Reviewerのホスト接続境界
 
-## Module boundary
+## 文書の責務
 
-Product logic stays under `services/web/modules/ai-reviewer/`. Core changes are
-limited to explicit host registrations and non-secret availability state.
+この文書は、AI ReviewerとOverleaf本体の現在の接続境界を記録する。
 
-| Concern          | Host extension point                                                      | Module rule                                                                                          |
-| ---------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Backend loading  | `config/settings.defaults.js` and `app/src/infrastructure/Modules.mjs`    | Omit the module from `moduleImportSequence` while disabled.                                          |
-| Backend routes   | A module router's `apply` method                                          | Guard each Express router instance because core applies module routers three times.                  |
-| Integrations     | `overleafModuleImports.integrationPanelComponents`                        | Register a small shell; lazy-load provider settings.                                                 |
-| Editor workspace | `overleafModuleImports.railEntries`                                       | Register a small rail entry; lazy-load review and diff UI.                                           |
-| Inline findings  | `overleafModuleImports.sourceEditorExtensions`                            | Keep an inert extension while disabled and store AI decorations separately from compile annotations. |
-| Editor access    | `EditorViewContext`, `EditorSelectionContext`, and `EditorManagerContext` | Read the active document through existing contexts.                                                  |
-| Accepted edits   | CodeMirror `view.dispatch` and the existing realtime extension            | Revalidate first, then use one normal history-bearing transaction.                                   |
-| Project reads    | `ProjectGetter`, `ProjectEntityHandler`, and `DocumentUpdater`            | Expose bounded, authenticated, project-relative read tools only.                                     |
-| Compile evidence | Parsed frontend compile log entries                                       | Send only bounded diagnostics and revalidate every file/range.                                       |
-| Zotero           | Existing Zotero module and linked-file metadata                           | Reuse server-side credentials; treat linked bibliographies as managed and read-only.                 |
+provider最終設計、製品上の振る舞い、機能の完成状況は定めない。
 
-## Phase 0 data flow
+採用済みとなったprovider最終設計は`../../../../../.loop/ARCHITECTURE.md`を正本とする。
 
-```text
-synthetic AgentRequest
-        |
-        v
-AgentRequestSchema
-        |
-        v
-ScriptedFakeAgentGateway
-        |
-        v
-AgentEventSchema
-        |
-        +--> FindingSchema --> evidence anchors
-        |
-        +--> SuggestionSchema --> read-only proposal
-```
+## 境界
 
-No Phase 0 path writes a document. Suggestions carry project, document, path,
-base revision, base hash, range, original text, replacement text, rationale,
-evidence, provider, model, skill, creation time, and status.
+AI Reviewer固有の製品責務はモジュール内に置く。
 
-## Mutation boundary
+ホスト側では、次の既存能力との接続だけを扱う。
 
-Later acceptance must synchronously revalidate:
+- 機能の有効化とモジュール登録
+- 認証とプロジェクト権限
+- Integrations内の接続設定
+- エディタの対象読取、範囲選択、差分表示、承認済み変更
+- 通常の編集履歴と共同編集
+- Review panelへの通常コメント投稿とAI由来表示
+- プロジェクト内容の上限付き読取
+- 参考文献情報とZotero認証情報の読み取り専用利用
+- 利用者とプロジェクトに分離された個人作業領域
 
-1. project, document, and path identity;
-2. live document revision and text hash;
-3. the proposed range and its original text;
-4. permissions, connection state, and editor read-only state.
+ホスト側は、モデル固有の要求形式、応答形式、成果物生成方式、再試行規則を所有しない。
 
-Only a passing proposal may enter a CodeMirror transaction. The backend never
-receives an unguarded document-write tool, and AI suggestions are not persisted
-as synthetic track changes.
+## 有効化境界
 
-## Loading boundary
+機能が無効な場合、バックエンドのモジュール登録を省き、画面側は有効時の処理を起動しない。
 
-Backend feature-off mode omits the module import entirely. Frontend entries
-added in Phase 1 remain thin compile-time shells, with review workspace, diff
-rendering, and provider code behind dynamic imports. Ordinary typing must not
-start a project scan or provider request.
+通常の入力、編集、コンパイルは、AI Reviewerの査読やプロジェクト読取を開始しない。
+
+## 読取境界
+
+選択範囲と現在の文書は、利用者が開始した処理の対象としてだけ読み取る。
+
+プロジェクト全体の査読は、認可済みのプロジェクトから必要な内容だけを上限付きで読み取る。
+
+モデルが指定した場所は、捕捉済みのプロジェクト情報と照合してから利用する。
+
+## 変更境界
+
+モデルへ無制限の文書変更能力を渡さない。
+
+修正案は分離した提案として保持し、利用者の承認後に対象、版、内容、範囲、権限を同期的に再確認する。
+
+確認を通過した変更だけを、通常の編集履歴と共同編集の経路へ渡す。
+
+## provider再設計との関係
+
+現在のモデル実行経路は、既存挙動を観測する対象であり、互換性維持の対象ではない。
+
+将来のホスト境界を拘束する決定は、`../../../../../.loop/DECISIONS.md`の`D-HOST-BOUNDARY`が所有する。
+
+この文書は現在の境界だけを記録し、採用済み決定を独自に拡張しない。

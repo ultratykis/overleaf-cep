@@ -314,21 +314,59 @@ const MAX_SDK_STREAM_BLOCKS = 100;
 const MAX_SDK_STREAM_CHARACTERS = 100_000;
 const MAX_SDK_STREAM_ID_CHARACTERS = 256;
 const MAX_SDK_WARNING_ENTRIES = 512;
+const DEFAULT_PROVIDER_OPTIONS = Object.freeze({
+  openai: Object.freeze({
+    reasoningEffort: "none",
+  }),
+});
 const SDK_ERROR_MARKERS = Object.freeze({
-  apiCall: Symbol.for("vercel.ai.error.AI_APICallError"),
+  apiCall: Object.freeze({
+    marker: Symbol.for("vercel.ai.error.AI_APICallError"),
+    type: "AI_APICallError",
+  }),
   configuration: Object.freeze([
-    Symbol.for("vercel.ai.error.AI_LoadAPIKeyError"),
-    Symbol.for("vercel.ai.error.AI_LoadSettingError"),
-    Symbol.for("vercel.ai.error.AI_NoSuchModelError"),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_LoadAPIKeyError"),
+      type: "AI_LoadAPIKeyError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_LoadSettingError"),
+      type: "AI_LoadSettingError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_NoSuchModelError"),
+      type: "AI_NoSuchModelError",
+    }),
   ]),
-  retry: Symbol.for("vercel.ai.error.AI_RetryError"),
+  retry: Object.freeze({
+    marker: Symbol.for("vercel.ai.error.AI_RetryError"),
+    type: "AI_RetryError",
+  }),
   schema: Object.freeze([
-    Symbol.for("vercel.ai.error.AI_InvalidResponseDataError"),
-    Symbol.for("vercel.ai.error.AI_InvalidToolInputError"),
-    Symbol.for("vercel.ai.error.AI_NoSuchToolError"),
-    Symbol.for("vercel.ai.error.AI_TypeValidationError"),
-    Symbol.for("vercel.ai.error.AI_NoObjectGeneratedError"),
-    Symbol.for("vercel.ai.error.AI_NoOutputGeneratedError"),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_InvalidResponseDataError"),
+      type: "AI_InvalidResponseDataError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_InvalidToolInputError"),
+      type: "AI_InvalidToolInputError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_NoSuchToolError"),
+      type: "AI_NoSuchToolError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_TypeValidationError"),
+      type: "AI_TypeValidationError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_NoObjectGeneratedError"),
+      type: "AI_NoObjectGeneratedError",
+    }),
+    Object.freeze({
+      marker: Symbol.for("vercel.ai.error.AI_NoOutputGeneratedError"),
+      type: "AI_NoOutputGeneratedError",
+    }),
   ]),
 });
 
@@ -1518,11 +1556,19 @@ function throwIfSdkSignalAborted(signal) {
   }
 }
 
-function providerFailedError() {
+/**
+ * @param {{
+ *   providerStatusCode?: unknown,
+ *   providerErrorType?: unknown,
+ * }} [diagnostics]
+ */
+function providerFailedError(diagnostics = {}) {
   return gatewayError("The AI provider failed.", {
     code: "AI_PROVIDER_FAILED",
     category: "provider",
     retryable: true,
+    providerStatusCode: diagnostics.providerStatusCode,
+    providerErrorType: diagnostics.providerErrorType,
   });
 }
 
@@ -1531,6 +1577,7 @@ function retryExhaustedError() {
     code: "AI_PROVIDER_RETRY_EXHAUSTED",
     category: "network",
     retryable: true,
+    providerErrorType: SDK_ERROR_MARKERS.retry.type,
   });
 }
 
@@ -1546,8 +1593,8 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
     return abortErrorForSignal(signal);
   }
 
-  for (const marker of SDK_ERROR_MARKERS.configuration) {
-    const matched = hasSdkErrorMarker(error, marker, signal);
+  for (const sdkError of SDK_ERROR_MARKERS.configuration) {
+    const matched = hasSdkErrorMarker(error, sdkError.marker, signal);
     if (signal?.aborted) {
       return abortErrorForSignal(signal);
     }
@@ -1556,13 +1603,14 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
         code: "AI_PROVIDER_NOT_CONFIGURED",
         category: "configuration",
         retryable: false,
+        providerErrorType: sdkError.type,
       });
     }
   }
 
   const isApiCallError = hasSdkErrorMarker(
     error,
-    SDK_ERROR_MARKERS.apiCall,
+    SDK_ERROR_MARKERS.apiCall.marker,
     signal,
   );
   if (signal?.aborted) {
@@ -1574,7 +1622,9 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
       return abortErrorForSignal(signal);
     }
     if (!statusResult.ok) {
-      return providerFailedError();
+      return providerFailedError({
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
+      });
     }
     const statusCode = statusResult.value;
     const retryableResult = readSdkProperty(error, "isRetryable");
@@ -1582,7 +1632,10 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
       return abortErrorForSignal(signal);
     }
     if (!retryableResult.ok) {
-      return providerFailedError();
+      return providerFailedError({
+        providerStatusCode: statusCode,
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
+      });
     }
     const retryable = retryableResult.value === true;
     if (statusCode === 401 || statusCode === 403) {
@@ -1590,6 +1643,8 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
         code: "AI_PROVIDER_AUTHENTICATION_FAILED",
         category: "authentication",
         retryable: false,
+        providerStatusCode: statusCode,
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
       });
     }
     if (statusCode === 429) {
@@ -1597,6 +1652,8 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
         code: "AI_PROVIDER_RATE_LIMITED",
         category: "rate-limit",
         retryable: true,
+        providerStatusCode: statusCode,
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
       });
     }
     if (
@@ -1606,24 +1663,31 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
         statusCode < 100 ||
         statusCode > 599)
     ) {
-      return providerFailedError();
+      return providerFailedError({
+        providerStatusCode: statusCode,
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
+      });
     }
     if (statusCode == null) {
       return gatewayError("The AI provider request failed.", {
         code: "AI_PROVIDER_NETWORK_FAILED",
         category: "network",
         retryable,
+        providerStatusCode: statusCode,
+        providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
       });
     }
     return gatewayError("The AI provider rejected the request.", {
       code: "AI_PROVIDER_REQUEST_FAILED",
       category: "provider",
       retryable,
+      providerStatusCode: statusCode,
+      providerErrorType: SDK_ERROR_MARKERS.apiCall.type,
     });
   }
 
-  for (const marker of SDK_ERROR_MARKERS.schema) {
-    const matched = hasSdkErrorMarker(error, marker, signal);
+  for (const sdkError of SDK_ERROR_MARKERS.schema) {
+    const matched = hasSdkErrorMarker(error, sdkError.marker, signal);
     if (signal?.aborted) {
       return abortErrorForSignal(signal);
     }
@@ -1634,6 +1698,7 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
           code: "AI_PROVIDER_SCHEMA_INVALID",
           category: "schema",
           retryable: false,
+          providerErrorType: sdkError.type,
         },
       );
     }
@@ -1641,7 +1706,7 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
 
   const isRetryError = hasSdkErrorMarker(
     error,
-    SDK_ERROR_MARKERS.retry,
+    SDK_ERROR_MARKERS.retry.marker,
     signal,
   );
   if (signal?.aborted) {
@@ -1804,6 +1869,7 @@ export class AiSdkAgentGateway {
    *   model: object,
    *   provider: string,
    *   modelId: string,
+   *   providerOptions?: Readonly<Record<string, unknown>>,
    *   contextLength: unknown,
    *   readProjectFile: (
    *     input: z.infer<typeof ReadProjectFileArgumentsSchema>,
@@ -1826,6 +1892,7 @@ export class AiSdkAgentGateway {
     model,
     provider,
     modelId,
+    providerOptions = DEFAULT_PROVIDER_OPTIONS,
     contextLength,
     readProjectFile,
     projectContext,
@@ -1857,6 +1924,13 @@ export class AiSdkAgentGateway {
     if (typeof modelId !== "string" || modelId.length === 0) {
       throw new TypeError("modelId must be a non-empty string.");
     }
+    if (
+      providerOptions == null ||
+      typeof providerOptions !== "object" ||
+      Array.isArray(providerOptions)
+    ) {
+      throw new TypeError("providerOptions must be an object.");
+    }
     const maxModelInputCharacters = modelInputCharacterBudget(contextLength);
     if (typeof readProjectFile !== "function") {
       throw new TypeError("readProjectFile must be a function.");
@@ -1873,6 +1947,7 @@ export class AiSdkAgentGateway {
     this.model = withoutProviderWarnings(model);
     this.provider = provider;
     this.modelId = modelId;
+    this.providerOptions = providerOptions;
     this.maxModelInputCharacters = maxModelInputCharacters;
     this.readProjectFile = readProjectFile;
     this.projectContext = projectContext;
@@ -2078,11 +2153,7 @@ export class AiSdkAgentGateway {
         prompt,
         abortSignal: signal,
         maxRetries: 0,
-        providerOptions: {
-          openai: {
-            reasoningEffort: "none",
-          },
-        },
+        providerOptions: /** @type {never} */ (this.providerOptions),
         stopWhen: [
           stepCountIs(request.scope.kind === "project" ? 4 : 2),
           () => terminalToolPolicyError != null || terminalToolExecutionFailed,
@@ -2550,11 +2621,7 @@ export class AiSdkAgentGateway {
         prompt,
         abortSignal: signal,
         maxRetries: 0,
-        providerOptions: {
-          openai: {
-            reasoningEffort: "none",
-          },
-        },
+        providerOptions: /** @type {never} */ (this.providerOptions),
         stopWhen: [
           stepCountIs(1),
           () => terminalToolPolicyError != null || terminalToolExecutionFailed,

@@ -46,6 +46,75 @@
   }
 }
 
+.ai-reviewer-provider-settings {
+  min-width: 0;
+  box-sizing: border-box;
+
+  .modal-content,
+  .focus-trap-container,
+  .ai-reviewer-provider-settings-form,
+  .ai-reviewer-provider-settings-header,
+  .ai-reviewer-provider-settings-body,
+  .ai-reviewer-provider-settings-footer,
+  .ai-reviewer-provider-settings-field,
+  .ai-reviewer-provider-settings-details,
+  .ai-reviewer-provider-advanced,
+  .ai-reviewer-provider-advanced-summary,
+  .ai-reviewer-provider-advanced-content,
+  .ai-reviewer-provider-advanced-help {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .ai-reviewer-provider-settings-header {
+    gap: var(--spacing-02);
+  }
+
+  .modal-title,
+  .form-label,
+  .ai-reviewer-provider-settings-details,
+  .ai-reviewer-provider-settings-details > *,
+  .ai-reviewer-provider-advanced-summary,
+  .ai-reviewer-provider-advanced-help,
+  .btn .button-content {
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-provider-settings-control {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .form-select {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ai-reviewer-provider-advanced-summary {
+    cursor: pointer;
+    list-style-position: inside;
+  }
+
+  .ai-reviewer-provider-settings-footer {
+    flex-wrap: wrap;
+
+    .btn {
+      max-width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+      white-space: normal;
+    }
+  }
+}
+
 .ai-reviewer-panel-header {
   display: flex;
   flex: none;

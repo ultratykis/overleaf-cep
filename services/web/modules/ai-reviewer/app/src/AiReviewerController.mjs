@@ -218,25 +218,36 @@ function failureCode(category, error) {
 /**
  * @param {unknown} error
  * @param {{ disconnectSignal: AbortSignal, timeoutSignal: AbortSignal }} signals
- * @returns {{ category: FailureCategory, code: string }}
+ * @returns {{
+ *   category: FailureCategory,
+ *   code: string,
+ *   providerStatusCode: number | null,
+ *   providerErrorType: string | null,
+ * }}
  */
 function classifyFailure(error, { disconnectSignal, timeoutSignal }) {
   if (timeoutSignal.aborted) {
     return {
       category: "timeout",
       code: DEFAULT_FAILURE_CODES.timeout,
+      providerStatusCode: null,
+      providerErrorType: null,
     };
   }
   if (disconnectSignal.aborted) {
     return {
       category: "aborted",
       code: DEFAULT_FAILURE_CODES.aborted,
+      providerStatusCode: null,
+      providerErrorType: null,
     };
   }
   if (error instanceof ZodError) {
     return {
       category: "schema",
       code: DEFAULT_FAILURE_CODES.schema,
+      providerStatusCode: null,
+      providerErrorType: null,
     };
   }
   if (error instanceof AgentGatewayError) {
@@ -244,23 +255,34 @@ function classifyFailure(error, { disconnectSignal, timeoutSignal }) {
     return {
       category,
       code: failureCode(category, error),
+      providerStatusCode: error.providerStatusCode,
+      providerErrorType: error.providerErrorType,
     };
   }
   return {
     category: "unknown",
     code: DEFAULT_FAILURE_CODES.unknown,
+    providerStatusCode: null,
+    providerErrorType: null,
   };
 }
 
 /**
  * @param {AgentError} error
- * @returns {{ category: FailureCategory, code: string }}
+ * @returns {{
+ *   category: FailureCategory,
+ *   code: string,
+ *   providerStatusCode: null,
+ *   providerErrorType: null,
+ * }}
  */
 function classifyTerminalError(error) {
   const category = failureCategory(error.category);
   return {
     category,
     code: failureCode(category, error),
+    providerStatusCode: null,
+    providerErrorType: null,
   };
 }
 
@@ -567,6 +589,8 @@ async function allowAbortPropagation(work) {
  *     scopeKind: FailureScopeKind,
  *     failureCategory: FailureCategory,
  *     failureCode: string,
+ *     providerStatusCode: number | null,
+ *     providerErrorType: string | null,
  *     elapsedMs: number,
  *   }) => void,
  * }} dependencies
@@ -655,7 +679,12 @@ export function createAiReviewerController({
           : null;
     };
     /**
-     * @param {{ category: FailureCategory, code: string }} failure
+     * @param {{
+     *   category: FailureCategory,
+     *   code: string,
+     *   providerStatusCode: number | null,
+     *   providerErrorType: string | null,
+     * }} failure
      */
     const recordFailure = (failure) => {
       if (failureRecorded) {
@@ -670,6 +699,8 @@ export function createAiReviewerController({
           scopeKind: failureScopeKind(activeRequest),
           failureCategory: failure.category,
           failureCode: failure.code,
+          providerStatusCode: failure.providerStatusCode,
+          providerErrorType: failure.providerErrorType,
           elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
         });
       } catch {

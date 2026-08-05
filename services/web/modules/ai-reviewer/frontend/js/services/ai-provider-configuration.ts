@@ -5,22 +5,50 @@ import {
   putJSON,
 } from "@/infrastructure/fetch-json";
 
-export type AiProviderConfiguration = {
-  provider: "openai-compatible";
-  baseUrl: string;
+export type AiProvider = "openai-compatible" | "gemini" | "claude";
+export type AiProviderContextLengthSource =
+  | "derived"
+  | "detected"
+  | "default"
+  | "override";
+
+type AiProviderConfigurationCommon = {
   model: string;
   contextLength: number;
+  contextLengthSource: AiProviderContextLengthSource;
   credentialSet: boolean;
   credentialUpdatedAt: string | null;
 };
 
-export type AiProviderConfigurationWrite = {
-  provider: "openai-compatible";
-  baseUrl: string;
+export type AiProviderConfiguration =
+  | (AiProviderConfigurationCommon & {
+      provider: "openai-compatible";
+      baseUrl: string;
+    })
+  | (AiProviderConfigurationCommon & {
+      provider: "gemini";
+    })
+  | (AiProviderConfigurationCommon & {
+      provider: "claude";
+    });
+
+type AiProviderConfigurationWriteCommon = {
   model: string;
-  contextLength: number;
+  contextLengthOverride: number | null;
   credential?: string | null;
 };
+
+export type AiProviderConfigurationWrite =
+  | (AiProviderConfigurationWriteCommon & {
+      provider: "openai-compatible";
+      baseUrl: string;
+    })
+  | (AiProviderConfigurationWriteCommon & {
+      provider: "gemini";
+    })
+  | (AiProviderConfigurationWriteCommon & {
+      provider: "claude";
+    });
 
 export type AiProviderConfigurationResponse = {
   configured: boolean;
@@ -30,13 +58,14 @@ export type AiProviderConfigurationResponse = {
 
 export type AiProviderConnectionResponse = {
   ok: true;
-  provider: "openai-compatible";
+  provider: AiProvider;
   model: string;
   classification: "local" | "remote";
 };
 
 const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
   "AI_PROVIDER_AUTHENTICATION_ERROR",
+  "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
   "AI_PROVIDER_NETWORK_FAILED",
   "AI_PROVIDER_NOT_CONFIGURED",
   "AI_PROVIDER_RATE_LIMITED",
@@ -47,6 +76,7 @@ const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
 
 export type AiProviderConfigurationClientErrorCode =
   | "AI_PROVIDER_AUTHENTICATION_ERROR"
+  | "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED"
   | "AI_PROVIDER_NETWORK_FAILED"
   | "AI_PROVIDER_NOT_CONFIGURED"
   | "AI_PROVIDER_RATE_LIMITED"
@@ -105,14 +135,35 @@ export function saveAiProviderConfiguration(
   config: AiProviderConfigurationWrite,
   signal: AbortSignal,
 ) {
-  const body: AiProviderConfigurationWrite = {
-    provider: config.provider,
-    baseUrl: config.baseUrl,
-    model: config.model,
-    contextLength: config.contextLength,
-  };
-  if (config.credential !== undefined) {
-    body.credential = config.credential;
+  let body: AiProviderConfigurationWrite;
+  const credential =
+    config.credential === undefined ? {} : { credential: config.credential };
+  switch (config.provider) {
+    case "openai-compatible":
+      body = {
+        provider: config.provider,
+        baseUrl: config.baseUrl,
+        model: config.model,
+        contextLengthOverride: config.contextLengthOverride,
+        ...credential,
+      };
+      break;
+    case "gemini":
+      body = {
+        provider: config.provider,
+        model: config.model,
+        contextLengthOverride: config.contextLengthOverride,
+        ...credential,
+      };
+      break;
+    case "claude":
+      body = {
+        provider: config.provider,
+        model: config.model,
+        contextLengthOverride: config.contextLengthOverride,
+        ...credential,
+      };
+      break;
   }
   return request(signal, () =>
     putJSON<AiProviderConfigurationResponse>(

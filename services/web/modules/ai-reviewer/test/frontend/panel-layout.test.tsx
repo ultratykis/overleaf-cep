@@ -21,77 +21,111 @@ const projectId = "panel-layout-project";
 const createdAt = "2026-07-26T00:00:00.000Z";
 const emptyState =
   "Review a selection, document, or project, then discuss the results here.";
-const publicFailureGuidanceCases = [
-  {
-    code: "AI_REQUEST_ABORTED",
-    category: "aborted",
-    retryable: false,
-    guidance:
-      "The AI reviewer request was cancelled. Run it again if you still need the result.",
-  },
+const categoryFailureGuidance = {
+  aborted:
+    "The AI reviewer request was cancelled. Run it again if you still need the result.",
+  authentication:
+    "The AI provider rejected the credentials. Check the credential in AI Reviewer settings, then try again.",
+  configuration:
+    "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
+  network:
+    "AI Reviewer could not reach the provider. Check the provider endpoint and network connection, then try again.",
+  provider:
+    "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
+  "rate-limit":
+    "The AI provider rate limit was reached. Wait a little, then try again.",
+  schema:
+    "AI Reviewer could not use the model response. Try narrowing the review scope, switching to a more capable model, or checking the AI Reviewer settings.",
+  timeout:
+    "The AI reviewer request timed out. Try again or narrow the review scope.",
+  unknown:
+    "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
+} as const;
+const projectContentFailureGuidance =
+  "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.";
+const streamFailureGuidance =
+  "AI Reviewer could not complete the request or read its response. Check your network connection and AI Reviewer settings, then try again.";
+const requestFailureGuidance =
+  "AI Reviewer could not start because the request was invalid or no longer matched the active project. Refresh the project, then try again.";
+const afterTerminalFailureGuidance =
+  "AI Reviewer received data after completion. Try the review again; if it keeps happening, switch models or check the AI Reviewer settings.";
+const codeFailureGuidance: Partial<Record<string, string>> = {
+  AI_PROJECT_CONTENT_NOT_AVAILABLE: projectContentFailureGuidance,
+  AI_STREAM_NETWORK_ERROR: streamFailureGuidance,
+  AI_HTTP_ERROR: streamFailureGuidance,
+  AI_STREAM_BODY_MISSING: streamFailureGuidance,
+  AI_STREAM_INCOMPLETE: streamFailureGuidance,
+  AI_REQUEST_SCHEMA_INVALID: requestFailureGuidance,
+  AI_REQUEST_PROJECT_MISMATCH: requestFailureGuidance,
+  AI_STREAM_REQUEST_INVALID: requestFailureGuidance,
+  AI_DISCUSSION_REQUEST_INVALID: requestFailureGuidance,
+  AI_STREAM_AFTER_TERMINAL: afterTerminalFailureGuidance,
+};
+const emittedFailureGuidanceCases = [
+  { code: "AI_REQUEST_ABORTED", category: "aborted", retryable: false },
   {
     code: "AI_PROVIDER_AUTHENTICATION_ERROR",
     category: "authentication",
     retryable: false,
-    guidance:
-      "The AI provider rejected the credentials. Check the credential in AI Reviewer settings, then try again.",
   },
   {
     code: "AI_PROVIDER_NOT_CONFIGURED",
     category: "configuration",
     retryable: false,
-    guidance:
-      "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
-  },
-  {
-    code: "AI_PROVIDER_NETWORK_ERROR",
-    category: "network",
-    retryable: true,
-    guidance:
-      "AI Reviewer could not reach the provider. Check the provider endpoint and network connection, then try again.",
   },
   {
     code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
     category: "configuration",
     retryable: false,
-    guidance:
-      "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
   },
   {
-    code: "AI_PROVIDER_ERROR",
-    category: "provider",
+    code: "AI_PROVIDER_NETWORK_ERROR",
+    category: "network",
     retryable: true,
-    guidance:
-      "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
   },
+  { code: "AI_STREAM_NETWORK_ERROR", category: "network", retryable: true },
+  { code: "AI_HTTP_ERROR", category: "network", retryable: true },
+  { code: "AI_STREAM_BODY_MISSING", category: "network", retryable: true },
+  { code: "AI_STREAM_INCOMPLETE", category: "network", retryable: true },
+  { code: "AI_PROVIDER_ERROR", category: "provider", retryable: true },
   {
     code: "AI_PROVIDER_RATE_LIMITED",
     category: "rate-limit",
     retryable: true,
-    guidance:
-      "The AI provider rate limit was reached. Wait a little, then try again.",
   },
+  { code: "AI_STREAM_PROTOCOL_ERROR", category: "schema", retryable: false },
+  { code: "AI_REQUEST_SCHEMA_INVALID", category: "schema", retryable: false },
+  { code: "AI_REQUEST_PROJECT_MISMATCH", category: "schema", retryable: false },
   {
-    code: "AI_STREAM_PROTOCOL_ERROR",
+    code: "AI_STREAM_EVENT_SCOPE_INVALID",
     category: "schema",
     retryable: false,
-    guidance:
-      "AI Reviewer could not use the model response. Try narrowing the review scope, switching to a more capable model, or checking the AI Reviewer settings.",
   },
   {
-    code: "AI_REQUEST_TIMEOUT",
-    category: "timeout",
-    retryable: true,
-    guidance:
-      "The AI reviewer request timed out. Try again or narrow the review scope.",
+    code: "AI_STREAM_CONTENT_TYPE_INVALID",
+    category: "schema",
+    retryable: false,
   },
   {
-    code: "AI_PROVIDER_ERROR",
-    category: "unknown",
-    retryable: true,
-    guidance:
-      "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
+    code: "AI_STREAM_AFTER_TERMINAL",
+    category: "schema",
+    retryable: false,
   },
+  { code: "AI_STREAM_JSON_INVALID", category: "schema", retryable: false },
+  { code: "AI_STREAM_EVENT_INVALID", category: "schema", retryable: false },
+  { code: "AI_STREAM_REQUEST_INVALID", category: "schema", retryable: false },
+  {
+    code: "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+    category: "schema",
+    retryable: false,
+  },
+  {
+    code: "AI_DISCUSSION_REQUEST_INVALID",
+    category: "schema",
+    retryable: false,
+  },
+  { code: "AI_REQUEST_TIMEOUT", category: "timeout", retryable: true },
+  { code: "AI_PROVIDER_ERROR", category: "unknown", retryable: true },
 ] as const;
 
 function emitCompletedReview(call: StreamCall) {
@@ -273,9 +307,9 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.getByText(emptyState)).to.exist;
   });
 
-  for (const failure of publicFailureGuidanceCases) {
-    it(`shows actionable ${failure.category} guidance from stable public metadata`, async function () {
-      const boundedMessage = `Bounded public ${failure.category} failure wording.`;
+  for (const failure of emittedFailureGuidanceCases) {
+    it(`shows actionable guidance for ${failure.category}:${failure.code} without matching message prose`, async function () {
+      const boundedMessage = `Unrelated bounded wording for ${failure.code}.`;
       const streamRequest = sinon.stub().rejects(
         new AgentStreamError({
           code: failure.code,
@@ -289,9 +323,50 @@ describe("AI reviewer: panel layout", function () {
       fireEvent.click(screen.getByRole("button", { name: "Run review" }));
       const alert = await screen.findByRole("alert");
 
-      expect(alert.textContent).to.equal(failure.guidance);
+      expect(alert.textContent).to.equal(
+        codeFailureGuidance[failure.code] ??
+          categoryFailureGuidance[failure.category],
+      );
       expect(alert.textContent).not.to.include(failure.code);
       expect(alert.textContent).not.to.include(boundedMessage);
     });
   }
+
+  it("uses category guidance for an unrecognised code", async function () {
+    const boundedMessage = "Future wording that the panel must not match.";
+    const streamRequest = sinon.stub().rejects(
+      new AgentStreamError({
+        code: "AI_FUTURE_NETWORK_FAILURE",
+        category: "network",
+        message: boundedMessage,
+        retryable: true,
+      }),
+    );
+    renderPanel({ streamRequest });
+
+    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    const alert = await screen.findByRole("alert");
+
+    expect(alert.textContent).to.equal(categoryFailureGuidance.network);
+    expect(alert.textContent).not.to.include(boundedMessage);
+  });
+
+  it("uses generic guidance for an unrecognised category", async function () {
+    const boundedMessage = "Future wording that the panel must not match.";
+    const streamRequest = sinon.stub().rejects(
+      new AgentStreamError({
+        code: "AI_FUTURE_FAILURE",
+        category: "future-category" as "unknown",
+        message: boundedMessage,
+        retryable: true,
+      }),
+    );
+    renderPanel({ streamRequest });
+
+    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    const alert = await screen.findByRole("alert");
+
+    expect(alert.textContent).to.equal(categoryFailureGuidance.unknown);
+    expect(alert.textContent).not.to.include(boundedMessage);
+  });
 });

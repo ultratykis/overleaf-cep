@@ -582,6 +582,18 @@ describe("AI reviewer: module shell authenticated route", function () {
       },
     },
     {
+      label: "project content failure",
+      category: "configuration",
+      internalCode: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      publicError: {
+        code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+        category: "configuration",
+        message:
+          "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
+        retryable: false,
+      },
+    },
+    {
       label: "network failure",
       category: "network",
       internalCode: "AI_PROVIDER_NETWORK_FAILED",
@@ -711,6 +723,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         scopeKind: "project",
         failureCategory: category,
         failureCode: internalCode ?? "AI_PROVIDER_ERROR",
+        providerStatusCode: null,
+        providerErrorType: null,
         elapsedMs: 38,
       });
       expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
@@ -719,6 +733,63 @@ describe("AI reviewer: module shell authenticated route", function () {
       expect(response.chunks.join("")).not.toContain(privateMessage);
     },
   );
+
+  it("records bounded provider diagnostics without widening the public error", async function () {
+    const privateMessage = "PRIVATE_PROVIDER_RESPONSE_BODY";
+    const gateway = {
+      async *stream() {
+        yield events()[0];
+        throw new AgentGatewayError(privateMessage, {
+          code: "AI_PROVIDER_REQUEST_FAILED",
+          category: "provider",
+          retryable: false,
+          providerStatusCode: 400,
+          providerErrorType: "AI_APICallError",
+        });
+      },
+    };
+    const failureRecorder = vi.fn();
+    const controller = createAiReviewerController({
+      gatewayFactory: () => gateway,
+      now: () => createdAt,
+      eventId: () => "event-provider-diagnostics",
+      elapsedNow: vi.fn().mockReturnValueOnce(10).mockReturnValue(17.6),
+      failureRecorder,
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(httpRequest(), response);
+
+    const terminalEvent = parseNdjson(response).at(-1);
+    expect(terminalEvent).toMatchObject({
+      type: "error",
+      error: publicProviderError,
+    });
+    if (terminalEvent?.type !== "error") {
+      throw new Error("Expected a terminal error event.");
+    }
+    expect(Object.keys(terminalEvent.error).sort()).toEqual([
+      "category",
+      "code",
+      "message",
+      "retryable",
+    ]);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: "request-0001",
+      provider: "fake",
+      model: "deterministic-v1",
+      scopeKind: "project",
+      failureCategory: "provider",
+      failureCode: "AI_PROVIDER_REQUEST_FAILED",
+      providerStatusCode: 400,
+      providerErrorType: "AI_APICallError",
+      elapsedMs: 8,
+    });
+    expect(response.chunks.join("")).not.toContain(privateMessage);
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      privateMessage,
+    );
+  });
 
   it("streams discussion events through the discussion gateway path", async function () {
     const reviewStream = vi.fn();
@@ -1339,6 +1410,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       scopeKind: "project",
       failureCategory: "provider",
       failureCode: "AI_PROVIDER_FAILED",
+      providerStatusCode: null,
+      providerErrorType: null,
       elapsedMs: 12,
     });
     expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
@@ -1381,6 +1454,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       scopeKind: "project",
       failureCategory: "aborted",
       failureCode: "AI_REQUEST_ABORTED",
+      providerStatusCode: null,
+      providerErrorType: null,
       elapsedMs: 10,
     });
   });
@@ -1632,6 +1707,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       scopeKind: "document",
       failureCategory: "unknown",
       failureCode: "AI_PROVIDER_ERROR",
+      providerStatusCode: null,
+      providerErrorType: null,
       elapsedMs: 25,
     });
     expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(

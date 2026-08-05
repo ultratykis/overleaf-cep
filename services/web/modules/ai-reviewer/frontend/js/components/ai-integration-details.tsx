@@ -4,6 +4,7 @@ import OLForm from "@/shared/components/ol/ol-form";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormGroup from "@/shared/components/ol/ol-form-group";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
+import OLFormSelect from "@/shared/components/ol/ol-form-select";
 import {
   OLModal,
   OLModalBody,
@@ -22,10 +23,13 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+import "../../stylesheets/ai-reviewer.scss";
 import {
   AiProviderConfigurationClientError,
+  type AiProvider,
   type AiProviderConfiguration,
   type AiProviderConfigurationClientErrorCode,
+  type AiProviderContextLengthSource,
   type AiProviderConfigurationResponse,
   type AiProviderConfigurationWrite,
   getAiProviderConfiguration,
@@ -45,10 +49,14 @@ type ConfigurationDraft = {
   provider: AiProviderConfiguration["provider"];
   baseUrl: string;
   model: string;
-  contextLength: string;
+  contextLengthOverride: string;
   credential: string;
 };
-type ConfigurationField = "baseUrl" | "model" | "contextLength" | "credential";
+type ConfigurationField =
+  | "baseUrl"
+  | "model"
+  | "contextLengthOverride"
+  | "credential";
 
 type Props = {
   projectId: string;
@@ -62,27 +70,97 @@ const emptyConfiguration: ConfigurationDraft = {
   provider: "openai-compatible",
   baseUrl: "",
   model: "",
-  contextLength: "",
+  contextLengthOverride: "",
   credential: "",
 };
 
-const fields: ConfigurationField[] = [
-  "baseUrl",
-  "model",
-  "contextLength",
-  "credential",
-];
+const fields: ConfigurationField[] = ["baseUrl", "model", "credential"];
+
+const providers: AiProvider[] = ["openai-compatible", "gemini", "claude"];
+
+function providerFromValue(value: string): AiProvider | null {
+  switch (value) {
+    case "openai-compatible":
+    case "gemini":
+    case "claude":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function copyPublicConfiguration(
+  configuration: AiProviderConfiguration,
+): AiProviderConfiguration {
+  const common = {
+    model: configuration.model,
+    contextLength: configuration.contextLength,
+    contextLengthSource: configuration.contextLengthSource,
+    credentialSet: configuration.credentialSet,
+    credentialUpdatedAt: configuration.credentialUpdatedAt,
+  };
+  switch (configuration.provider) {
+    case "openai-compatible":
+      return {
+        provider: configuration.provider,
+        baseUrl: configuration.baseUrl,
+        ...common,
+      };
+    case "gemini":
+      return {
+        provider: configuration.provider,
+        ...common,
+      };
+    case "claude":
+      return {
+        provider: configuration.provider,
+        ...common,
+      };
+  }
+}
 
 function draftFromConfiguration(
   configuration: AiProviderConfiguration,
 ): ConfigurationDraft {
-  return {
-    provider: configuration.provider,
-    baseUrl: configuration.baseUrl,
+  const common = {
     model: configuration.model,
-    contextLength: String(configuration.contextLength),
+    contextLengthOverride:
+      configuration.contextLengthSource === "override"
+        ? String(configuration.contextLength)
+        : "",
     credential: "",
   };
+  switch (configuration.provider) {
+    case "openai-compatible":
+      return {
+        provider: configuration.provider,
+        baseUrl: configuration.baseUrl,
+        ...common,
+      };
+    case "gemini":
+      return {
+        provider: configuration.provider,
+        baseUrl: "",
+        ...common,
+      };
+    case "claude":
+      return {
+        provider: configuration.provider,
+        baseUrl: "",
+        ...common,
+      };
+  }
+}
+
+function providerLabel(provider: AiProvider, t: TFunction): string {
+  switch (provider) {
+    case "openai-compatible":
+      return t("ai_reviewer_provider_openai_compatible");
+    case "gemini":
+      return t("ai_reviewer_provider_gemini");
+    case "claude":
+      return t("ai_reviewer_provider_claude");
+  }
 }
 
 function fieldLabel(field: ConfigurationField, t: TFunction): string {
@@ -91,10 +169,26 @@ function fieldLabel(field: ConfigurationField, t: TFunction): string {
       return t("ai_reviewer_provider_base_url");
     case "model":
       return t("ai_reviewer_provider_model");
-    case "contextLength":
-      return t("ai_reviewer_provider_context_length");
+    case "contextLengthOverride":
+      return t("ai_reviewer_provider_context_length_override");
     case "credential":
       return t("ai_reviewer_provider_credential");
+  }
+}
+
+function contextLengthSourceLabel(
+  source: AiProviderContextLengthSource,
+  t: TFunction,
+): string {
+  switch (source) {
+    case "derived":
+      return t("ai_reviewer_provider_context_length_source_derived");
+    case "detected":
+      return t("ai_reviewer_provider_context_length_source_detected");
+    case "default":
+      return t("ai_reviewer_provider_context_length_source_default");
+    case "override":
+      return t("ai_reviewer_provider_context_length_source_override");
   }
 }
 
@@ -118,6 +212,8 @@ function noticeContent(notice: Notice, t: TFunction): string {
   switch (notice.kind) {
     case "AI_PROVIDER_AUTHENTICATION_ERROR":
       return t("ai_reviewer_error_provider_credentials_rejected");
+    case "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED":
+      return t("ai_reviewer_provider_configuration_persistence_failed");
     case "AI_PROVIDER_NETWORK_FAILED":
       return t("ai_reviewer_provider_network_failed");
     case "AI_PROVIDER_NOT_CONFIGURED":
@@ -188,14 +284,7 @@ export function AiIntegrationDetailsView({
   const applyResponse = useCallback(
     (response: AiProviderConfigurationResponse) => {
       const next = response.config
-        ? {
-            provider: response.config.provider,
-            baseUrl: response.config.baseUrl,
-            model: response.config.model,
-            contextLength: response.config.contextLength,
-            credentialSet: response.config.credentialSet,
-            credentialUpdatedAt: response.config.credentialUpdatedAt,
-          }
+        ? copyPublicConfiguration(response.config)
         : null;
       setSaved(next);
       setClassification(response.classification);
@@ -226,24 +315,61 @@ export function AiIntegrationDetailsView({
   }, [applyResponse, begin, cancel, complete, getConfiguration, projectId]);
 
   const dirty =
-    saved?.baseUrl !== draft.baseUrl ||
+    saved?.provider !== draft.provider ||
     saved?.model !== draft.model ||
-    (saved == null ? "" : String(saved.contextLength)) !==
-      draft.contextLength ||
+    (saved?.contextLengthSource === "override"
+      ? String(saved.contextLength)
+      : "") !== draft.contextLengthOverride ||
+    (draft.provider === "openai-compatible" &&
+      (saved?.provider !== "openai-compatible" ||
+        saved.baseUrl !== draft.baseUrl)) ||
     draft.credential !== "";
-  const parsedContextLength = Number(draft.contextLength);
+  const overrideText = draft.contextLengthOverride.trim();
+  const parsedContextLengthOverride =
+    overrideText === "" ? null : Number(overrideText);
+  const validContextLengthOverride =
+    parsedContextLengthOverride == null ||
+    (Number.isSafeInteger(parsedContextLengthOverride) &&
+      parsedContextLengthOverride > 0);
+  const credentialAvailable =
+    draft.provider === "openai-compatible" ||
+    draft.credential.trim() !== "" ||
+    (saved?.provider === draft.provider && saved.credentialSet);
+  const credentialRequired =
+    draft.provider !== "openai-compatible" &&
+    !(saved?.provider === draft.provider && saved.credentialSet);
   const valid =
-    draft.baseUrl.trim() !== "" &&
+    (draft.provider !== "openai-compatible" || draft.baseUrl.trim() !== "") &&
     draft.model.trim() !== "" &&
-    draft.contextLength.trim() !== "" &&
-    Number.isSafeInteger(parsedContextLength) &&
-    parsedContextLength > 0;
+    validContextLengthOverride &&
+    credentialAvailable;
   const canSave = saved !== undefined && busy === null && dirty && valid;
-  const canTest = saved != null && busy === null && !dirty;
+  const canTest =
+    saved != null && busy === null && !dirty && credentialAvailable;
 
   const updateDraft = (field: ConfigurationField, value: string) => {
     if (busy) cancel();
-    setDraft((current) => ({ ...current, [field]: value }));
+    setDraft((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === "baseUrl" || field === "model"
+        ? { contextLengthOverride: "" }
+        : {}),
+    }));
+    setBusy(null);
+    setNotice(null);
+  };
+
+  const updateProvider = (value: string) => {
+    const provider = providerFromValue(value);
+    if (provider == null) return;
+    if (busy) cancel();
+    setDraft((current) => ({
+      ...current,
+      provider,
+      credential: "",
+      contextLengthOverride: "",
+    }));
     setBusy(null);
     setNotice(null);
   };
@@ -270,14 +396,35 @@ export function AiIntegrationDetailsView({
   const handleSave = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canSave) return;
-    const requested: AiProviderConfigurationWrite = {
-      provider: draft.provider,
-      baseUrl: draft.baseUrl,
-      model: draft.model,
-      contextLength: parsedContextLength,
-    };
-    if (draft.credential !== "") {
-      requested.credential = draft.credential;
+    const credential =
+      draft.credential === "" ? {} : { credential: draft.credential };
+    let requested: AiProviderConfigurationWrite;
+    switch (draft.provider) {
+      case "openai-compatible":
+        requested = {
+          provider: draft.provider,
+          baseUrl: draft.baseUrl,
+          model: draft.model,
+          contextLengthOverride: parsedContextLengthOverride,
+          ...credential,
+        };
+        break;
+      case "gemini":
+        requested = {
+          provider: draft.provider,
+          model: draft.model,
+          contextLengthOverride: parsedContextLengthOverride,
+          ...credential,
+        };
+        break;
+      case "claude":
+        requested = {
+          provider: draft.provider,
+          model: draft.model,
+          contextLengthOverride: parsedContextLengthOverride,
+          ...credential,
+        };
+        break;
     }
     void run("save", (signal) =>
       saveConfiguration(projectId, requested, signal),
@@ -312,44 +459,113 @@ export function AiIntegrationDetailsView({
   };
 
   return (
-    <OLModal show onHide={handleHide}>
+    <OLModal
+      show
+      onHide={handleHide}
+      dialogClassName="ai-reviewer-provider-settings"
+    >
       <OLModalHeader
         closeButton
         closeLabel={t("ai_reviewer_provider_settings_close")}
+        className="ai-reviewer-provider-settings-header"
       >
         <OLModalTitle>{t("ai_reviewer_title")}</OLModalTitle>
       </OLModalHeader>
-      <OLForm onSubmit={handleSave}>
-        <OLModalBody>
-          <p className="mb-0">{t("ai_reviewer_provider_openai_compatible")}</p>
-          {fields.map((field) => (
-            <OLFormGroup
-              key={field}
-              controlId={`ai-reviewer-${field}`}
-              className="mt-3"
+      <OLForm
+        onSubmit={handleSave}
+        className="ai-reviewer-provider-settings-form"
+      >
+        <OLModalBody className="ai-reviewer-provider-settings-body">
+          <OLFormGroup
+            controlId="ai-reviewer-provider"
+            className="ai-reviewer-provider-settings-field"
+          >
+            <OLFormLabel>{t("ai_reviewer_provider")}</OLFormLabel>
+            <OLFormSelect
+              value={draft.provider}
+              onChange={(event) => updateProvider(event.target.value)}
+              disabled={saved === undefined}
+              className="ai-reviewer-provider-settings-control"
             >
-              <OLFormLabel>{fieldLabel(field, t)}</OLFormLabel>
-              <OLFormControl
-                type={
-                  field === "contextLength"
-                    ? "number"
-                    : field === "credential"
-                      ? "password"
-                      : "text"
-                }
-                min={field === "contextLength" ? 1 : undefined}
-                step={field === "contextLength" ? 1 : undefined}
-                value={draft[field]}
-                onChange={(event) => updateDraft(field, event.target.value)}
-                disabled={saved === undefined}
-                autoComplete={field === "credential" ? "new-password" : "off"}
-              />
-            </OLFormGroup>
-          ))}
+              {providers.map((provider) => (
+                <option key={provider} value={provider}>
+                  {providerLabel(provider, t)}
+                </option>
+              ))}
+            </OLFormSelect>
+          </OLFormGroup>
+          {fields
+            .filter(
+              (field) =>
+                field !== "baseUrl" || draft.provider === "openai-compatible",
+            )
+            .map((field) => (
+              <OLFormGroup
+                key={field}
+                controlId={`ai-reviewer-${field}`}
+                className="ai-reviewer-provider-settings-field mt-3"
+              >
+                <OLFormLabel>{fieldLabel(field, t)}</OLFormLabel>
+                <OLFormControl
+                  type={field === "credential" ? "password" : "text"}
+                  value={draft[field]}
+                  onChange={(event) => updateDraft(field, event.target.value)}
+                  disabled={saved === undefined}
+                  autoComplete={field === "credential" ? "new-password" : "off"}
+                  required={field === "credential" && credentialRequired}
+                  aria-required={
+                    field === "credential" ? credentialRequired : undefined
+                  }
+                  className="ai-reviewer-provider-settings-control"
+                />
+              </OLFormGroup>
+            ))}
+          <details className="ai-reviewer-provider-advanced mt-3">
+            <summary className="ai-reviewer-provider-advanced-summary">
+              {t("ai_reviewer_provider_advanced_settings")}
+            </summary>
+            <div className="ai-reviewer-provider-advanced-content mt-2">
+              <OLFormGroup
+                controlId="ai-reviewer-contextLengthOverride"
+                className="ai-reviewer-provider-settings-field"
+              >
+                <OLFormLabel>
+                  {fieldLabel("contextLengthOverride", t)}
+                </OLFormLabel>
+                <OLFormControl
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={draft.contextLengthOverride}
+                  onChange={(event) =>
+                    updateDraft("contextLengthOverride", event.target.value)
+                  }
+                  disabled={saved === undefined}
+                  autoComplete="off"
+                  aria-describedby="ai-reviewer-contextLengthOverride-help"
+                  className="ai-reviewer-provider-settings-control"
+                />
+                <p
+                  id="ai-reviewer-contextLengthOverride-help"
+                  className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                >
+                  {t("ai_reviewer_provider_context_length_override_help")}
+                </p>
+              </OLFormGroup>
+            </div>
+          </details>
           {saved && (
-            <div className="mt-3 text-break">
+            <div className="ai-reviewer-provider-settings-details mt-3">
+              <p className="ai-reviewer-provider-context-length mb-0">
+                {t("ai_reviewer_provider_context_length_in_use", {
+                  contextLength: saved.contextLength,
+                })}
+              </p>
+              <p className="ai-reviewer-provider-context-length-source mt-1 mb-0">
+                {contextLengthSourceLabel(saved.contextLengthSource, t)}
+              </p>
               {classification && (
-                <p className="mb-0">
+                <p className="ai-reviewer-provider-endpoint mt-1 mb-0">
                   {classification === "local"
                     ? t("ai_reviewer_provider_local")
                     : t("ai_reviewer_provider_remote")}
@@ -380,7 +596,7 @@ export function AiIntegrationDetailsView({
             />
           )}
         </OLModalBody>
-        <OLModalFooter>
+        <OLModalFooter className="ai-reviewer-provider-settings-footer">
           <OLButton
             type="button"
             variant="secondary"

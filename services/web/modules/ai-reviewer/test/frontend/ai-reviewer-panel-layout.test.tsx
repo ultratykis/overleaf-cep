@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect } from "chai";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -6,8 +6,10 @@ import postcss from "postcss";
 import React from "react";
 import * as sass from "sass";
 
+import { AiIntegrationDetailsView } from "../../frontend/js/components/ai-integration-details";
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
 import { AgentStreamError } from "../../frontend/js/services/agent-stream";
+import type { AiProviderConfigurationResponse } from "../../frontend/js/services/ai-provider-configuration";
 import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import { AiReviewerWorkspaceSchema } from "../../shared/contracts.mjs";
 import type { AiReviewerWorkspace } from "../../shared/contract-types";
@@ -30,6 +32,10 @@ const stylesheetPath = path.resolve(
 const panelSourcePath = path.resolve(
   __dirname,
   "../../frontend/js/components/ai-reviewer-panel.tsx",
+);
+const settingsSourcePath = path.resolve(
+  __dirname,
+  "../../frontend/js/components/ai-integration-details.tsx",
 );
 const listLayoutSelectors = [
   ".ai-reviewer-panel-header",
@@ -71,6 +77,45 @@ const discussionLayoutSelectors = [
   ".ai-reviewer-panel .btn",
   ".ai-reviewer-panel .form-control",
 ];
+const settingsLayoutSelectors = [
+  ".modal-content",
+  ".focus-trap-container",
+  ".ai-reviewer-provider-settings-form",
+  ".ai-reviewer-provider-settings-header",
+  ".ai-reviewer-provider-settings-body",
+  ".ai-reviewer-provider-settings-footer",
+  ".ai-reviewer-provider-settings-field",
+  ".ai-reviewer-provider-settings-details",
+  ".ai-reviewer-provider-settings-details > *",
+  ".ai-reviewer-provider-advanced",
+  ".ai-reviewer-provider-advanced-summary",
+  ".ai-reviewer-provider-advanced-content",
+  ".ai-reviewer-provider-advanced-help",
+  ".ai-reviewer-provider-settings-control",
+  ".ai-reviewer-provider-settings-footer .btn",
+];
+const settingsWrapSelectors = [
+  ".modal-title",
+  ".form-label",
+  ".ai-reviewer-provider-settings-details",
+  ".ai-reviewer-provider-settings-details > *",
+  ".ai-reviewer-provider-advanced-summary",
+  ".ai-reviewer-provider-advanced-help",
+  ".ai-reviewer-provider-settings-footer .button-content",
+];
+const settingsConfiguration: AiProviderConfigurationResponse = {
+  configured: true,
+  config: {
+    provider: "openai-compatible",
+    baseUrl: "https://api.example.com/v1",
+    model: "hosted-review-model",
+    contextLength: 32_768,
+    contextLengthSource: "detected",
+    credentialSet: true,
+    credentialUpdatedAt: "2026-07-26T01:02:03.000Z",
+  },
+  classification: "remote",
+};
 
 function installPanelStyles() {
   const source = readFileSync(stylesheetPath, "utf8");
@@ -187,6 +232,65 @@ function assertNarrowLayoutContract(
       `${element.className} uses the border box`,
     ).to.equal("border-box");
   }
+}
+
+function assertSettingsNarrowLayoutContract(
+  settings: HTMLElement,
+  expectedWidth: number,
+) {
+  expect(settings.style.width).to.equal(`${expectedWidth}px`);
+  const settingsStyle = getComputedStyle(settings);
+  expect(hasZeroMinWidth(settingsStyle)).to.equal(true);
+  expect(settingsStyle.boxSizing).to.equal("border-box");
+
+  for (const selector of settingsLayoutSelectors) {
+    const elements = settings.querySelectorAll<HTMLElement>(selector);
+    expect(
+      elements.length,
+      `${selector} is represented in the settings fixture`,
+    ).to.be.greaterThan(0);
+    for (const element of elements) {
+      const style = getComputedStyle(element);
+      expect(
+        hasZeroMinWidth(style),
+        `${element.className} can shrink`,
+      ).to.equal(true);
+      expect(
+        isInlineSizeBounded(style),
+        `${element.className} is bounded by the settings surface (${style.width}/${style.maxWidth})`,
+      ).to.equal(true);
+      expect(
+        style.boxSizing,
+        `${element.className} uses the border box`,
+      ).to.equal("border-box");
+    }
+  }
+
+  for (const selector of settingsWrapSelectors) {
+    for (const element of settings.querySelectorAll<HTMLElement>(selector)) {
+      expect(
+        getComputedStyle(element).overflowWrap,
+        `${element.className} wraps long copy`,
+      ).to.equal("anywhere");
+    }
+  }
+
+  const provider = settings.querySelector<HTMLSelectElement>(
+    'select[name="ai-reviewer-provider"], #ai-reviewer-provider',
+  );
+  expect(provider).not.to.equal(null);
+  if (provider == null) {
+    throw new Error("The provider select must render.");
+  }
+  expect([...provider.options].map((option) => option.text)).to.deep.equal([
+    "OpenAI-compatible (Ollama, LM Studio, vLLM)",
+    "Google Gemini",
+    "Anthropic Claude",
+  ]);
+  const providerStyle = getComputedStyle(provider);
+  expect(providerStyle.overflow).to.equal("hidden");
+  expect(providerStyle.textOverflow).to.equal("ellipsis");
+  expect(providerStyle.whiteSpace).to.equal("nowrap");
 }
 
 function assertEllipsis(element: HTMLElement) {
@@ -339,6 +443,9 @@ describe("AI reviewer panel width", function () {
     expect(readFileSync(panelSourcePath, "utf8")).to.include(
       'import "../../stylesheets/ai-reviewer.scss";',
     );
+    expect(readFileSync(settingsSourcePath, "utf8")).to.include(
+      'import "../../stylesheets/ai-reviewer.scss";',
+    );
     panelStyles = installPanelStyles();
   });
 
@@ -347,6 +454,41 @@ describe("AI reviewer panel width", function () {
   });
 
   for (const width of widths) {
+    it(`keeps provider settings within ${width}px with recognisable option labels`, async function () {
+      render(
+        <AiIntegrationDetailsView
+          projectId={projectId}
+          onHide={() => {}}
+          getConfiguration={async () => settingsConfiguration}
+          saveConfiguration={async () => settingsConfiguration}
+          testConnection={async () => ({
+            ok: true,
+            provider: "openai-compatible",
+            model: "hosted-review-model",
+            classification: "remote",
+          })}
+        />,
+      );
+
+      const provider = await screen.findByRole("combobox", {
+        name: "Provider",
+      });
+      await waitFor(() =>
+        expect((provider as HTMLSelectElement).disabled).to.equal(false),
+      );
+      const settings = document.querySelector<HTMLElement>(
+        ".ai-reviewer-provider-settings",
+      );
+      expect(settings).not.to.equal(null);
+      if (settings == null) {
+        throw new Error("The provider settings dialog must render.");
+      }
+      settings.style.width = `${width}px`;
+      fireEvent.click(screen.getByText("Advanced settings"));
+
+      assertSettingsNarrowLayoutContract(settings, width);
+    });
+
     it(`keeps the empty-state no-overflow contract at ${width}px`, function () {
       render(
         <div style={{ width, height: 800 }}>

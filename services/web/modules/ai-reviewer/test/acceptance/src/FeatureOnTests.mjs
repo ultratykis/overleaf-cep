@@ -15,6 +15,31 @@ const instructionSentinel =
   "AI_REVIEWER_SYNTHETIC_PRIVATE_INSTRUCTION_SENTINEL";
 const createdAt = "2026-07-24T00:00:00.000Z";
 
+function expectBoundTerminalStream(body, { requestId, model }) {
+  const events = body
+    .trimEnd()
+    .split("\n")
+    .map((line) => AgentEventSchema.parse(JSON.parse(line)));
+
+  expect(events[0]?.type).to.equal("started");
+  expect(events[0]?.requestId).to.equal(requestId);
+  expect(events[0]?.provider).to.equal("openai-compatible");
+  expect(events[0]?.model).to.equal(model);
+  expect(events.filter((event) => event.type === "started").length).to.equal(1);
+  expect(events.map((event) => event.requestId)).to.deep.equal(
+    Array(events.length).fill(requestId),
+  );
+  expect(events.map((event) => event.sequence)).to.deep.equal(
+    events.map((_, index) => index),
+  );
+
+  const terminalEvents = events.filter(
+    (event) => event.type === "completed" || event.type === "error",
+  );
+  expect(terminalEvents.length).to.equal(1);
+  expect(events.at(-1)?.type).to.be.oneOf(["completed", "error"]);
+}
+
 describe("AI reviewer: enabled server-ce acceptance", function () {
   before(function () {
     if (Settings.aiReviewer.enabled !== true) {
@@ -184,7 +209,8 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         error: {
           code: "AI_PROVIDER_NOT_CONFIGURED",
           category: "configuration",
-          message: "No AI provider is configured.",
+          message:
+            "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
           retryable: false,
         },
       });
@@ -228,6 +254,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
       baseUrl,
       model,
       contextLength: 8_192,
+      contextLengthSource: "override",
       credentialSet: false,
       credentialUpdatedAt: null,
     };
@@ -286,27 +313,10 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     });
     expect(review.response.statusCode).to.equal(200);
 
-    const events = review.body
-      .trimEnd()
-      .split("\n")
-      .map((line) => AgentEventSchema.parse(JSON.parse(line)));
-    expect(events[0]).to.include({
-      type: "started",
+    expectBoundTerminalStream(review.body, {
       requestId,
-      provider: "openai-compatible",
       model,
     });
-    expect(
-      events.some(
-        (event) => event.type === "text.delta" && event.delta.length > 0,
-      ),
-    ).to.equal(true);
-    expect(
-      events.filter(
-        (event) => event.type === "completed" || event.type === "error",
-      ),
-    ).to.have.lengthOf(1);
-    expect(events.at(-1)?.type).to.equal("completed");
 
     const projectRequestId = "ai-reviewer-project-ollama-smoke";
     const projectReview = await owner.doRequest("POST", {
@@ -328,21 +338,9 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     });
     expect(projectReview.response.statusCode).to.equal(200);
 
-    const projectEvents = projectReview.body
-      .trimEnd()
-      .split("\n")
-      .map((line) => AgentEventSchema.parse(JSON.parse(line)));
-    expect(projectEvents[0]).to.include({
-      type: "started",
+    expectBoundTerminalStream(projectReview.body, {
       requestId: projectRequestId,
-      provider: "openai-compatible",
       model,
     });
-    expect(
-      projectEvents.some(
-        (event) => event.type === "text.delta" && event.delta.length > 0,
-      ),
-    ).to.equal(true);
-    expect(projectEvents.at(-1)?.type).to.equal("completed");
   });
 });

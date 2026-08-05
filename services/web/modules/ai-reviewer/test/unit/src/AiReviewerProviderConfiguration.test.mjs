@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -12,7 +13,10 @@ import { createAiReviewerProviderConfigStore } from "../../../app/src/AiReviewer
 import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
 import { createAiReviewerProviderController } from "../../../app/src/AiReviewerProviderController.mjs";
 import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
-import { createOllamaProviderService } from "../../../app/src/OllamaProviderService.mjs";
+import {
+  createAiReviewerProviderService,
+  createOllamaProviderService,
+} from "../../../app/src/OllamaProviderService.mjs";
 import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mjs";
 import {
   AgentEventSchema,
@@ -33,6 +37,19 @@ const otherContextLength = 4_096;
 const createdAt = "2026-07-25T00:00:00.000Z";
 const credentialUpdatedAt = "2026-07-25T00:01:00.000Z";
 const credential = "PRIVATE_PROVIDER_CREDENTIAL";
+const geminiModel = "gemini-2.5-pro";
+const claudeModel = "claude-sonnet-4-20250514";
+const englishMessages = JSON.parse(
+  fs.readFileSync(new URL("../../../../../locales/en.json", import.meta.url)),
+);
+const extractedMessages = JSON.parse(
+  fs.readFileSync(
+    new URL(
+      "../../../../../frontend/extracted-translations.json",
+      import.meta.url,
+    ),
+  ),
+);
 
 const configuration = Object.freeze({
   provider: "openai-compatible",
@@ -61,8 +78,35 @@ const credentialUpdate = Object.freeze({
   contextLength: credentialConfiguration.contextLength,
   credential,
 });
+const geminiConfiguration = Object.freeze({
+  provider: "gemini",
+  model: geminiModel,
+  contextLength,
+  credential,
+  credentialUpdatedAt,
+});
+const geminiUpdate = Object.freeze({
+  provider: "gemini",
+  model: geminiModel,
+  contextLength,
+  credential,
+});
+const claudeConfiguration = Object.freeze({
+  provider: "claude",
+  model: claudeModel,
+  contextLength,
+  credential,
+  credentialUpdatedAt,
+});
+const claudeUpdate = Object.freeze({
+  provider: "claude",
+  model: claudeModel,
+  contextLength,
+  credential,
+});
 const publicConfiguration = Object.freeze({
   ...configuration,
+  contextLengthSource: "override",
   credentialSet: false,
   credentialUpdatedAt: null,
 });
@@ -71,6 +115,23 @@ const publicCredentialConfiguration = Object.freeze({
   baseUrl: credentialConfiguration.baseUrl,
   model: credentialConfiguration.model,
   contextLength: credentialConfiguration.contextLength,
+  contextLengthSource: "override",
+  credentialSet: true,
+  credentialUpdatedAt,
+});
+const publicGeminiConfiguration = Object.freeze({
+  provider: "gemini",
+  model: geminiModel,
+  contextLength,
+  contextLengthSource: "override",
+  credentialSet: true,
+  credentialUpdatedAt,
+});
+const publicClaudeConfiguration = Object.freeze({
+  provider: "claude",
+  model: claudeModel,
+  contextLength,
+  contextLengthSource: "override",
   credentialSet: true,
   credentialUpdatedAt,
 });
@@ -391,6 +452,69 @@ function providerControllerFixture({
 }
 
 describe("AI reviewer provider configuration", function () {
+  it("keeps the AI reviewer locale and extracted message key sets aligned", function () {
+    const aiReviewerKeys = (messages) =>
+      Object.keys(messages)
+        .filter((key) => key.startsWith("ai_reviewer_"))
+        .sort();
+
+    expect(aiReviewerKeys(extractedMessages)).toEqual(
+      aiReviewerKeys(englishMessages),
+    );
+    for (const removedKey of [
+      "ai_reviewer_provider_credential_required",
+      "ai_reviewer_provider_context_length",
+      "ai_reviewer_provider_ollama",
+    ]) {
+      expect(englishMessages).not.toHaveProperty(removedKey);
+      expect(extractedMessages).not.toHaveProperty(removedKey);
+    }
+  });
+
+  it("keeps provider option values free of their field name and user-recognisable", function () {
+    const providerFieldName = englishMessages.ai_reviewer_provider;
+    const providerValues = [
+      englishMessages.ai_reviewer_provider_openai_compatible,
+      englishMessages.ai_reviewer_provider_gemini,
+      englishMessages.ai_reviewer_provider_claude,
+    ];
+    const fieldNames = [
+      providerFieldName,
+      englishMessages.ai_reviewer_provider_base_url,
+      englishMessages.ai_reviewer_provider_model,
+      englishMessages.ai_reviewer_provider_context_length_override,
+      englishMessages.ai_reviewer_provider_credential,
+    ];
+
+    expect(new Set(providerValues).size).toBe(providerValues.length);
+    for (const value of providerValues) {
+      expect(value.toLowerCase()).not.toContain(
+        providerFieldName.toLowerCase(),
+      );
+    }
+    for (const [key, value] of Object.entries(englishMessages)) {
+      if (!key.startsWith("ai_reviewer_")) continue;
+      for (const fieldName of fieldNames) {
+        expect(value.toLowerCase(), key).not.toContain(
+          `${fieldName.toLowerCase()}:`,
+        );
+      }
+    }
+    expect(englishMessages.ai_reviewer_provider_openai_compatible).toBe(
+      "OpenAI-compatible (Ollama, LM Studio, vLLM)",
+    );
+    expect(englishMessages.ai_reviewer_provider_gemini).toBe("Google Gemini");
+    expect(englishMessages.ai_reviewer_provider_claude).toBe(
+      "Anthropic Claude",
+    );
+    expect(englishMessages.ai_reviewer_provider_credential).toBe("API key");
+    expect(englishMessages.ai_reviewer_provider_local).toBe("Local endpoint");
+    expect(englishMessages.ai_reviewer_provider_remote).toBe("Remote endpoint");
+    expect(englishMessages.ai_reviewer_integration_description).toBe(
+      "Configure an AI provider, then review this LaTeX project and discuss the results.",
+    );
+  });
+
   it("accepts strict OpenAI-compatible configuration and returns an explicit bounded public DTO", function () {
     const parsed = parseAiReviewerProviderConfig(configuration);
     expect(parsed).toEqual(configuration);
@@ -440,6 +564,100 @@ describe("AI reviewer provider configuration", function () {
     ).toThrow();
   });
 
+  it("accepts an optional advanced override without requiring a context length in the write schema", function () {
+    const automatic = {
+      provider: "openai-compatible",
+      baseUrl,
+      model,
+      contextLengthOverride: null,
+    };
+    expect(parseAiReviewerProviderConfigUpdate(automatic)).toEqual(automatic);
+    expect(
+      parseAiReviewerProviderConfigUpdate({
+        provider: "gemini",
+        model: geminiModel,
+        credential,
+      }),
+    ).toEqual({
+      provider: "gemini",
+      model: geminiModel,
+      credential,
+    });
+    expect(
+      parseAiReviewerProviderConfigUpdate({
+        ...automatic,
+        contextLengthOverride: otherContextLength,
+      }),
+    ).toEqual({
+      ...automatic,
+      contextLengthOverride: otherContextLength,
+    });
+
+    for (const invalidOverride of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() =>
+        parseAiReviewerProviderConfigUpdate({
+          ...automatic,
+          contextLengthOverride: invalidOverride,
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      parseAiReviewerProviderConfigUpdate({
+        ...automatic,
+        contextLength,
+      }),
+    ).toThrow();
+  });
+
+  it.each([
+    {
+      privateConfiguration: geminiConfiguration,
+      publicConfiguration: publicGeminiConfiguration,
+      update: geminiUpdate,
+    },
+    {
+      privateConfiguration: claudeConfiguration,
+      publicConfiguration: publicClaudeConfiguration,
+      update: claudeUpdate,
+    },
+  ])(
+    "round-trips the strict $privateConfiguration.provider shape without a base URL",
+    function ({ privateConfiguration, publicConfiguration, update }) {
+      expect(parseAiReviewerProviderConfig(privateConfiguration)).toEqual(
+        privateConfiguration,
+      );
+      expect(parseAiReviewerProviderConfigUpdate(update)).toEqual(update);
+      const response = publicAiReviewerProviderConfig(privateConfiguration);
+      expect(response).toEqual({
+        configured: true,
+        config: publicConfiguration,
+        classification: "remote",
+      });
+      expect(Object.keys(response.config)).toEqual([
+        "provider",
+        "model",
+        "contextLength",
+        "contextLengthSource",
+        "credentialSet",
+        "credentialUpdatedAt",
+      ]);
+      expect(JSON.stringify(response)).not.toContain(credential);
+      expect(JSON.stringify(response)).not.toContain("baseUrl");
+    },
+  );
+
+  it.each([geminiUpdate, claudeUpdate])(
+    "rejects a base URL for $provider",
+    function (configurationWithCredential) {
+      const invalid = {
+        ...configurationWithCredential,
+        baseUrl: "https://arbitrary.example.test/v1",
+      };
+      expect(() => parseAiReviewerProviderConfig(invalid)).toThrow();
+      expect(() => parseAiReviewerProviderConfigUpdate(invalid)).toThrow();
+    },
+  );
+
   it("gets and saves each user's configuration only through its _id", async function () {
     const { modelDependency, records } = inMemoryModel();
     records.set(userId, configuration);
@@ -472,6 +690,56 @@ describe("AI reviewer provider configuration", function () {
           filter.$or[1].revision.$exists === false,
       ),
     ).toBe(true);
+  });
+
+  it("stores and publicly reports the effective detected context length", async function () {
+    const { modelDependency, records } = inMemoryModel();
+    const resolveContextLength = vi.fn(async () => ({
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+    }));
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      resolveContextLength,
+    });
+    const update = {
+      provider: "openai-compatible",
+      baseUrl,
+      model,
+      contextLengthOverride: null,
+    };
+
+    const saved = await store.save(userId, update);
+
+    expect(resolveContextLength).toHaveBeenCalledExactlyOnceWith(update);
+    expect(saved).toEqual({
+      provider: "openai-compatible",
+      baseUrl,
+      model,
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+    });
+    expect(records.get(userId)).toEqual({
+      provider: "openai-compatible",
+      baseUrl,
+      model,
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+      revision: 1,
+    });
+    expect(publicAiReviewerProviderConfig(saved)).toEqual({
+      configured: true,
+      config: {
+        provider: "openai-compatible",
+        baseUrl,
+        model,
+        contextLength: 32_768,
+        contextLengthSource: "detected",
+        credentialSet: false,
+        credentialUpdatedAt: null,
+      },
+      classification: "local",
+    });
   });
 
   it("treats a legacy configuration without context length as unconfigured", async function () {
@@ -543,6 +811,106 @@ describe("AI reviewer provider configuration", function () {
       config: publicCredentialConfiguration,
       classification: "remote",
     });
+  });
+
+  it.each([
+    {
+      configuration: geminiConfiguration,
+      update: geminiUpdate,
+    },
+    {
+      configuration: claudeConfiguration,
+      update: claudeUpdate,
+    },
+  ])(
+    "round-trips a $configuration.provider credential bound only to that provider",
+    async function ({ configuration: nativeConfiguration, update }) {
+      const { manager, encryptor } = credentialManagerFixture();
+      const { modelDependency, records } = inMemoryModel();
+      const store = createAiReviewerProviderConfigStore({
+        model: modelDependency,
+        credentialManager: manager,
+        now: () => credentialUpdatedAt,
+      });
+
+      expect(await store.save(userId, update)).toEqual(nativeConfiguration);
+      expect(await store.get(userId)).toEqual(nativeConfiguration);
+      expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
+        provider: nativeConfiguration.provider,
+        credential,
+      });
+      expect(records.get(userId)).toMatchObject({
+        provider: nativeConfiguration.provider,
+        model: nativeConfiguration.model,
+        contextLength,
+        credentialEncrypted: "ciphertext-1",
+        credentialUpdatedAt: new Date(credentialUpdatedAt),
+      });
+      expect(records.get(userId)).not.toHaveProperty("baseUrl");
+
+      const changedModel = {
+        provider: nativeConfiguration.provider,
+        model: `${nativeConfiguration.model}-updated`,
+        contextLength: otherContextLength,
+      };
+      expect(await store.save(userId, changedModel)).toEqual({
+        ...changedModel,
+        credential,
+        credentialUpdatedAt,
+      });
+      expect(records.get(userId).credentialEncrypted).toBe("ciphertext-1");
+    },
+  );
+
+  it("requires an effective credential for Gemini and Claude but not OpenAI-compatible", async function () {
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+    });
+
+    expect(await store.save(userId, configuration)).toEqual(configuration);
+    for (const nativeConfiguration of [
+      {
+        provider: "gemini",
+        model: geminiModel,
+        contextLength,
+      },
+      {
+        provider: "claude",
+        model: claudeModel,
+        contextLength,
+      },
+    ]) {
+      const error = await captureError(
+        store.save(otherUserId, nativeConfiguration),
+      );
+      expect(error).toBeInstanceOf(TypeError);
+      expect(error.message).toBe("The AI provider credential is required.");
+    }
+    expect(records.has(otherUserId)).toBe(false);
+  });
+
+  it("refuses to replay a native credential after its provider binding changes", async function () {
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+    await store.save(userId, geminiUpdate);
+    records.set(userId, {
+      ...records.get(userId),
+      provider: "claude",
+      model: claudeModel,
+    });
+
+    const error = await captureError(store.get(userId));
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toBe("The AI provider credential could not be read.");
+    expect(String(error)).not.toContain(credential);
   });
 
   it("preserves an omitted credential only for the same canonical destination", async function () {
@@ -853,6 +1221,34 @@ describe("AI reviewer provider configuration", function () {
     expect(nearMatch).toHaveBeenCalledOnce();
   });
 
+  it("resolves OpenAI-compatible context metadata through the bounded provider service seam", async function () {
+    const signal = new AbortController().signal;
+    const contextLengthDetector = vi.fn(async () => 32_768);
+    const service = createAiReviewerProviderService({
+      contextLengthDetector,
+      contextLengthDetectionSignalFactory: () => signal,
+    });
+
+    expect(
+      await service.resolveContextLength({
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        model: remoteModel,
+        credential,
+        contextLengthOverride: null,
+      }),
+    ).toEqual({
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+    });
+    expect(contextLengthDetector).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: remoteBaseUrl,
+      model: remoteModel,
+      credential,
+      signal,
+    });
+  });
+
   it("passes the credential only into connection, discussion, and review transport construction", async function () {
     const transport = {
       generateChat: vi.fn(async () => compatibilityResult),
@@ -890,6 +1286,91 @@ describe("AI reviewer provider configuration", function () {
       ]);
     }
   });
+
+  it.each([
+    {
+      configuration: geminiConfiguration,
+      factoryName: "geminiTransportFactory",
+    },
+    {
+      configuration: claudeConfiguration,
+      factoryName: "claudeTransportFactory",
+    },
+  ])(
+    "dispatches $configuration.provider through its native provider transport without a base URL",
+    async function ({ configuration: nativeConfiguration, factoryName }) {
+      const transport = {
+        generateChat: vi.fn(async () => compatibilityResult),
+        createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
+        createAgentGateway: vi.fn(() => ({ kind: "review" })),
+      };
+      const nativeFactory = vi.fn(() => transport);
+      const service = createAiReviewerProviderService({
+        [factoryName]: nativeFactory,
+        openAiCompatibleTransportFactory: vi.fn(() => {
+          throw new Error("The OpenAI-compatible transport is not expected.");
+        }),
+      });
+
+      expect(await service.testConnection(nativeConfiguration)).toEqual({
+        ok: true,
+        provider: nativeConfiguration.provider,
+        model: nativeConfiguration.model,
+        classification: "remote",
+      });
+      expect(service.createDiscussionGateway(nativeConfiguration)).toEqual({
+        kind: "discussion",
+      });
+      expect(
+        service.createAgentGateway(nativeConfiguration, {
+          readProjectFile: vi.fn(),
+        }),
+      ).toEqual({ kind: "review" });
+      expect(nativeFactory).toHaveBeenCalledTimes(3);
+      for (const [options] of nativeFactory.mock.calls) {
+        expect(options).toEqual({
+          credential,
+          modelTag: nativeConfiguration.model,
+        });
+        expect(options).not.toHaveProperty("baseUrl");
+      }
+    },
+  );
+
+  it.each([
+    {
+      provider: "gemini",
+      model: geminiModel,
+      contextLength,
+    },
+    {
+      provider: "claude",
+      model: claudeModel,
+      contextLength,
+    },
+  ])(
+    "rejects a missing $provider credential before constructing its transport",
+    async function (nativeConfiguration) {
+      const geminiTransportFactory = vi.fn();
+      const claudeTransportFactory = vi.fn();
+      const service = createAiReviewerProviderService({
+        geminiTransportFactory,
+        claudeTransportFactory,
+      });
+
+      const error = await captureError(
+        service.testConnection(nativeConfiguration),
+      );
+      expect(error).toBeInstanceOf(AgentGatewayError);
+      expect(error).toMatchObject({
+        code: "AI_PROVIDER_NOT_CONFIGURED",
+        category: "configuration",
+        retryable: false,
+      });
+      expect(geminiTransportFactory).not.toHaveBeenCalled();
+      expect(claudeTransportFactory).not.toHaveBeenCalled();
+    },
+  );
 
   it("serves bounded GET and strict PUT configuration responses", async function () {
     const { controller, store } = providerControllerFixture({
@@ -942,6 +1423,7 @@ describe("AI reviewer provider configuration", function () {
       "baseUrl",
       "model",
       "contextLength",
+      "contextLengthSource",
       "credentialSet",
       "credentialUpdatedAt",
     ]);
@@ -957,6 +1439,74 @@ describe("AI reviewer provider configuration", function () {
       "PRIVATE_SECRET",
     );
     expect(store.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("classifies a credential-storage failure as a server persistence problem and records it", async function () {
+    const storageSentinel =
+      "EACCES_PRIVATE_CREDENTIAL_/var/lib/overleaf/data/.token-cipher.json";
+    const failingCredentialManager = createAiReviewerProviderCredentialManager({
+      encryptor: {
+        encryptJson: vi.fn(async () => {
+          throw new Error(storageSentinel);
+        }),
+        decryptToJson: vi.fn(),
+      },
+    });
+    const { modelDependency } = inMemoryModel();
+    const configStore = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: failingCredentialManager,
+    });
+    const failureRecorder = vi.fn();
+    const controller = createAiReviewerProviderController({
+      configStore,
+      providerService: { testConnection: vi.fn() },
+      elapsedNow: vi.fn().mockReturnValueOnce(200).mockReturnValue(211.6),
+      failureRecorder,
+    });
+    const response = new FakeResponse();
+
+    await controller.saveConfiguration(
+      httpRequest({ body: geminiUpdate }),
+      response,
+    );
+
+    expect(response.statusCode).toBe(500);
+    expect(response.body).toEqual({
+      error: {
+        code: "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
+        category: "configuration",
+        message:
+          "AI Reviewer could not save the provider configuration on this server. Ask the server administrator to check AI Reviewer storage and permissions, then try again.",
+        retryable: false,
+      },
+    });
+    expect(Object.keys(response.body.error).sort()).toEqual([
+      "category",
+      "code",
+      "message",
+      "retryable",
+    ]);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: null,
+      provider: "gemini",
+      model: geminiModel,
+      scopeKind: "none",
+      failureCategory: "configuration",
+      failureCode: "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
+      providerStatusCode: null,
+      providerErrorType: null,
+      elapsedMs: 12,
+    });
+    expect(modelDependency.findOne).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.body)).not.toContain(storageSentinel);
+    expect(JSON.stringify(response.body)).not.toContain(credential);
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      storageSentinel,
+    );
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      credential,
+    );
   });
 
   it("tests the saved provider and returns bounded configuration errors", async function () {
@@ -1324,6 +1874,67 @@ Cite \cite{missing}`;
     expect(parseNdjson(response)).toEqual(streamEvents());
   });
 
+  it("records the native provider discriminator in the shape-only failure record", async function () {
+    const failureRecorder = vi.fn();
+    const providerService = {
+      createAgentGateway: vi.fn(() => {
+        throw new AgentGatewayError("PRIVATE_NATIVE_PROVIDER_FAILURE", {
+          code: "AI_PROVIDER_FAILED",
+          category: "provider",
+          retryable: true,
+        });
+      }),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => geminiConfiguration) },
+      providerService,
+      requestScopeReader: {
+        read: vi.fn(async () => ({
+          readProjectFile: vi.fn(),
+          projectContext: undefined,
+          searchZotero: undefined,
+          validateEvidence: undefined,
+        })),
+      },
+      now: () => createdAt,
+      eventId: () => "event-native-provider-error",
+      elapsedNow: vi.fn().mockReturnValueOnce(100).mockReturnValue(108.4),
+      failureRecorder,
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: selectionRequest().requestId,
+      provider: "gemini",
+      model: geminiModel,
+      scopeKind: "selection",
+      failureCategory: "provider",
+      failureCode: "AI_PROVIDER_FAILED",
+      providerStatusCode: null,
+      providerErrorType: null,
+      elapsedMs: 8,
+    });
+    expect(Object.keys(failureRecorder.mock.calls[0][0])).toEqual([
+      "requestId",
+      "provider",
+      "model",
+      "scopeKind",
+      "failureCategory",
+      "failureCode",
+      "providerStatusCode",
+      "providerErrorType",
+      "elapsedMs",
+    ]);
+    expect(response.chunks.join("")).not.toContain(
+      "PRIVATE_NATIVE_PROVIDER_FAILURE",
+    );
+  });
+
   it("returns a truthful bounded error when project context is too large", async function () {
     const privateTitle = "PRIVATE_PROJECT_TITLE_".repeat(9);
     const failureRecorder = vi.fn();
@@ -1381,6 +1992,8 @@ Cite \cite{missing}`;
       scopeKind: "project",
       failureCategory: "configuration",
       failureCode: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      providerStatusCode: null,
+      providerErrorType: null,
       elapsedMs: 19,
     });
     expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(

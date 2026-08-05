@@ -6,6 +6,7 @@ import {
   parseAiReviewerProviderConfigUpdate,
   publicAiReviewerProviderConfig,
 } from "./AiReviewerProviderConfig.mjs";
+import { AiReviewerProviderConfigInputError } from "./AiReviewerProviderConfigStore.mjs";
 
 /** @import { Request, Response } from 'express' */
 
@@ -20,6 +21,13 @@ const ERRORS = Object.freeze({
     code: "AI_PROVIDER_NOT_CONFIGURED",
     category: "configuration",
     message: "No AI provider is configured.",
+    retryable: false,
+  }),
+  persistence: Object.freeze({
+    code: "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
+    category: "configuration",
+    message:
+      "AI Reviewer could not save the provider configuration on this server. Ask the server administrator to check AI Reviewer storage and permissions, then try again.",
     retryable: false,
   }),
   timeout: Object.freeze({
@@ -107,9 +115,32 @@ function providerFailureKind(error) {
   return /** @type {const} */ ("provider");
 }
 
+/** @param {() => number} elapsedNow */
+function readElapsedNow(elapsedNow) {
+  try {
+    const value = elapsedNow();
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * @param {number} startedAt
+ * @param {() => number} elapsedNow
+ */
+function elapsedMilliseconds(startedAt, elapsedNow) {
+  return Math.max(0, Math.round(readElapsedNow(elapsedNow) - startedAt));
+}
+
 /** @param {any} dependencies */
 export function createAiReviewerProviderController(dependencies) {
-  const { configStore, providerService } = dependencies;
+  const {
+    configStore,
+    providerService,
+    failureRecorder = () => {},
+    elapsedNow = () => performance.now(),
+  } = dependencies;
   const timeoutSignalFactory =
     dependencies.timeoutSignalFactory ?? (() => AbortSignal.timeout(30_000));
   /**
@@ -131,12 +162,37 @@ export function createAiReviewerProviderController(dependencies) {
    * @param {Response} response
    */
   async function saveConfiguration(request, response) {
+    let config;
     try {
-      const config = parseAiReviewerProviderConfigUpdate(request.body);
-      const saved = await configStore.save(userId(request), config);
-      return response.json(publicAiReviewerProviderConfig(saved));
+      config = parseAiReviewerProviderConfigUpdate(request.body);
     } catch {
       return sendError(response, 400, "invalid");
+    }
+
+    const startedAt = readElapsedNow(elapsedNow);
+    try {
+      const saved = await configStore.save(userId(request), config);
+      return response.json(publicAiReviewerProviderConfig(saved));
+    } catch (error) {
+      if (error instanceof AiReviewerProviderConfigInputError) {
+        return sendError(response, 400, "invalid");
+      }
+      try {
+        failureRecorder({
+          requestId: null,
+          provider: config.provider,
+          model: config.model,
+          scopeKind: "none",
+          failureCategory: ERRORS.persistence.category,
+          failureCode: ERRORS.persistence.code,
+          providerStatusCode: null,
+          providerErrorType: null,
+          elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
+        });
+      } catch {
+        // Logging cannot replace the bounded public failure response.
+      }
+      return sendError(response, 500, "persistence");
     }
   }
 

@@ -449,6 +449,11 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(gateway).toMatchObject({
       provider: "openai-compatible",
       modelId: modelTag,
+      providerOptions: {
+        openai: {
+          reasoningEffort: "none",
+        },
+      },
       readProjectFile,
     });
     expect("languageModel" in fixture.transport).toBe(false);

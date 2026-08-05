@@ -167,6 +167,8 @@ async function executeLifecycle(lifecycle) {
           code: credentialSentinel,
           category: "provider",
           retryable: false,
+          providerStatusCode: request.scope.text,
+          providerErrorType: credentialSentinel,
         });
       },
     };
@@ -267,6 +269,8 @@ describe("AI reviewer: module shell privacy persistence", function () {
                 scopeKind: "document",
                 failureCategory: "provider",
                 failureCode: "AI_PROVIDER_FAILED",
+                providerStatusCode: null,
+                providerErrorType: null,
                 elapsedMs: 10,
               },
             },

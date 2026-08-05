@@ -1,5 +1,7 @@
 // @ts-check
 
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import Ajv from "ajv";
 
@@ -15,8 +17,15 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
+import {
+  isValidModelContextLength,
+  MAX_DETECTED_MODEL_CONTEXT_LENGTH,
+} from "./ModelContextLength.mjs";
 
+const CANONICAL_MODEL_ARCHITECTURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
+const MAX_CONTEXT_METADATA_BYTES = 65_536;
+const MAX_CONTEXT_METADATA_CHUNKS = 128;
 const MAX_NONSTREAM_CONTENT_PARTS = 512;
 const MAX_NONSTREAM_OUTPUT_CHARACTERS = 100_000;
 const MAX_PROMPT_CHARACTERS = 100_000;
@@ -26,6 +35,27 @@ const MAX_STREAM_TEXT_ID_CHARACTERS = 256;
 const MAX_TOOL_CALL_ID_CHARACTERS = 256;
 const INTRINSIC_PROMISE_THEN = Promise.prototype.then;
 const LOCAL_TRANSPORT_ERRORS = new WeakSet();
+const EMPTY_PROVIDER_OPTIONS = Object.freeze({});
+const OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS = Object.freeze({
+  openai: Object.freeze({
+    reasoningEffort: "none",
+  }),
+});
+const OPENAI_COMPATIBLE_PROVIDER_OPTIONS = Object.freeze({
+  openai: Object.freeze({
+    parallelToolCalls: false,
+    reasoningEffort: "none",
+    strictJsonSchema: true,
+  }),
+});
+const NATIVE_PROVIDER_ENDPOINTS = Object.freeze({
+  gemini: Object.freeze({
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+  }),
+  claude: Object.freeze({
+    baseUrl: "https://api.anthropic.com/v1",
+  }),
+});
 const GENERATE_CONTENT_PART_PROPERTIES = Object.freeze([
   "type",
   "text",
@@ -202,16 +232,23 @@ function requestUrlNotAllowed() {
   );
 }
 
+function nativeProviderRequestUrlNotAllowed() {
+  return localTransportError(
+    new AgentGatewayError("The native provider request URL is not allowed.", {
+      code: "AI_PROVIDER_CONFIGURATION_INVALID",
+      category: "configuration",
+      retryable: false,
+    }),
+  );
+}
+
 function redirectRejected() {
   return localTransportError(
-    new AgentGatewayError(
-      "The OpenAI-compatible provider redirect was rejected.",
-      {
-        code: "AI_PROVIDER_REDIRECT_REJECTED",
-        category: "provider",
-        retryable: false,
-      },
-    ),
+    new AgentGatewayError("The AI provider redirect was rejected.", {
+      code: "AI_PROVIDER_REDIRECT_REJECTED",
+      category: "provider",
+      retryable: false,
+    }),
   );
 }
 
@@ -225,6 +262,71 @@ function invalidProviderResponse() {
         retryable: false,
       },
     ),
+  );
+}
+
+function invalidContextMetadataResponse() {
+  return localTransportError(
+    new AgentGatewayError(
+      "The AI provider returned invalid model context metadata.",
+      {
+        code: "AI_PROVIDER_SCHEMA_INVALID",
+        category: "schema",
+        retryable: false,
+      },
+    ),
+  );
+}
+
+/**
+ * Stop an untrusted response body without waiting for its cancellation promise.
+ * A provider must not be able to keep a rejected metadata request open.
+ *
+ * @param {Response} response
+ * @param {unknown} reason
+ */
+function cancelRejectedResponseBody(response, reason) {
+  const body = response.body;
+  if (body == null) {
+    return;
+  }
+  try {
+    observeProviderWork(
+      body.cancel(reason),
+      () => {},
+      () => {},
+    );
+  } catch (error) {
+    observeInvalidNativePromise(error);
+  }
+}
+
+/** @param {number} status */
+function contextMetadataHttpFailure(status) {
+  if (status === 401 || status === 403) {
+    return localTransportError(
+      new AgentGatewayError("The AI provider rejected its credentials.", {
+        code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+        category: "authentication",
+        retryable: false,
+      }),
+    );
+  }
+  if (status === 429) {
+    return localTransportError(
+      new AgentGatewayError("The AI provider rate limit was reached.", {
+        code: "AI_PROVIDER_RATE_LIMITED",
+        category: "rate-limit",
+        retryable: true,
+      }),
+    );
+  }
+  return localTransportError(
+    new AgentGatewayError("The AI provider metadata request failed.", {
+      code: "AI_PROVIDER_CONTEXT_LENGTH_DETECTION_FAILED",
+      category: "provider",
+      retryable: status >= 500,
+    }),
   );
 }
 
@@ -2138,11 +2240,27 @@ function runProviderConstruction(work) {
 /**
  * @param {{
  *   baseUrl: string,
+ *   allowedRequestUrl: string,
  *   fetchImpl: typeof fetch,
  * }} options
  */
-function createGuardedFetch({ baseUrl, fetchImpl }) {
-  const allowedRequestUrl = `${baseUrl}/chat/completions`;
+function createGuardedOpenAiCompatibleFetch({
+  baseUrl,
+  allowedRequestUrl,
+  fetchImpl,
+}) {
+  const configuredEndpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+  const configuredOrigin = new URL(configuredEndpoint.baseUrl).origin;
+  const allowedEndpoint = new URL(allowedRequestUrl);
+  if (
+    allowedEndpoint.href !== allowedRequestUrl ||
+    allowedEndpoint.origin !== configuredOrigin ||
+    allowedEndpoint.username !== "" ||
+    allowedEndpoint.password !== "" ||
+    allowedEndpoint.hash !== ""
+  ) {
+    throw requestUrlNotAllowed();
+  }
 
   /**
    * @param {Parameters<typeof fetch>[0]} input
@@ -2151,7 +2269,8 @@ function createGuardedFetch({ baseUrl, fetchImpl }) {
   return async function guardedOllamaFetch(input, init) {
     const currentEndpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
     if (
-      `${currentEndpoint.baseUrl}/chat/completions` !== allowedRequestUrl ||
+      currentEndpoint.baseUrl !== configuredEndpoint.baseUrl ||
+      new URL(currentEndpoint.baseUrl).origin !== configuredOrigin ||
       requestUrl(input) !== allowedRequestUrl
     ) {
       throw requestUrlNotAllowed();
@@ -2182,83 +2301,290 @@ function createGuardedFetch({ baseUrl, fetchImpl }) {
       );
     }
     if (response.status >= 300 && response.status <= 399) {
-      throw redirectRejected();
+      const error = redirectRejected();
+      cancelRejectedResponseBody(response, error);
+      throw error;
     }
     return response;
   };
 }
 
 /**
- * Sole production owner of the OpenAI-compatible provider SDK. The concrete
- * model remains private and can enter only the local AI SDK gateway.
+ * @param {{
+ *   baseUrl: string,
+ *   fetchImpl: typeof fetch,
+ * }} options
  */
-export class OllamaOpenAiTransport {
+function createGuardedFetch({ baseUrl, fetchImpl }) {
+  return createGuardedOpenAiCompatibleFetch({
+    baseUrl,
+    allowedRequestUrl: `${baseUrl}/chat/completions`,
+    fetchImpl,
+  });
+}
+
+/** @param {unknown} value */
+function plainJsonRecord(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw invalidContextMetadataResponse();
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw invalidContextMetadataResponse();
+  }
+  return /** @type {Record<string, unknown>} */ (value);
+}
+
+/**
+ * @param {Record<string, unknown>} record
+ * @param {string} key
+ */
+function ownJsonDataProperty(record, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (
+    descriptor == null ||
+    !descriptor.enumerable ||
+    !Object.hasOwn(descriptor, "value")
+  ) {
+    throw invalidContextMetadataResponse();
+  }
+  return descriptor.value;
+}
+
+/**
+ * @param {Response} response
+ * @param {AbortSignal | undefined} signal
+ */
+async function readBoundedContextMetadata(response, signal) {
+  let contentType;
+  let contentLength;
+  try {
+    contentType = response.headers.get("content-type");
+    contentLength = response.headers.get("content-length");
+  } catch {
+    throw invalidContextMetadataResponse();
+  }
+  if (
+    contentType?.split(";", 1)[0]?.trim().toLowerCase() !==
+      "application/json" ||
+    (contentLength != null &&
+      (!/^(?:0|[1-9][0-9]*)$/u.test(contentLength) ||
+        Number(contentLength) > MAX_CONTEXT_METADATA_BYTES))
+  ) {
+    const error = invalidContextMetadataResponse();
+    cancelRejectedResponseBody(response, error);
+    throw error;
+  }
+
+  const body = response.body;
+  if (body == null) {
+    throw invalidContextMetadataResponse();
+  }
+  const reader = body.getReader();
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let chunkCount = 0;
+  let byteCount = 0;
+  let completed = false;
+  try {
+    while (!completed) {
+      const part = await waitForProviderWork(reader.read(), signal);
+      if (
+        part == null ||
+        typeof part !== "object" ||
+        typeof part.done !== "boolean"
+      ) {
+        throw invalidContextMetadataResponse();
+      }
+      if (part.done) {
+        completed = true;
+        continue;
+      }
+      chunkCount += 1;
+      if (
+        !(part.value instanceof Uint8Array) ||
+        chunkCount > MAX_CONTEXT_METADATA_CHUNKS
+      ) {
+        throw invalidContextMetadataResponse();
+      }
+      byteCount += part.value.byteLength;
+      if (byteCount > MAX_CONTEXT_METADATA_BYTES) {
+        throw invalidContextMetadataResponse();
+      }
+      chunks.push(part.value);
+    }
+  } catch (error) {
+    try {
+      const cancellation = reader.cancel(error);
+      observeProviderWork(
+        cancellation,
+        () => {},
+        () => {},
+      );
+    } catch (cancellationError) {
+      observeInvalidNativePromise(cancellationError);
+    }
+    if (error instanceof AgentGatewayError) {
+      throw error;
+    }
+    if (signal?.aborted) {
+      throw classifyTransportError(error, signal);
+    }
+    throw invalidContextMetadataResponse();
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch (error) {
+      observeInvalidNativePromise(error);
+    }
+  }
+
+  const bytes = new Uint8Array(byteCount);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    parsed = JSON.parse(text);
+  } catch {
+    throw invalidContextMetadataResponse();
+  }
+  return parsed;
+}
+
+/** @param {unknown} input */
+function modelContextLengthFromMetadata(input) {
+  const response = plainJsonRecord(input);
+  const modelInfo = plainJsonRecord(
+    ownJsonDataProperty(response, "model_info"),
+  );
+  const architecture = ownJsonDataProperty(modelInfo, "general.architecture");
+  if (
+    typeof architecture !== "string" ||
+    !CANONICAL_MODEL_ARCHITECTURE.test(architecture)
+  ) {
+    throw invalidContextMetadataResponse();
+  }
+  const contextLength = ownJsonDataProperty(
+    modelInfo,
+    `${architecture}.context_length`,
+  );
+  if (
+    !isValidModelContextLength(contextLength, MAX_DETECTED_MODEL_CONTEXT_LENGTH)
+  ) {
+    throw invalidContextMetadataResponse();
+  }
+  return /** @type {number} */ (contextLength);
+}
+
+/**
+ * Detect Ollama model metadata without widening the Chat Completions request
+ * path. The fixed metadata path is at the configured endpoint's same origin.
+ *
+ * @param {{
+ *   baseUrl: unknown,
+ *   credential?: unknown,
+ *   model: unknown,
+ *   signal?: AbortSignal,
+ *   fetchImpl?: typeof fetch,
+ * }} input
+ */
+export async function detectOpenAiCompatibleContextLength({
+  baseUrl,
+  credential,
+  model,
+  signal,
+  fetchImpl = globalThis.fetch,
+}) {
+  const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+  const parsedModel = parseOpenAiCompatibleModelId(model);
+  const parsedCredential =
+    credential === undefined
+      ? undefined
+      : parseAiReviewerProviderCredential(credential);
+  if (typeof fetchImpl !== "function") {
+    throw new TypeError("fetchImpl must be a function.");
+  }
+  throwIfTransportSignalAborted(signal);
+
+  const metadataUrl = `${new URL(endpoint.baseUrl).origin}/api/show`;
+  const guardedFetch = createGuardedOpenAiCompatibleFetch({
+    baseUrl: endpoint.baseUrl,
+    allowedRequestUrl: metadataUrl,
+    fetchImpl,
+  });
+  const headers = new Headers({ "content-type": "application/json" });
+  if (parsedCredential !== undefined) {
+    headers.set("authorization", `Bearer ${parsedCredential}`);
+  }
+  const response = await guardedFetch(metadataUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model: parsedModel, verbose: false }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (!(response instanceof Response)) {
+    throw invalidContextMetadataResponse();
+  }
+  if (response.status < 200 || response.status >= 300) {
+    const error = contextMetadataHttpFailure(response.status);
+    cancelRejectedResponseBody(response, error);
+    throw error;
+  }
+  return modelContextLengthFromMetadata(
+    await readBoundedContextMetadata(response, signal),
+  );
+}
+
+/**
+ * Shared hardening boundary for untrusted AI SDK LanguageModelV3 providers.
+ * The concrete model remains private and can enter only the local gateway.
+ */
+export class HardenedAiSdkProviderTransport {
   #doGenerate;
   #doStream;
   #languageModel;
   #modelTag;
+  #provider;
+  #gatewayProviderOptions;
+  #providerOptions;
   #proposalState = new WeakMap();
 
   /**
    * @param {{
-   *   baseUrl: unknown,
-   *   credential?: unknown,
+   *   languageModel: unknown,
    *   modelTag: unknown,
-   *   fetchImpl?: typeof fetch,
-   *   createProvider?: typeof createOpenAI,
+   *   provider: "openai-compatible" | "gemini" | "claude",
+   *   gatewayProviderOptions: Readonly<Record<string, unknown>>,
+   *   providerOptions: Readonly<Record<string, unknown>>,
+   *   invalidModelMessage: string,
    * }} options
    */
   constructor({
-    baseUrl,
-    credential,
+    languageModel,
     modelTag,
-    fetchImpl = globalThis.fetch,
-    createProvider = createOpenAI,
+    provider,
+    gatewayProviderOptions,
+    providerOptions,
+    invalidModelMessage,
   }) {
-    const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
-    const parsedCredential =
-      credential == null
-        ? "ollama"
-        : parseAiReviewerProviderCredential(credential);
     const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
-    if (typeof fetchImpl !== "function") {
-      throw new TypeError("fetchImpl must be a function.");
-    }
-    if (typeof createProvider !== "function") {
-      throw new TypeError("createProvider must be a function.");
-    }
-
-    const provider = runProviderConstruction(() =>
-      createProvider({
-        apiKey: parsedCredential,
-        baseURL: endpoint.baseUrl,
-        fetch: createGuardedFetch({
-          baseUrl: endpoint.baseUrl,
-          fetchImpl,
-        }),
-        name: "openai-compatible",
-      }),
-    );
-    observeInvalidNativePromise(provider);
-    const chat =
-      provider == null ||
-      (typeof provider !== "object" && typeof provider !== "function")
-        ? undefined
-        : runProviderConstruction(() => Reflect.get(provider, "chat"));
-    observeInvalidNativePromise(chat);
     if (
-      provider == null ||
-      (typeof provider !== "object" && typeof provider !== "function") ||
-      typeof chat !== "function"
+      !["openai-compatible", "gemini", "claude"].includes(provider) ||
+      gatewayProviderOptions == null ||
+      typeof gatewayProviderOptions !== "object" ||
+      Array.isArray(gatewayProviderOptions) ||
+      providerOptions == null ||
+      typeof providerOptions !== "object" ||
+      Array.isArray(providerOptions) ||
+      typeof invalidModelMessage !== "string" ||
+      invalidModelMessage.length === 0
     ) {
-      throw new TypeError(
-        "createProvider must return a provider with a chat method.",
-      );
+      throw new TypeError("The AI SDK provider transport is invalid.");
     }
-
-    const languageModel = runProviderConstruction(() =>
-      Reflect.apply(chat, provider, [parsedModelTag]),
-    );
     observeInvalidNativePromise(languageModel);
     const modelSlots = ["specificationVersion", "doGenerate", "doStream"].map(
       (property) =>
@@ -2286,15 +2612,16 @@ export class OllamaOpenAiTransport {
       typeof doGenerate !== "function" ||
       typeof doStream !== "function"
     ) {
-      throw new TypeError(
-        "The OpenAI-compatible provider must return a concrete Chat Completions model.",
-      );
+      throw new TypeError(invalidModelMessage);
     }
 
     this.#doGenerate = doGenerate;
     this.#doStream = doStream;
     this.#languageModel = languageModel;
     this.#modelTag = parsedModelTag;
+    this.#provider = provider;
+    this.#gatewayProviderOptions = gatewayProviderOptions;
+    this.#providerOptions = providerOptions;
   }
 
   /**
@@ -2331,13 +2658,7 @@ export class OllamaOpenAiTransport {
         responseFormat: {
           type: "text",
         },
-        providerOptions: {
-          openai: {
-            parallelToolCalls: false,
-            reasoningEffort: "none",
-            strictJsonSchema: true,
-          },
-        },
+        providerOptions: this.#providerOptions,
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
@@ -2393,13 +2714,7 @@ export class OllamaOpenAiTransport {
         responseFormat: {
           type: "text",
         },
-        providerOptions: {
-          openai: {
-            parallelToolCalls: false,
-            reasoningEffort: "none",
-            strictJsonSchema: true,
-          },
-        },
+        providerOptions: this.#providerOptions,
         abortSignal: signal,
       },
       signal,
@@ -2441,13 +2756,7 @@ export class OllamaOpenAiTransport {
           type: "json",
           schema: request.schema,
         },
-        providerOptions: {
-          openai: {
-            parallelToolCalls: false,
-            reasoningEffort: "none",
-            strictJsonSchema: true,
-          },
-        },
+        providerOptions: this.#providerOptions,
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
@@ -2502,13 +2811,7 @@ export class OllamaOpenAiTransport {
           type: "tool",
           toolName: request.tool.name,
         },
-        providerOptions: {
-          openai: {
-            parallelToolCalls: false,
-            reasoningEffort: "none",
-            strictJsonSchema: true,
-          },
-        },
+        providerOptions: this.#providerOptions,
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
@@ -2616,13 +2919,7 @@ export class OllamaOpenAiTransport {
         responseFormat: {
           type: "text",
         },
-        providerOptions: {
-          openai: {
-            parallelToolCalls: false,
-            reasoningEffort: "none",
-            strictJsonSchema: true,
-          },
-        },
+        providerOptions: this.#providerOptions,
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
@@ -2807,8 +3104,9 @@ export class OllamaOpenAiTransport {
   createDiscussionGateway({ contextLength, now, createId }) {
     return new AiSdkAgentGateway({
       model: this.#languageModel,
-      provider: "openai-compatible",
+      provider: this.#provider,
       modelId: this.#modelTag,
+      providerOptions: this.#gatewayProviderOptions,
       contextLength,
       readProjectFile() {
         throw new AgentGatewayError(
@@ -2847,8 +3145,9 @@ export class OllamaOpenAiTransport {
   }) {
     return new AiSdkAgentGateway({
       model: this.#languageModel,
-      provider: "openai-compatible",
+      provider: this.#provider,
       modelId: this.#modelTag,
+      providerOptions: this.#gatewayProviderOptions,
       contextLength,
       readProjectFile,
       projectContext,
@@ -2857,5 +3156,259 @@ export class OllamaOpenAiTransport {
       now,
       createId,
     });
+  }
+}
+
+/**
+ * Sole production owner of the OpenAI-compatible provider SDK. Endpoint
+ * validation and request-URL revalidation remain specific to this adapter;
+ * response hardening is inherited from the shared transport boundary.
+ */
+export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
+  /**
+   * @param {{
+   *   baseUrl: unknown,
+   *   credential?: unknown,
+   *   modelTag: unknown,
+   *   fetchImpl?: typeof fetch,
+   *   createProvider?: typeof createOpenAI,
+   * }} options
+   */
+  constructor({
+    baseUrl,
+    credential,
+    modelTag,
+    fetchImpl = globalThis.fetch,
+    createProvider = createOpenAI,
+  }) {
+    const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+    const parsedCredential =
+      credential == null
+        ? "ollama"
+        : parseAiReviewerProviderCredential(credential);
+    const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
+    if (typeof fetchImpl !== "function") {
+      throw new TypeError("fetchImpl must be a function.");
+    }
+    if (typeof createProvider !== "function") {
+      throw new TypeError("createProvider must be a function.");
+    }
+
+    const provider = runProviderConstruction(() =>
+      createProvider({
+        apiKey: parsedCredential,
+        baseURL: endpoint.baseUrl,
+        fetch: createGuardedFetch({
+          baseUrl: endpoint.baseUrl,
+          fetchImpl,
+        }),
+        name: "openai-compatible",
+      }),
+    );
+    observeInvalidNativePromise(provider);
+    const chat =
+      provider == null ||
+      (typeof provider !== "object" && typeof provider !== "function")
+        ? undefined
+        : runProviderConstruction(() => Reflect.get(provider, "chat"));
+    observeInvalidNativePromise(chat);
+    if (
+      provider == null ||
+      (typeof provider !== "object" && typeof provider !== "function") ||
+      typeof chat !== "function"
+    ) {
+      throw new TypeError(
+        "createProvider must return a provider with a chat method.",
+      );
+    }
+
+    const languageModel = runProviderConstruction(() =>
+      Reflect.apply(chat, provider, [parsedModelTag]),
+    );
+    super({
+      languageModel,
+      provider: "openai-compatible",
+      modelTag: parsedModelTag,
+      gatewayProviderOptions: OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS,
+      providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
+      invalidModelMessage:
+        "The OpenAI-compatible provider must return a concrete Chat Completions model.",
+    });
+  }
+}
+
+/**
+ * Apply the redirect and error-classification part of the transport boundary
+ * without exposing a configurable host to a native provider.
+ *
+ * @param {{
+ *   baseUrl: string,
+ *   fetchImpl: typeof fetch,
+ * }} options
+ */
+function createNativeProviderFetch({ baseUrl, fetchImpl }) {
+  if (typeof fetchImpl !== "function") {
+    throw new TypeError("fetchImpl must be a function.");
+  }
+  const fixedEndpoint = new URL(baseUrl);
+
+  /**
+   * @param {Parameters<typeof fetch>[0]} input
+   * @param {Parameters<typeof fetch>[1]} [init]
+   */
+  return async function nativeProviderFetch(input, init) {
+    let candidateEndpoint;
+    try {
+      candidateEndpoint = new URL(requestUrl(input));
+    } catch (error) {
+      observeInvalidNativePromise(error);
+      throw nativeProviderRequestUrlNotAllowed();
+    }
+    if (
+      candidateEndpoint.origin !== fixedEndpoint.origin ||
+      candidateEndpoint.username !== "" ||
+      candidateEndpoint.password !== "" ||
+      candidateEndpoint.hash !== "" ||
+      (candidateEndpoint.pathname !== fixedEndpoint.pathname &&
+        !candidateEndpoint.pathname.startsWith(`${fixedEndpoint.pathname}/`))
+    ) {
+      throw nativeProviderRequestUrlNotAllowed();
+    }
+
+    let response;
+    try {
+      response = await fetchImpl(input, {
+        ...init,
+        redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
+      });
+    } catch (error) {
+      observeInvalidNativePromise(error);
+      const signal =
+        init?.signal ??
+        (typeof Request !== "undefined" && input instanceof Request
+          ? input.signal
+          : undefined);
+      if (signal?.aborted) {
+        throw classifyTransportError(error, signal);
+      }
+      throw localTransportError(
+        new AgentGatewayError("The AI provider could not be reached.", {
+          code: "AI_PROVIDER_NETWORK_FAILED",
+          category: "network",
+          retryable: true,
+        }),
+      );
+    }
+    if (response.status >= 300 && response.status <= 399) {
+      throw redirectRejected();
+    }
+    return response;
+  };
+}
+
+/**
+ * @param {{
+ *   credential: unknown,
+ *   createProvider: Function,
+ *   fetchImpl: typeof fetch,
+ *   modelTag: unknown,
+ *   provider: "gemini" | "claude",
+ * }} options
+ */
+function nativeTransportOptions({
+  credential,
+  createProvider,
+  fetchImpl,
+  modelTag,
+  provider,
+}) {
+  const parsedCredential = parseAiReviewerProviderCredential(credential);
+  const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
+  if (typeof createProvider !== "function") {
+    throw new TypeError("createProvider must be a function.");
+  }
+  const endpoint = NATIVE_PROVIDER_ENDPOINTS[provider];
+  const sdkProvider = runProviderConstruction(() =>
+    createProvider({
+      apiKey: parsedCredential,
+      baseURL: endpoint.baseUrl,
+      fetch: createNativeProviderFetch({
+        baseUrl: endpoint.baseUrl,
+        fetchImpl,
+      }),
+      name: provider,
+    }),
+  );
+  observeInvalidNativePromise(sdkProvider);
+  if (typeof sdkProvider !== "function") {
+    throw new TypeError(
+      "createProvider must return a callable native AI SDK provider.",
+    );
+  }
+  const languageModel = runProviderConstruction(() =>
+    Reflect.apply(sdkProvider, sdkProvider, [parsedModelTag]),
+  );
+  return {
+    languageModel,
+    modelTag: parsedModelTag,
+    provider,
+    gatewayProviderOptions: EMPTY_PROVIDER_OPTIONS,
+    providerOptions: EMPTY_PROVIDER_OPTIONS,
+    invalidModelMessage:
+      "The native AI SDK provider must return a concrete language model.",
+  };
+}
+
+export class GeminiAiSdkTransport extends HardenedAiSdkProviderTransport {
+  /**
+   * @param {{
+   *   credential: unknown,
+   *   modelTag: unknown,
+   *   fetchImpl?: typeof fetch,
+   *   createProvider?: typeof createGoogleGenerativeAI,
+   * }} options
+   */
+  constructor({
+    credential,
+    modelTag,
+    fetchImpl = globalThis.fetch,
+    createProvider = createGoogleGenerativeAI,
+  }) {
+    super(
+      nativeTransportOptions({
+        credential,
+        createProvider,
+        fetchImpl,
+        modelTag,
+        provider: "gemini",
+      }),
+    );
+  }
+}
+
+export class ClaudeAiSdkTransport extends HardenedAiSdkProviderTransport {
+  /**
+   * @param {{
+   *   credential: unknown,
+   *   modelTag: unknown,
+   *   fetchImpl?: typeof fetch,
+   *   createProvider?: typeof createAnthropic,
+   * }} options
+   */
+  constructor({
+    credential,
+    modelTag,
+    fetchImpl = globalThis.fetch,
+    createProvider = createAnthropic,
+  }) {
+    super(
+      nativeTransportOptions({
+        credential,
+        createProvider,
+        fetchImpl,
+        modelTag,
+        provider: "claude",
+      }),
+    );
   }
 }

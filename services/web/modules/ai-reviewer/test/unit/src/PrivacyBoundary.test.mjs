@@ -66,6 +66,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
         scopeKind: "document",
         failureCategory: "schema",
         failureCode: "AI_PROVIDER_SCHEMA_INVALID",
+        providerStatusCode: manuscriptSentinel,
+        providerErrorType: credentialSentinel,
         elapsedMs: 42,
         manuscript: manuscriptSentinel,
         credential: credentialSentinel,
@@ -79,6 +81,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
           scopeKind: "document",
           failureCategory: "schema",
           failureCode: "AI_PROVIDER_SCHEMA_INVALID",
+          providerStatusCode: null,
+          providerErrorType: null,
           elapsedMs: 42,
         },
         AI_REVIEWER_FAILURE_LOG_MESSAGE,
@@ -89,11 +93,47 @@ describe("AI reviewer: module shell privacy boundary", function () {
         "failureCode",
         "model",
         "provider",
+        "providerErrorType",
+        "providerStatusCode",
         "requestId",
         "scopeKind",
       ]);
       expect(JSON.stringify(warn.mock.calls)).not.toContain(manuscriptSentinel);
       expect(JSON.stringify(warn.mock.calls)).not.toContain(credentialSentinel);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps only bounded provider status and allowlisted SDK error type fields", function () {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      recordAiReviewerFailure({
+        requestId: "provider-diagnostics-request",
+        provider: "gemini",
+        model: "gemini-safe-model",
+        scopeKind: "project",
+        failureCategory: "rate-limit",
+        failureCode: "AI_PROVIDER_RATE_LIMITED",
+        providerStatusCode: 429,
+        providerErrorType: "AI_APICallError",
+        elapsedMs: 17,
+      });
+
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: "provider-diagnostics-request",
+          provider: "gemini",
+          model: "gemini-safe-model",
+          scopeKind: "project",
+          failureCategory: "rate-limit",
+          failureCode: "AI_PROVIDER_RATE_LIMITED",
+          providerStatusCode: 429,
+          providerErrorType: "AI_APICallError",
+          elapsedMs: 17,
+        },
+        AI_REVIEWER_FAILURE_LOG_MESSAGE,
+      );
     } finally {
       warn.mockRestore();
     }
