@@ -16,7 +16,7 @@ import {
 } from "./OllamaEndpointPolicy.mjs";
 
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
-const MAX_COMPAT_OUTPUT_TOKENS = 512;
+const MAX_NONSTREAM_CONTENT_PARTS = 512;
 const MAX_NONSTREAM_OUTPUT_CHARACTERS = 100_000;
 const MAX_PROMPT_CHARACTERS = 100_000;
 const MAX_PROVIDER_WARNING_ENTRIES = 512;
@@ -228,8 +228,9 @@ function invalidProviderResponse() {
  * @param {unknown} input
  * @param {readonly string[]} expectedKeys
  * @param {string} message
+ * @param {readonly string[]} [optionalKeys]
  */
-function readExactRecord(input, expectedKeys, message) {
+function readExactRecord(input, expectedKeys, message, optionalKeys = []) {
   if (input == null || typeof input !== "object") {
     throw new TypeError(message);
   }
@@ -250,15 +251,21 @@ function readExactRecord(input, expectedKeys, message) {
   } catch {
     throw new TypeError(message);
   }
+  const allowedKeys = [...expectedKeys, ...optionalKeys];
   if (
-    keys.length !== expectedKeys.length ||
-    keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key))
+    keys.length < expectedKeys.length ||
+    keys.length > allowedKeys.length ||
+    keys.some((key) => typeof key !== "string" || !allowedKeys.includes(key)) ||
+    expectedKeys.some((key) => !keys.includes(key))
   ) {
     throw new TypeError(message);
   }
 
   const values = Object.create(null);
-  for (const key of expectedKeys) {
+  for (const key of allowedKeys) {
+    if (!keys.includes(key)) {
+      continue;
+    }
     let descriptor;
     try {
       descriptor = Object.getOwnPropertyDescriptor(input, key);
@@ -444,13 +451,13 @@ function parsePromptAndMaxOutputTokens(prompt, maxOutputTokens) {
     throw new TypeError("prompt must be a non-empty bounded string.");
   }
   if (
-    typeof maxOutputTokens !== "number" ||
-    !Number.isSafeInteger(maxOutputTokens) ||
-    maxOutputTokens < 1 ||
-    maxOutputTokens > MAX_COMPAT_OUTPUT_TOKENS
+    maxOutputTokens !== undefined &&
+    (typeof maxOutputTokens !== "number" ||
+      !Number.isSafeInteger(maxOutputTokens) ||
+      maxOutputTokens < 1)
   ) {
     throw new TypeError(
-      `maxOutputTokens must be an integer from 1 through ${MAX_COMPAT_OUTPUT_TOKENS}.`,
+      "maxOutputTokens must be a positive safe integer when provided.",
     );
   }
   return Object.freeze({
@@ -477,8 +484,9 @@ function parseGenerateChatRequest(input) {
 function parseStreamChatRequest(input) {
   const record = readExactRecord(
     input,
-    ["prompt", "maxOutputTokens"],
+    ["prompt"],
     "The streaming Chat Completions request is invalid.",
+    ["maxOutputTokens"],
   );
   return parsePromptAndMaxOutputTokens(record.prompt, record.maxOutputTokens);
 }
@@ -616,9 +624,8 @@ function throwFirstCapturedProviderError(slots) {
 /**
  * @param {unknown} input
  * @param {AbortSignal | undefined} signal
- * @param {number} maxOutputTokens
  */
-function parseGenerateResultEnvelope(input, signal, maxOutputTokens) {
+function parseGenerateResultEnvelope(input, signal) {
   throwIfTransportSignalAborted(signal);
   if (input == null || typeof input !== "object") {
     throw invalidProviderResponse();
@@ -691,7 +698,7 @@ function parseGenerateResultEnvelope(input, signal, maxOutputTokens) {
   ) {
     const observedContentLength = Math.min(
       contentLength,
-      MAX_COMPAT_OUTPUT_TOKENS + 1,
+      MAX_NONSTREAM_CONTENT_PARTS + 1,
     );
     for (let index = 0; index < observedContentLength; index += 1) {
       const partSlot = captureProviderProperty(
@@ -757,7 +764,7 @@ function parseGenerateResultEnvelope(input, signal, maxOutputTokens) {
     typeof contentLength !== "number" ||
     !Number.isSafeInteger(contentLength) ||
     contentLength < 1 ||
-    contentLength > MAX_COMPAT_OUTPUT_TOKENS ||
+    contentLength > MAX_NONSTREAM_CONTENT_PARTS ||
     !warningsIsArray ||
     warningLength !== 0
   ) {
@@ -776,11 +783,7 @@ function parseGenerateResultEnvelope(input, signal, maxOutputTokens) {
   }
   const inputTokens = parseTokenCount(inputTokenTotalSlot.value);
   const outputTokens = parseTokenCount(outputTokenTotalSlot.value);
-  if (
-    inputTokens == null ||
-    outputTokens == null ||
-    outputTokens > maxOutputTokens
-  ) {
+  if (inputTokens == null || outputTokens == null) {
     throw invalidProviderResponse();
   }
 
@@ -844,11 +847,10 @@ function captureGenerateContentParts(content, signal) {
 
 /**
  * @param {unknown} input
- * @param {number} maxOutputTokens
  * @param {AbortSignal | undefined} signal
  */
-function normalizeGenerateChatResult(input, maxOutputTokens, signal) {
-  const envelope = parseGenerateResultEnvelope(input, signal, maxOutputTokens);
+function normalizeGenerateChatResult(input, signal) {
+  const envelope = parseGenerateResultEnvelope(input, signal);
   const content = envelope.content;
   if (!["stop", "length"].includes(envelope.finishReason)) {
     throw invalidProviderResponse();
@@ -877,8 +879,9 @@ function normalizeGenerateChatResult(input, maxOutputTokens, signal) {
 function parseStructuredChatRequest(input) {
   const record = readExactRecord(
     input,
-    ["prompt", "maxOutputTokens", "schema"],
+    ["prompt", "schema"],
     "The structured Chat Completions request is invalid.",
+    ["maxOutputTokens"],
   );
   const request = parsePromptAndMaxOutputTokens(
     record.prompt,
@@ -899,8 +902,9 @@ function parseStructuredChatRequest(input) {
 function parseForcedToolRequest(input) {
   const record = readExactRecord(
     input,
-    ["prompt", "maxOutputTokens", "tool"],
+    ["prompt", "tool"],
     "The forced tool request is invalid.",
+    ["maxOutputTokens"],
   );
   const request = parsePromptAndMaxOutputTokens(
     record.prompt,
@@ -944,11 +948,10 @@ function parseForcedToolRequest(input) {
 /**
  * @param {unknown} input
  * @param {(value: unknown) => boolean} validate
- * @param {number} maxOutputTokens
  * @param {AbortSignal | undefined} signal
  */
-function normalizeStructuredResult(input, validate, maxOutputTokens, signal) {
-  const envelope = parseGenerateResultEnvelope(input, signal, maxOutputTokens);
+function normalizeStructuredResult(input, validate, signal) {
+  const envelope = parseGenerateResultEnvelope(input, signal);
   const content = envelope.content;
   if (envelope.finishReason !== "stop" || envelope.contentLength !== 1) {
     throw invalidProviderResponse();
@@ -987,11 +990,10 @@ function normalizeStructuredResult(input, validate, maxOutputTokens, signal) {
  *   name: string,
  *   validateInput: (value: unknown) => boolean,
  * }} expected
- * @param {number} maxOutputTokens
  * @param {AbortSignal | undefined} signal
  */
-function normalizeToolProposal(input, expected, maxOutputTokens, signal) {
-  const envelope = parseGenerateResultEnvelope(input, signal, maxOutputTokens);
+function normalizeToolProposal(input, expected, signal) {
+  const envelope = parseGenerateResultEnvelope(input, signal);
   const content = envelope.content;
   if (envelope.finishReason !== "tool-calls" || envelope.contentLength !== 1) {
     throw invalidProviderResponse();
@@ -1044,11 +1046,10 @@ function normalizeToolProposal(input, expected, maxOutputTokens, signal) {
 
 /**
  * @param {unknown} input
- * @param {number} maxOutputTokens
  * @param {AbortSignal | undefined} signal
  */
-function normalizeToolContinuationResult(input, maxOutputTokens, signal) {
-  const envelope = parseGenerateResultEnvelope(input, signal, maxOutputTokens);
+function normalizeToolContinuationResult(input, signal) {
+  const envelope = parseGenerateResultEnvelope(input, signal);
   const content = envelope.content;
   if (envelope.finishReason !== "stop" || envelope.contentLength !== 1) {
     throw invalidProviderResponse();
@@ -1238,10 +1239,9 @@ function parseStreamTextId(input) {
 
 /**
  * @param {unknown} input
- * @param {number} maxOutputTokens
  * @param {AbortSignal | undefined} signal
  */
-function parseStreamFinish(input, maxOutputTokens, signal) {
+function parseStreamFinish(input, signal) {
   const finishReasonSlot = captureProviderDataProperty(
     input,
     "finishReason",
@@ -1296,8 +1296,7 @@ function parseStreamFinish(input, maxOutputTokens, signal) {
     outputTokenSlots.some((slot) => !slot.ok) ||
     !["stop", "length"].includes(unified) ||
     inputTokens == null ||
-    outputTokens == null ||
-    outputTokens > maxOutputTokens
+    outputTokens == null
   ) {
     throw invalidProviderResponse();
   }
@@ -1312,9 +1311,7 @@ function parseStreamFinish(input, maxOutputTokens, signal) {
 }
 
 /**
- * @param {number} maxOutputTokens
  * @returns {{
- *   maxOutputTokens: number,
  *   streamStarted: boolean,
  *   responseMetadataSeen: boolean,
  *   textStarted: boolean,
@@ -1326,9 +1323,8 @@ function parseStreamFinish(input, maxOutputTokens, signal) {
  *   terminal: ReturnType<typeof parseStreamFinish> | null,
  * }}
  */
-function createProviderStreamState(maxOutputTokens) {
+function createProviderStreamState() {
   return {
-    maxOutputTokens,
     streamStarted: false,
     responseMetadataSeen: false,
     textStarted: false,
@@ -1501,7 +1497,7 @@ function normalizeProviderStreamPart(input, state, signal) {
   }
 
   if (type === "finish") {
-    const terminal = parseStreamFinish(input, state.maxOutputTokens, signal);
+    const terminal = parseStreamFinish(input, signal);
     if (
       state.finishSeen ||
       !state.streamStarted ||
@@ -2316,7 +2312,9 @@ export class OllamaOpenAiTransport {
             ],
           },
         ],
-        maxOutputTokens: request.maxOutputTokens,
+        ...(request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens }),
         temperature: 0,
         topP: 1,
         seed: 424242,
@@ -2333,11 +2331,7 @@ export class OllamaOpenAiTransport {
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
-        normalizeGenerateChatResult(
-          result,
-          request.maxOutputTokens,
-          normalizeSignal,
-        ),
+        normalizeGenerateChatResult(result, normalizeSignal),
       signal,
     );
   }
@@ -2380,7 +2374,9 @@ export class OllamaOpenAiTransport {
             ],
           },
         ],
-        maxOutputTokens: request.maxOutputTokens,
+        ...(request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens }),
         temperature: 0,
         topP: 1,
         seed: 424242,
@@ -2396,7 +2392,6 @@ export class OllamaOpenAiTransport {
         },
         abortSignal: signal,
       },
-      request.maxOutputTokens,
       signal,
     );
   }
@@ -2426,7 +2421,9 @@ export class OllamaOpenAiTransport {
             ],
           },
         ],
-        maxOutputTokens: request.maxOutputTokens,
+        ...(request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens }),
         temperature: 0,
         topP: 1,
         seed: 424242,
@@ -2444,12 +2441,7 @@ export class OllamaOpenAiTransport {
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
-        normalizeStructuredResult(
-          result,
-          request.validate,
-          request.maxOutputTokens,
-          normalizeSignal,
-        ),
+        normalizeStructuredResult(result, request.validate, normalizeSignal),
       signal,
     );
   }
@@ -2479,7 +2471,9 @@ export class OllamaOpenAiTransport {
             ],
           },
         ],
-        maxOutputTokens: request.maxOutputTokens,
+        ...(request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens }),
         temperature: 0,
         topP: 1,
         seed: 424242,
@@ -2514,7 +2508,6 @@ export class OllamaOpenAiTransport {
             name: request.tool.name,
             validateInput: request.validateInput,
           },
-          request.maxOutputTokens,
           normalizeSignal,
         ),
       signal,
@@ -2538,8 +2531,9 @@ export class OllamaOpenAiTransport {
     const request = runInputPreprocessing(() => {
       const record = readExactRecord(
         input,
-        ["proposal", "toolResult", "maxOutputTokens"],
+        ["proposal", "toolResult"],
         "The tool continuation request is invalid.",
+        ["maxOutputTokens"],
       );
       const proposal =
         record.proposal != null &&
@@ -2603,7 +2597,9 @@ export class OllamaOpenAiTransport {
             ],
           },
         ],
-        maxOutputTokens: request.maxOutputTokens,
+        ...(request.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: request.maxOutputTokens }),
         temperature: 0,
         topP: 1,
         seed: 424242,
@@ -2620,11 +2616,7 @@ export class OllamaOpenAiTransport {
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
-        normalizeToolContinuationResult(
-          result,
-          request.maxOutputTokens,
-          normalizeSignal,
-        ),
+        normalizeToolContinuationResult(result, normalizeSignal),
       signal,
     );
   }
@@ -2664,7 +2656,6 @@ export class OllamaOpenAiTransport {
 
   /**
    * @param {Record<string, unknown>} callOptions
-   * @param {number} maxOutputTokens
    * @param {AbortSignal | undefined} signal
    * @returns {AsyncGenerator<
    *   Readonly<
@@ -2679,7 +2670,7 @@ export class OllamaOpenAiTransport {
    *   void
    * >}
    */
-  async *#runStream(callOptions, maxOutputTokens, signal) {
+  async *#runStream(callOptions, signal) {
     if (signal?.aborted) {
       throw classifyTransportError(signal.reason, signal);
     }
@@ -2692,7 +2683,7 @@ export class OllamaOpenAiTransport {
     let bodyClosed = false;
     let streamFailed = false;
     let streamError;
-    const state = createProviderStreamState(maxOutputTokens);
+    const state = createProviderStreamState();
 
     try {
       const providerWork = Reflect.apply(this.#doStream, this.#languageModel, [
@@ -2794,7 +2785,39 @@ export class OllamaOpenAiTransport {
   }
 
   /**
+   * Create the subject-bound discussion path from the same private concrete
+   * model as review requests. Discussions expose no project-read tool.
+   *
    * @param {{
+   *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
+   *   now?: () => string,
+   *   createId?: (kind: 'event' | 'finding' | 'suggestion') => string,
+   * }} options
+   */
+  createDiscussionGateway({ contextLength, now, createId }) {
+    return new AiSdkAgentGateway({
+      model: this.#languageModel,
+      provider: "ollama",
+      modelId: this.#modelTag,
+      contextLength,
+      readProjectFile() {
+        throw new AgentGatewayError(
+          "Project reads are not available in a discussion.",
+          {
+            code: "AI_TOOL_NOT_ALLOWED",
+            category: "schema",
+            retryable: false,
+          },
+        );
+      },
+      now,
+      createId,
+    });
+  }
+
+  /**
+   * @param {{
+   *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
    *   readProjectFile: ConstructorParameters<typeof AiSdkAgentGateway>[0]["readProjectFile"],
    *   projectContext?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["projectContext"],
    *   searchZotero?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["searchZotero"],
@@ -2804,6 +2827,7 @@ export class OllamaOpenAiTransport {
    * }} options
    */
   createAgentGateway({
+    contextLength,
     readProjectFile,
     projectContext,
     searchZotero,
@@ -2815,6 +2839,7 @@ export class OllamaOpenAiTransport {
       model: this.#languageModel,
       provider: "ollama",
       modelId: this.#modelTag,
+      contextLength,
       readProjectFile,
       projectContext,
       searchZotero,

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 const serverContentBoundary = [
   "../../../app/src/AgentGateway.mjs",
   "../../../app/src/AiReviewerController.mjs",
+  "../../../app/src/AiSdkAgentGateway.mjs",
   "../../../app/src/ConfiguredAiReviewerController.mjs",
 ];
 

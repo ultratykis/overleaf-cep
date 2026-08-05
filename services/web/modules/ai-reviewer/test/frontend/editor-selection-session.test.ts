@@ -253,6 +253,57 @@ describe("AI reviewer: single document selection session", function () {
     expect(Object.isFrozen(currentDocument)).to.equal(false);
   });
 
+  it("returns one frozen full-document request without requiring a selection", async function () {
+    const hashInputs: string[] = [];
+    context.view = createView({
+      selection: EditorSelection.cursor(6),
+      readOnly: true,
+      editable: false,
+    });
+
+    const result = await capture({
+      instruction: "Review the current synthetic document.",
+      target: "document",
+      hashText: async (text) => {
+        hashInputs.push(text);
+        return syntheticHash;
+      },
+    });
+
+    expect(result).to.deep.include({
+      status: "ready",
+    });
+    if (result.status !== "ready") {
+      throw new Error("Expected a ready document session.");
+    }
+    expect(hashInputs).to.deep.equal([baseText]);
+    expect(result.session.request).to.deep.equal({
+      requestId: "request-selection-0001",
+      projectId: "project-0001",
+      action: "review",
+      instruction: "Review the current synthetic document.",
+      skill: "referee-review",
+      scope: {
+        kind: "document",
+        documentId: "document-0001",
+        path: "main.tex",
+        baseRevision: 7,
+        baseTextHash: syntheticHash,
+        text: baseText,
+      },
+    });
+    expect(result.session.binding).to.deep.equal({
+      currentDocument,
+      shareDocument: currentDocument.doc,
+      trackChanges: false,
+      connectionEpoch: 17,
+    });
+    expect(Object.isFrozen(result.session)).to.equal(true);
+    expect(Object.isFrozen(result.session.request)).to.equal(true);
+    expect(Object.isFrozen(result.session.request.scope)).to.equal(true);
+    expect(Object.isFrozen(result.session.binding)).to.equal(true);
+  });
+
   it("maps normal-write rewrite and shorten to line-edit", async function () {
     context.permissions.write = true;
 
@@ -683,6 +734,13 @@ describe("AI reviewer: single document selection session", function () {
         return syntheticHash;
       },
     });
+    const invalidTarget = await capture({
+      target: "project" as never,
+      hashText: async () => {
+        hashCalls += 1;
+        return syntheticHash;
+      },
+    });
 
     expect(invalidPath).to.deep.equal({
       status: "conflict",
@@ -693,6 +751,10 @@ describe("AI reviewer: single document selection session", function () {
       code: "AI_SELECTION_REQUEST_INVALID",
     });
     expect(invalidAction).to.deep.equal({
+      status: "conflict",
+      code: "AI_SELECTION_REQUEST_INVALID",
+    });
+    expect(invalidTarget).to.deep.equal({
       status: "conflict",
       code: "AI_SELECTION_REQUEST_INVALID",
     });
@@ -981,6 +1043,51 @@ describe("AI reviewer: single document selection session", function () {
       });
     });
   }
+
+  it("keeps the full-document capture bound to the revision across hashing", async function () {
+    const hash = deferredHash();
+    const operation = capture({
+      instruction: "Review the current synthetic document.",
+      target: "document",
+      hashText: hash.hashText,
+    });
+    await hash.started;
+    currentDocument.doc.version = 8;
+    hash.resolveHash(syntheticHash);
+
+    expect(await operation).to.deep.equal({
+      status: "conflict",
+      code: "AI_SELECTION_CHANGED_DURING_CAPTURE",
+    });
+  });
+
+  it("ignores selection-only changes while capturing the full document", async function () {
+    context.view?.dispatch({
+      selection: EditorSelection.cursor(0),
+    });
+    const hash = deferredHash();
+    const operation = capture({
+      instruction: "Review the current synthetic document.",
+      target: "document",
+      hashText: hash.hashText,
+    });
+    await hash.started;
+    context.view?.dispatch({
+      selection: EditorSelection.range(6, 10),
+    });
+    hash.resolveHash(syntheticHash);
+
+    const result = await operation;
+    expect(result).to.have.property("status", "ready");
+    expect(result).to.have.nested.property(
+      "session.request.scope.kind",
+      "document",
+    );
+    expect(result).to.have.nested.property(
+      "session.request.scope.text",
+      baseText,
+    );
+  });
 
   it("rejects an exact same-ID document switch in the same Editor during hashing", async function () {
     const identity = new Compartment();

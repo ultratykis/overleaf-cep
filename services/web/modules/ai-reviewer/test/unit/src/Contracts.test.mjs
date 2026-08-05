@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   AgentEventSchema,
   AgentRequestSchema,
+  DISCUSSION_CONTEXT_TURN_LIMIT,
+  DiscussionEventSchema,
+  DiscussionRequestSchema,
+  FindingSchema,
   SuggestionSchema,
 } from "../../../shared/contracts.mjs";
 
@@ -57,6 +61,45 @@ function suggestion() {
   };
 }
 
+function finding(overrides = {}) {
+  return {
+    id: "finding-0001",
+    requestId: "request-0001",
+    projectId: "project-0001",
+    severity: "warning",
+    category: "synthetic",
+    title: "Synthetic finding",
+    message: "A deterministic finding.",
+    evidence: [
+      {
+        path: "chapters/introduction.tex",
+        range: { from: 0, to: 15 },
+        revision: 12,
+        textHash: hash,
+      },
+    ],
+    suggestionIds: [],
+    artifactKind: "finding",
+    ...overrides,
+  };
+}
+
+function discussionRequest(overrides = {}) {
+  const sourceRequest = selectionRequest();
+  return {
+    requestId: "discussion-turn-0001",
+    discussionId: "discussion-0001",
+    projectId: sourceRequest.projectId,
+    subject: {
+      kind: "finding",
+      sourceRequest,
+      artifact: finding(),
+    },
+    turns: [{ role: "user", text: "Explain this finding." }],
+    ...overrides,
+  };
+}
+
 describe("AI reviewer: runtime contracts", function () {
   it("accepts a strict selection request", function () {
     expect(AgentRequestSchema.parse(selectionRequest())).toEqual(
@@ -91,6 +134,46 @@ describe("AI reviewer: runtime contracts", function () {
     invalid.evidence = [{ path: "chapters/introduction.tex" }];
 
     expect(SuggestionSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it("accepts ordinary and citation findings as distinct artifact kinds", function () {
+    const ordinary = finding();
+    const citation = finding({
+      artifactKind: "citation-finding",
+      proposedText: "Add a synthetic bibliography entry.",
+    });
+
+    expect(FindingSchema.parse(ordinary)).toEqual(ordinary);
+    expect(FindingSchema.parse(citation)).toEqual(citation);
+  });
+
+  it.each([
+    {
+      name: "missing artifact discriminator",
+      finding: (() => {
+        const { artifactKind, ...withoutArtifactKind } = finding();
+        return withoutArtifactKind;
+      })(),
+    },
+    {
+      name: "ordinary finding with proposed text",
+      finding: finding({
+        proposedText: "An ordinary finding cannot copy text.",
+      }),
+    },
+    {
+      name: "citation finding without proposed text",
+      finding: finding({ artifactKind: "citation-finding" }),
+    },
+    {
+      name: "citation finding with empty proposed text",
+      finding: finding({
+        artifactKind: "citation-finding",
+        proposedText: "",
+      }),
+    },
+  ])("rejects $name", function ({ finding: invalid }) {
+    expect(FindingSchema.safeParse(invalid).success).toBe(false);
   });
 
   it("rejects unknown suggestion fields", function () {
@@ -173,6 +256,115 @@ describe("AI reviewer: runtime contracts", function () {
     };
 
     expect(AgentEventSchema.parse(event)).toEqual(event);
+  });
+
+  it("accepts only subject-bound discussions with bounded recent turns", function () {
+    const turns = Array.from(
+      { length: DISCUSSION_CONTEXT_TURN_LIMIT },
+      (_, index) => ({
+        role: index % 2 === 0 ? "assistant" : "user",
+        text: `Turn ${index}`,
+      }),
+    );
+    const request = discussionRequest({ turns });
+
+    expect(DiscussionRequestSchema.parse(request)).toEqual(request);
+    expect(
+      DiscussionRequestSchema.safeParse({
+        ...request,
+        turns: [...turns, { role: "user", text: "One turn too many." }],
+      }).success,
+    ).toBe(false);
+    expect(
+      DiscussionRequestSchema.safeParse({
+        ...request,
+        turns: [{ role: "assistant", text: "Missing the active user turn." }],
+      }).success,
+    ).toBe(false);
+    const { subject, ...withoutSubject } = request;
+    expect(DiscussionRequestSchema.safeParse(withoutSubject).success).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ["finding", { kind: "finding", artifact: finding() }],
+    [
+      "citation finding",
+      {
+        kind: "citation-finding",
+        artifact: finding({
+          artifactKind: "citation-finding",
+          proposedText: "Add a synthetic bibliography entry.",
+        }),
+      },
+    ],
+    ["suggestion", { kind: "suggestion", artifact: suggestion() }],
+    ["review scope", { kind: "scope" }],
+  ])("accepts a %s discussion subject", function (_label, subject) {
+    const sourceRequest = selectionRequest();
+    const request = discussionRequest({
+      subject: {
+        ...subject,
+        sourceRequest,
+      },
+    });
+
+    expect(DiscussionRequestSchema.parse(request)).toEqual(request);
+  });
+
+  it("does not impose a fixed character cap on an individual discussion turn", function () {
+    const request = discussionRequest({
+      turns: [{ role: "user", text: "x".repeat(25_000) }],
+    });
+
+    expect(DiscussionRequestSchema.safeParse(request).success).toBe(true);
+  });
+
+  it("binds discussion subjects to their source request", function () {
+    const request = discussionRequest();
+
+    expect(
+      DiscussionRequestSchema.safeParse({
+        ...request,
+        projectId: "another-project",
+      }).success,
+    ).toBe(false);
+    expect(
+      DiscussionRequestSchema.safeParse({
+        ...request,
+        subject: {
+          ...request.subject,
+          artifact: finding({ requestId: "another-request" }),
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts discussion events whose envelope is distinct from a source suggestion", function () {
+    const event = {
+      type: "suggestion",
+      eventId: "discussion-event-0001",
+      requestId: "discussion-turn-0001",
+      sequence: 1,
+      createdAt,
+      suggestion: suggestion(),
+    };
+
+    expect(DiscussionEventSchema.parse(event)).toEqual(event);
+  });
+
+  it("does not impose a fixed character cap on discussion text output", function () {
+    const event = {
+      type: "text.delta",
+      eventId: "discussion-event-long-text",
+      requestId: "discussion-turn-0001",
+      sequence: 1,
+      createdAt,
+      delta: "x".repeat(125_000),
+    };
+
+    expect(DiscussionEventSchema.safeParse(event).success).toBe(true);
   });
 
   it.each([

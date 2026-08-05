@@ -137,6 +137,7 @@ function findingEvent(evidence) {
     sequence: 1,
     createdAt,
     finding: {
+      artifactKind: "finding",
       id: "finding-0001",
       requestId: "request-0001",
       projectId: "project-0001",
@@ -329,7 +330,7 @@ describe("AI reviewer: deterministic fake gateway", function () {
     });
   });
 
-  it("allows a project review to propose a cross-file suggestion", async function () {
+  it("rejects a suggestion from a project review", async function () {
     const crossFile = suggestionEvent({
       documentId: "document-0002",
       path: "sections/other.tex",
@@ -341,10 +342,13 @@ describe("AI reviewer: deterministic fake gateway", function () {
       events: [events()[0], crossFile],
     });
 
-    expect(await collect(gateway.stream(request()))).toEqual([
-      events()[0],
-      crossFile,
-    ]);
+    const caught = await captureError(collect(gateway.stream(request())));
+
+    expect(caught).toMatchObject({
+      code: "AI_PROJECT_SUGGESTION_NOT_ALLOWED",
+      category: "schema",
+      retryable: false,
+    });
   });
 
   it.each([

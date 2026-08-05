@@ -32,6 +32,9 @@ import {
 type OperationKind = "save" | "test";
 type Operation = { generation: number; controller: AbortController };
 type Notice = { type: "success" | "error"; content: string };
+type ConfigurationDraft = Omit<AiProviderConfiguration, "contextLength"> & {
+  contextLength: string;
+};
 
 type Props = {
   projectId: string;
@@ -43,16 +46,29 @@ type Props = {
 
 const genericError = "Something went wrong. Check the settings and try again.";
 
-const emptyConfiguration: AiProviderConfiguration = {
+const emptyConfiguration: ConfigurationDraft = {
   provider: "ollama",
   baseUrl: "",
   model: "",
+  contextLength: "",
 };
 
 const fields = [
   ["baseUrl", "Base URL"],
   ["model", "Model"],
+  ["contextLength", "Context length (tokens)"],
 ] as const;
+
+function draftFromConfiguration(
+  configuration: AiProviderConfiguration,
+): ConfigurationDraft {
+  return {
+    provider: configuration.provider,
+    baseUrl: configuration.baseUrl,
+    model: configuration.model,
+    contextLength: String(configuration.contextLength),
+  };
+}
 
 function errorNotice(error: unknown): Notice {
   return {
@@ -112,9 +128,16 @@ export function AiIntegrationDetailsView({
 
   const applyResponse = useCallback(
     (response: AiProviderConfigurationResponse) => {
-      const next = response.config ? { ...response.config } : null;
+      const next = response.config
+        ? {
+            provider: response.config.provider,
+            baseUrl: response.config.baseUrl,
+            model: response.config.model,
+            contextLength: response.config.contextLength,
+          }
+        : null;
       setSaved(next);
-      setDraft(next ? { ...next } : { ...emptyConfiguration });
+      setDraft(next ? draftFromConfiguration(next) : { ...emptyConfiguration });
       setBusy(null);
       setNotice(null);
     },
@@ -140,12 +163,23 @@ export function AiIntegrationDetailsView({
   }, [applyResponse, begin, cancel, complete, getConfiguration, projectId]);
 
   const dirty =
-    saved?.baseUrl !== draft.baseUrl || saved?.model !== draft.model;
-  const valid = draft.baseUrl.trim() !== "" && draft.model.trim() !== "";
+    saved?.baseUrl !== draft.baseUrl ||
+    saved?.model !== draft.model ||
+    (saved == null ? "" : String(saved.contextLength)) !== draft.contextLength;
+  const parsedContextLength = Number(draft.contextLength);
+  const valid =
+    draft.baseUrl.trim() !== "" &&
+    draft.model.trim() !== "" &&
+    draft.contextLength.trim() !== "" &&
+    Number.isSafeInteger(parsedContextLength) &&
+    parsedContextLength > 0;
   const canSave = saved !== undefined && busy === null && dirty && valid;
   const canTest = saved != null && busy === null && !dirty;
 
-  const updateDraft = (field: "baseUrl" | "model", value: string) => {
+  const updateDraft = (
+    field: "baseUrl" | "model" | "contextLength",
+    value: string,
+  ) => {
     if (busy) cancel();
     setDraft((current) => ({ ...current, [field]: value }));
     setBusy(null);
@@ -174,7 +208,12 @@ export function AiIntegrationDetailsView({
   const handleSave = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canSave) return;
-    const requested = { ...draft };
+    const requested: AiProviderConfiguration = {
+      provider: draft.provider,
+      baseUrl: draft.baseUrl,
+      model: draft.model,
+      contextLength: parsedContextLength,
+    };
     void run("save", (signal) =>
       saveConfiguration(projectId, requested, signal),
     ).then((response) => {
@@ -220,6 +259,9 @@ export function AiIntegrationDetailsView({
             >
               <OLFormLabel>{label}</OLFormLabel>
               <OLFormControl
+                type={field === "contextLength" ? "number" : "text"}
+                min={field === "contextLength" ? 1 : undefined}
+                step={field === "contextLength" ? 1 : undefined}
                 value={draft[field]}
                 onChange={(event) => updateDraft(field, event.target.value)}
                 disabled={saved === undefined}

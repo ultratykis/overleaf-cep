@@ -12,7 +12,10 @@ import { createAiReviewerProviderController } from "../../../app/src/AiReviewerP
 import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
 import { createOllamaProviderService } from "../../../app/src/OllamaProviderService.mjs";
 import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mjs";
-import { AgentEventSchema } from "../../../shared/contracts.mjs";
+import {
+  AgentEventSchema,
+  DiscussionEventSchema,
+} from "../../../shared/contracts.mjs";
 
 const userId = "user-provider-0001";
 const otherUserId = "user-provider-0002";
@@ -21,17 +24,21 @@ const baseUrl = "http://127.0.0.1:11434/v1";
 const otherBaseUrl = "http://localhost:11434/v1";
 const model = "overleaf-ai-reviewer-compat-8k:latest";
 const otherModel = "overleaf-ai-reviewer-other:latest";
+const contextLength = 8_192;
+const otherContextLength = 4_096;
 const createdAt = "2026-07-25T00:00:00.000Z";
 
 const configuration = Object.freeze({
   provider: "ollama",
   baseUrl,
   model,
+  contextLength,
 });
 const otherConfiguration = Object.freeze({
   provider: "ollama",
   baseUrl: otherBaseUrl,
   model: otherModel,
+  contextLength: otherContextLength,
 });
 const compatibilityResult = Object.freeze({
   type: "completed",
@@ -95,6 +102,49 @@ function streamEvents() {
       type: "completed",
       eventId: "event-provider-completed",
       requestId: "request-provider-0001",
+      sequence: 2,
+      createdAt,
+      finishReason: "stop",
+    },
+  ];
+}
+
+function discussionRequest() {
+  return {
+    requestId: "discussion-turn-provider-0001",
+    discussionId: "discussion-provider-0001",
+    projectId,
+    subject: {
+      kind: "scope",
+      sourceRequest: selectionRequest(),
+    },
+    turns: [{ role: "user", text: "Explain this selection." }],
+  };
+}
+
+function discussionEvents() {
+  return [
+    {
+      type: "started",
+      eventId: "discussion-event-provider-started",
+      requestId: "discussion-turn-provider-0001",
+      sequence: 0,
+      createdAt,
+      provider: "ollama",
+      model: otherModel,
+    },
+    {
+      type: "text.delta",
+      eventId: "discussion-event-provider-delta",
+      requestId: "discussion-turn-provider-0001",
+      sequence: 1,
+      createdAt,
+      delta: "Configured synthetic discussion.",
+    },
+    {
+      type: "completed",
+      eventId: "discussion-event-provider-completed",
+      requestId: "discussion-turn-provider-0001",
       sequence: 2,
       createdAt,
       finishReason: "stop",
@@ -186,6 +236,15 @@ function parseNdjson(response) {
     .map((line) => AgentEventSchema.parse(JSON.parse(line)));
 }
 
+function parseDiscussionNdjson(response) {
+  return response.chunks
+    .join("")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => DiscussionEventSchema.parse(JSON.parse(line)));
+}
+
 async function captureError(work) {
   try {
     await work;
@@ -237,8 +296,13 @@ describe("AI reviewer provider configuration", function () {
       null,
       {},
       { provider: "openai", baseUrl, model },
+      { provider: "ollama", baseUrl, model },
       { ...configuration, baseUrl: "http://192.168.1.2:11434/v1" },
       { ...configuration, model: "implicit-latest" },
+      { ...configuration, contextLength: 0 },
+      { ...configuration, contextLength: -1 },
+      { ...configuration, contextLength: 1.5 },
+      { ...configuration, contextLength: Number.MAX_SAFE_INTEGER + 1 },
       { ...configuration, enabled: true },
       { ...configuration, apiKey: "PRIVATE_SECRET" },
       { ...configuration, arbitraryUnknownField: true },
@@ -278,6 +342,21 @@ describe("AI reviewer provider configuration", function () {
     ).toEqual([{ _id: userId }, { _id: otherUserId }]);
   });
 
+  it("treats a legacy configuration without context length as unconfigured", async function () {
+    const legacyRecord = { _id: userId, provider: "ollama", baseUrl, model };
+    const replacementRecord = { _id: userId, ...configuration };
+    const modelDependency = {
+      findOne: vi.fn().mockReturnValue(fakeQuery(legacyRecord)),
+      findOneAndUpdate: vi.fn().mockReturnValue(fakeQuery(replacementRecord)),
+    };
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+    });
+
+    expect(await store.get(userId)).toBeNull();
+    expect(await store.save(userId, configuration)).toEqual(configuration);
+  });
+
   it("runs the exact COMPAT_OK check once, without accepting or retrying a near match", async function () {
     const generateChat = vi.fn(async () => compatibilityResult);
     const transportFactory = vi.fn(() => ({ generateChat }));
@@ -300,7 +379,6 @@ describe("AI reviewer provider configuration", function () {
     expect(generateChat).toHaveBeenCalledExactlyOnceWith(
       {
         prompt: "Return exactly COMPAT_OK and nothing else.",
-        maxOutputTokens: 32,
       },
       { signal: expect.any(AbortSignal) },
     );
@@ -450,6 +528,7 @@ describe("AI reviewer provider configuration", function () {
     const requestScopeReader = createRequestScopeReader();
     const boundedContext = await requestScopeReader.read(
       httpRequest({ body: selectionRequest() }),
+      { contextLength },
     );
     expect(JSON.stringify(boundedContext)).not.toContain("Synthetic");
     expect(
@@ -490,6 +569,9 @@ describe("AI reviewer provider configuration", function () {
       baseUrl: otherBaseUrl,
       modelTag: otherModel,
     });
+    expect(transport.createAgentGateway).toHaveBeenCalledWith(
+      expect.objectContaining({ contextLength: otherContextLength }),
+    );
     expect(reads).toEqual([
       {
         path: "main.tex",
@@ -498,6 +580,49 @@ describe("AI reviewer provider configuration", function () {
       },
     ]);
     expect(parseNdjson(response)).toEqual(streamEvents());
+  });
+
+  it("uses the same saved transport configuration for a discussion without reading project scope", async function () {
+    const gateway = {
+      stream: vi.fn(),
+      async *streamDiscussion() {
+        yield* discussionEvents();
+      },
+    };
+    const transport = {
+      createDiscussionGateway: vi.fn(() => gateway),
+    };
+    const transportFactory = vi.fn(() => transport);
+    const providerService = createOllamaProviderService({ transportFactory });
+    const requestScopeReader = {
+      read: vi.fn(async () => {
+        throw new Error("Discussion must not create a review scope reader.");
+      }),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConfiguration) },
+      providerService,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "discussion-provider-error",
+    });
+    const response = new FakeResponse();
+
+    await controller.discussionStream(
+      httpRequest({ body: discussionRequest() }),
+      response,
+    );
+
+    expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: otherBaseUrl,
+      modelTag: otherModel,
+    });
+    expect(transport.createDiscussionGateway).toHaveBeenCalledExactlyOnceWith({
+      contextLength: otherContextLength,
+    });
+    expect(requestScopeReader.read).not.toHaveBeenCalled();
+    expect(gateway.stream).not.toHaveBeenCalled();
+    expect(parseDiscussionNdjson(response)).toEqual(discussionEvents());
   });
 
   it("passes a metadata-only project snapshot to the configured provider", async function () {
@@ -636,16 +761,17 @@ Cite \cite{missing}`;
   it("returns a truthful bounded error when project context is too large", async function () {
     const privateTitle = "PRIVATE_PROJECT_TITLE_".repeat(9);
     const requestScopeReader = createRequestScopeReader({
-      loadProjectDocuments: async () => ({
-        "/main.tex": {
-          _id: "document-provider-oversized",
-          version: 1,
-          lines: Array.from(
-            { length: 150 },
-            (_, index) => String.raw`\section{${privateTitle}${index}}`,
-          ),
-        },
-      }),
+      loadProjectDocuments: async () =>
+        Object.fromEntries(
+          Array.from({ length: 200 }, (_, index) => [
+            `/${privateTitle}${index}.tex`,
+            {
+              _id: `document-provider-oversized-${index}`,
+              version: 1,
+              lines: [""],
+            },
+          ]),
+        ),
     });
     const controller = createConfiguredAiReviewerController({
       configStore: { get: vi.fn(async () => otherConfiguration) },

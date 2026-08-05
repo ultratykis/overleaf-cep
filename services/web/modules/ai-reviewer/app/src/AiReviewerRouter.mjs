@@ -14,6 +14,7 @@
  *   saveConfiguration: (...args: any[]) => unknown,
  *   testConnection: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
+ *   discussionStream: (...args: any[]) => unknown,
  * }} dependencies
  */
 export function createAiReviewerRouter({
@@ -24,6 +25,7 @@ export function createAiReviewerRouter({
   saveConfiguration,
   testConnection,
   stream,
+  discussionStream,
 }) {
   const appliedRouters = new WeakSet();
 
@@ -68,6 +70,11 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/stream",
         ...commonMiddleware,
         stream,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/discussion-stream",
+        ...commonMiddleware,
+        discussionStream,
       );
     },
   };

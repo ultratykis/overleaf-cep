@@ -12,6 +12,7 @@ const ProviderConfigSchema = z
     provider: z.literal("ollama"),
     baseUrl: z.string(),
     model: z.string(),
+    contextLength: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
 
@@ -25,6 +26,7 @@ export function parseAiReviewerProviderConfig(input) {
     provider: "ollama",
     baseUrl: endpoint.baseUrl,
     model: parseOllamaModelTag(value.model),
+    contextLength: value.contextLength,
   });
 }
 
@@ -39,9 +41,15 @@ export function publicAiReviewerProviderConfig(input) {
       classification: null,
     });
   }
+  const config = parseAiReviewerProviderConfig(input);
   return Object.freeze({
     configured: true,
-    config: parseAiReviewerProviderConfig(input),
+    config: Object.freeze({
+      provider: config.provider,
+      baseUrl: config.baseUrl,
+      model: config.model,
+      contextLength: config.contextLength,
+    }),
     classification: "local",
   });
 }

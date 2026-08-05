@@ -7,15 +7,30 @@ import { ZodError } from "zod";
 import {
   AgentEventSchema,
   AgentRequestSchema,
+  DiscussionEventSchema,
+  DiscussionRequestSchema,
 } from "../../shared/contracts.mjs";
 import {
   AgentGatewayAbortError,
   AgentGatewayError,
   assertAgentEventForRequest,
+  assertDiscussionEventForRequest,
 } from "./AgentGateway.mjs";
 
-/** @import { AgentError, AgentEvent, AgentGateway, AgentRequest } from '../../shared/contract-types' */
+/**
+ * @import {
+ *   AgentError,
+ *   AgentEvent,
+ *   AgentGateway,
+ *   AgentRequest,
+ *   DiscussionEvent,
+ *   DiscussionRequest,
+ * } from '../../shared/contract-types'
+ */
 /** @import { Request, Response } from 'express' */
+
+/** @typedef {AgentRequest | DiscussionRequest} StreamRequest */
+/** @typedef {AgentEvent | DiscussionEvent} StreamEvent */
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const FALLBACK_ERROR_EVENT_ID = "ai-error";
@@ -212,7 +227,7 @@ function waitForDrain(response, signal) {
 
 /**
  * @param {Response} response
- * @param {AgentEvent} event
+ * @param {StreamEvent} event
  * @param {AbortSignal | undefined} signal
  * @returns {Promise<void> | undefined}
  */
@@ -224,26 +239,46 @@ function writeEvent(response, event, signal) {
 }
 
 /**
- * @param {unknown} rawEvent
- * @param {AgentRequest} request
- * @param {number} sequence
- * @returns {AgentEvent}
+ * @template {StreamEvent} T
+ * @param {T} event
+ * @returns {T}
  */
-function validateStreamEvent(rawEvent, request, sequence) {
-  const event = AgentEventSchema.parse(rawEvent);
-  assertAgentEventForRequest(request, event, sequence);
-
+function redactStreamEventError(event) {
   if (event.type === "error") {
-    return {
+    return /** @type {T} */ ({
       ...event,
       error: publicErrorForCategory(event.error.category),
-    };
+    });
   }
   return event;
 }
 
 /**
- * @param {AgentEvent} event
+ * @param {unknown} rawEvent
+ * @param {AgentRequest} request
+ * @param {number} sequence
+ * @returns {AgentEvent}
+ */
+function validateReviewStreamEvent(rawEvent, request, sequence) {
+  const event = AgentEventSchema.parse(rawEvent);
+  assertAgentEventForRequest(request, event, sequence);
+  return redactStreamEventError(event);
+}
+
+/**
+ * @param {unknown} rawEvent
+ * @param {DiscussionRequest} request
+ * @param {number} sequence
+ * @returns {DiscussionEvent}
+ */
+function validateDiscussionStreamEvent(rawEvent, request, sequence) {
+  const event = DiscussionEventSchema.parse(rawEvent);
+  assertDiscussionEventForRequest(request, event, sequence);
+  return redactStreamEventError(event);
+}
+
+/**
+ * @param {StreamEvent} event
  */
 function isTerminalEvent(event) {
   return event.type === "completed" || event.type === "error";
@@ -256,12 +291,20 @@ function isTerminalEvent(event) {
  *   error: AgentError,
  *   now: () => string,
  *   eventId: () => string,
+ *   eventSchema: typeof AgentEventSchema | typeof DiscussionEventSchema,
  * }} input
- * @returns {AgentEvent}
+ * @returns {StreamEvent}
  */
-function buildErrorEvent({ requestId, sequence, error, now, eventId }) {
+function buildErrorEvent({
+  requestId,
+  sequence,
+  error,
+  now,
+  eventId,
+  eventSchema,
+}) {
   try {
-    const result = AgentEventSchema.safeParse({
+    const result = eventSchema.safeParse({
       type: "error",
       eventId: eventId(),
       requestId,
@@ -334,7 +377,7 @@ async function allowAbortPropagation(work) {
 /**
  * @param {{
  *   gatewayFactory: (context: {
- *     request: AgentRequest,
+ *     request: StreamRequest,
  *     httpRequest: Request,
  *     signal: AbortSignal,
  *   }) => AgentGateway | PromiseLike<AgentGateway>,
@@ -356,9 +399,24 @@ export function createAiReviewerController({
   /**
    * @param {Request} request
    * @param {Response} response
+   * @param {{
+   *   requestSchema:
+   *     typeof AgentRequestSchema | typeof DiscussionRequestSchema,
+   *   eventSchema: typeof AgentEventSchema | typeof DiscussionEventSchema,
+   *   openStream: (
+   *     gateway: AgentGateway,
+   *     request: StreamRequest,
+   *     options: { signal: AbortSignal },
+   *   ) => AsyncIterable<StreamEvent>,
+   *   validateEvent: (
+   *     rawEvent: unknown,
+   *     request: StreamRequest,
+   *     sequence: number,
+   *   ) => StreamEvent,
+   * }} protocol
    */
-  async function stream(request, response) {
-    const parsedRequest = AgentRequestSchema.safeParse(request.body);
+  async function streamProtocol(request, response, protocol) {
+    const parsedRequest = protocol.requestSchema.safeParse(request.body);
     if (!parsedRequest.success) {
       return response.status(400).json({
         error: {
@@ -380,6 +438,7 @@ export function createAiReviewerController({
       });
     }
 
+    const activeRequest = /** @type {StreamRequest} */ (parsedRequest.data);
     response.status(200);
     response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
     response.setHeader("cache-control", "no-store");
@@ -408,21 +467,23 @@ export function createAiReviewerController({
     request.once?.("aborted", handleAborted);
 
     let nextSequence = 0;
+    /** @type {AsyncIterator<StreamEvent> | undefined} */
     let iterator;
+    /** @type {PromiseLike<IteratorResult<StreamEvent>> | undefined} */
     let pendingStep;
     let iteratorFinished = false;
     try {
       const gateway = await raceWithAbort(
         Promise.resolve().then(() =>
           gatewayFactory({
-            request: parsedRequest.data,
+            request: activeRequest,
             httpRequest: request,
             signal,
           }),
         ),
         signal,
       );
-      const stream = gateway.stream(parsedRequest.data, { signal });
+      const stream = protocol.openStream(gateway, activeRequest, { signal });
       const activeIterator = stream[Symbol.asyncIterator]();
       iterator = activeIterator;
 
@@ -455,9 +516,9 @@ export function createAiReviewerController({
           throw abortErrorForSignal(signal);
         }
 
-        const event = validateStreamEvent(
+        const event = protocol.validateEvent(
           step.value,
-          parsedRequest.data,
+          activeRequest,
           nextSequence,
         );
         const terminal = isTerminalEvent(event);
@@ -488,7 +549,7 @@ export function createAiReviewerController({
       }
 
       const errorEvent = buildErrorEvent({
-        requestId: parsedRequest.data.requestId,
+        requestId: activeRequest.requestId,
         sequence: nextSequence,
         error: classifyError(error, {
           disconnectSignal: disconnectController.signal,
@@ -496,6 +557,7 @@ export function createAiReviewerController({
         }),
         now,
         eventId,
+        eventSchema: protocol.eventSchema,
       });
       try {
         await writeEvent(response, errorEvent, undefined);
@@ -521,5 +583,53 @@ export function createAiReviewerController({
     }
   }
 
-  return { stream };
+  /**
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function stream(request, response) {
+    return await streamProtocol(request, response, {
+      requestSchema: AgentRequestSchema,
+      eventSchema: AgentEventSchema,
+      openStream(gateway, activeRequest, options) {
+        return gateway.stream(
+          /** @type {AgentRequest} */ (activeRequest),
+          options,
+        );
+      },
+      validateEvent(rawEvent, activeRequest, sequence) {
+        return validateReviewStreamEvent(
+          rawEvent,
+          /** @type {AgentRequest} */ (activeRequest),
+          sequence,
+        );
+      },
+    });
+  }
+
+  /**
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function discussionStream(request, response) {
+    return await streamProtocol(request, response, {
+      requestSchema: DiscussionRequestSchema,
+      eventSchema: DiscussionEventSchema,
+      openStream(gateway, activeRequest, options) {
+        return gateway.streamDiscussion(
+          /** @type {DiscussionRequest} */ (activeRequest),
+          options,
+        );
+      },
+      validateEvent(rawEvent, activeRequest, sequence) {
+        return validateDiscussionStreamEvent(
+          rawEvent,
+          /** @type {DiscussionRequest} */ (activeRequest),
+          sequence,
+        );
+      },
+    });
+  }
+
+  return { discussionStream, stream };
 }

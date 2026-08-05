@@ -11,6 +11,7 @@
     "ConfiguredAiReviewerController.mjs",
     "EnabledAiReviewerModule.mjs",
     "LatexProjectRelations.mjs",
+    "ModelContextBudget.mjs",
     "OllamaEndpointPolicy.mjs",
     "OllamaOpenAiTransport.mjs",
     "OllamaProviderService.mjs",

@@ -7,6 +7,7 @@ import { z } from "zod";
 const IdentifierSchema = z.string().min(1).max(200);
 const ShortTextSchema = z.string().min(1).max(2_000);
 const ContentSchema = z.string().max(1_000_000);
+export const DISCUSSION_CONTEXT_TURN_LIMIT = 12;
 
 export const Sha256Schema = z
   .string()
@@ -178,19 +179,122 @@ export const ProposedSuggestionSchema = SuggestionSchema.safeExtend({
   status: z.literal("proposed"),
 });
 
-export const FindingSchema = z
+const FindingBaseShape = {
+  id: IdentifierSchema,
+  requestId: IdentifierSchema,
+  projectId: IdentifierSchema,
+  severity: z.enum(["info", "suggestion", "warning", "error"]),
+  category: IdentifierSchema,
+  title: ShortTextSchema,
+  message: z.string().min(1).max(20_000),
+  evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
+  suggestionIds: z.array(IdentifierSchema).max(100),
+};
+
+export const OrdinaryFindingSchema = z
   .object({
-    id: IdentifierSchema,
-    requestId: IdentifierSchema,
-    projectId: IdentifierSchema,
-    severity: z.enum(["info", "suggestion", "warning", "error"]),
-    category: IdentifierSchema,
-    title: ShortTextSchema,
-    message: z.string().min(1).max(20_000),
-    evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
-    suggestionIds: z.array(IdentifierSchema).max(100),
+    ...FindingBaseShape,
+    artifactKind: z.literal("finding"),
   })
   .strict();
+
+export const CitationFindingSchema = z
+  .object({
+    ...FindingBaseShape,
+    artifactKind: z.literal("citation-finding"),
+    proposedText: ContentSchema.min(1),
+  })
+  .strict();
+
+export const FindingSchema = z.discriminatedUnion("artifactKind", [
+  OrdinaryFindingSchema,
+  CitationFindingSchema,
+]);
+
+export const DiscussionTurnSchema = z
+  .object({
+    role: z.enum(["user", "assistant"]),
+    text: z.string().min(1),
+  })
+  .strict();
+
+export const DiscussionSubjectSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("finding"),
+      sourceRequest: AgentRequestSchema,
+      artifact: OrdinaryFindingSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("citation-finding"),
+      sourceRequest: AgentRequestSchema,
+      artifact: CitationFindingSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("suggestion"),
+      sourceRequest: AgentRequestSchema,
+      artifact: ProposedSuggestionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("scope"),
+      sourceRequest: AgentRequestSchema,
+    })
+    .strict(),
+]);
+
+export const DiscussionRequestSchema = z
+  .object({
+    requestId: IdentifierSchema,
+    discussionId: IdentifierSchema,
+    projectId: IdentifierSchema,
+    subject: DiscussionSubjectSchema,
+    turns: z
+      .array(DiscussionTurnSchema)
+      .min(1)
+      .max(DISCUSSION_CONTEXT_TURN_LIMIT),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const { sourceRequest } = request.subject;
+    if (sourceRequest.projectId !== request.projectId) {
+      context.addIssue({
+        code: "custom",
+        message: "Discussion source project must match its request",
+        path: ["subject", "sourceRequest", "projectId"],
+      });
+    }
+    if (request.turns.at(-1)?.role !== "user") {
+      context.addIssue({
+        code: "custom",
+        message: "Discussion context must end with the active user turn",
+        path: ["turns"],
+      });
+    }
+    if (request.subject.kind === "scope") {
+      return;
+    }
+    const { artifact } = request.subject;
+    if (artifact.requestId !== sourceRequest.requestId) {
+      context.addIssue({
+        code: "custom",
+        message: "Discussion subject must belong to its source request",
+        path: ["subject", "artifact", "requestId"],
+      });
+    }
+    if (artifact.projectId !== sourceRequest.projectId) {
+      context.addIssue({
+        code: "custom",
+        message: "Discussion subject must belong to its source project",
+        path: ["subject", "artifact", "projectId"],
+      });
+    }
+  });
 
 export const AgentErrorSchema = z
   .object({
@@ -342,3 +446,59 @@ export const AgentEventSchema = AgentEventUnionSchema.superRefine(
     }
   },
 );
+
+const DiscussionStartedEventSchema = z
+  .object({
+    type: z.literal("started"),
+    ...EventBase,
+    provider: IdentifierSchema,
+    model: IdentifierSchema,
+  })
+  .strict();
+
+const DiscussionTextDeltaEventSchema = z
+  .object({
+    type: z.literal("text.delta"),
+    ...EventBase,
+    delta: z.string().min(1),
+  })
+  .strict();
+
+const DiscussionSuggestionEventSchema = z
+  .object({
+    type: z.literal("suggestion"),
+    ...EventBase,
+    suggestion: ProposedSuggestionSchema,
+  })
+  .strict();
+
+const DiscussionCompletedEventSchema = z
+  .object({
+    type: z.literal("completed"),
+    ...EventBase,
+    finishReason: z.enum(["stop", "cancelled", "length", "tool-calls"]),
+    usage: z
+      .object({
+        inputTokens: z.number().int().nonnegative(),
+        outputTokens: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const DiscussionErrorEventSchema = z
+  .object({
+    type: z.literal("error"),
+    ...EventBase,
+    error: AgentErrorSchema,
+  })
+  .strict();
+
+export const DiscussionEventSchema = z.discriminatedUnion("type", [
+  DiscussionStartedEventSchema,
+  DiscussionTextDeltaEventSchema,
+  DiscussionSuggestionEventSchema,
+  DiscussionCompletedEventSchema,
+  DiscussionErrorEventSchema,
+]);

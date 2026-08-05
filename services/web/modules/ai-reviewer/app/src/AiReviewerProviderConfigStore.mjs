@@ -5,13 +5,14 @@ import { parseAiReviewerProviderConfig } from "./AiReviewerProviderConfig.mjs";
 
 /** @param {any} record */
 function storedConfig(record) {
-  if (record == null) {
+  if (record == null || record.contextLength === undefined) {
     return null;
   }
   return parseAiReviewerProviderConfig({
     provider: record.provider,
     baseUrl: record.baseUrl,
     model: record.model,
+    contextLength: record.contextLength,
   });
 }
 

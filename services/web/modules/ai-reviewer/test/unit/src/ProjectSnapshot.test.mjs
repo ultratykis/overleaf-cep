@@ -3,9 +3,11 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
 import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
 
 const projectId = "project-snapshot-0001";
+const contextLength = 8_192;
 const mainText = [
   String.raw`\documentclass{article}`,
   String.raw`\input{sections/method}`,
@@ -48,6 +50,16 @@ function request() {
   };
 }
 
+function createSnapshot(
+  input = documents(),
+  configuredContextLength = contextLength,
+) {
+  return createProjectSnapshot(projectId, input, {
+    contextLength: configuredContextLength,
+    request: request(),
+  });
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -63,7 +75,7 @@ async function captureError(work) {
 
 describe("AI reviewer project snapshot", function () {
   it("builds a metadata-only manifest and expected LaTeX relationships", function () {
-    const snapshot = createProjectSnapshot(projectId, documents());
+    const snapshot = createSnapshot();
 
     expect(snapshot.manifest).toEqual([
       {
@@ -119,7 +131,7 @@ describe("AI reviewer project snapshot", function () {
   });
 
   it("supports bounded project-relative reads", async function () {
-    const snapshot = createProjectSnapshot(projectId, documents());
+    const snapshot = createSnapshot();
     const matchFrom = mainText.indexOf("PRIVATE_MANUSCRIPT_SENTINEL");
 
     expect(
@@ -151,7 +163,7 @@ describe("AI reviewer project snapshot", function () {
       "@article{resolved, author={C}, title={Resolved synthetic reference}, journal={J}, year={2026}}",
       "@article{incomplete, title={Missing metadata}}",
     ].join("\n");
-    const snapshot = createProjectSnapshot(projectId, {
+    const snapshot = createSnapshot({
       "/main.tex": {
         _id: "document-audit-main",
         version: 1,
@@ -233,7 +245,7 @@ describe("AI reviewer project snapshot", function () {
       "PRIVATE_BIBLIOGRAPHY_SENTINEL",
     );
 
-    const withoutBibliography = createProjectSnapshot(projectId, {
+    const withoutBibliography = createSnapshot({
       "/main.tex": {
         _id: "document-audit-main",
         version: 1,
@@ -248,7 +260,7 @@ describe("AI reviewer project snapshot", function () {
   });
 
   it("rejects unknown reads and evidence outside the captured snapshot", async function () {
-    const snapshot = createProjectSnapshot(projectId, documents());
+    const snapshot = createSnapshot();
 
     expect(
       await captureError(
@@ -294,7 +306,7 @@ describe("AI reviewer project snapshot", function () {
       { length: 150 },
       (_, index) => String.raw`\section{Section ${index}}`,
     );
-    const snapshot = createProjectSnapshot(projectId, {
+    const snapshot = createSnapshot({
       "/main.tex": {
         _id: "document-many-sections",
         version: 1,
@@ -302,8 +314,65 @@ describe("AI reviewer project snapshot", function () {
       },
     });
 
-    expect(snapshot.context.relationships).toHaveLength(100);
+    expect(snapshot.context.relationships.length).toBeGreaterThan(0);
+    expect(snapshot.context.relationships.length).toBeLessThan(100);
     expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
-    expect(JSON.stringify(snapshot.context).length).toBeLessThanOrEqual(20_000);
+    expect(
+      JSON.stringify({ request: request(), project: snapshot.context }).length,
+    ).toBeLessThanOrEqual(modelInputCharacterBudget(contextLength));
+  });
+
+  it("derives a smaller model-facing read budget from a smaller context length", async function () {
+    const text = "x".repeat(3_000);
+    const input = {
+      "/main.tex": {
+        _id: "document-context-budget",
+        version: 1,
+        lines: [text],
+      },
+    };
+    const small = createSnapshot(input, 2_048);
+    const large = createSnapshot(input, 8_192);
+    const read = {
+      path: "main.tex",
+      range: { from: 0, to: 1_000 },
+    };
+
+    expect(
+      await captureError(small.readProjectFile(read, { request: request() })),
+    ).toBeInstanceOf(AgentGatewayError);
+    expect(
+      await large.readProjectFile(read, { request: request() }),
+    ).toMatchObject({
+      path: "main.tex",
+      range: read.range,
+      text: "x".repeat(1_000),
+    });
+  });
+
+  it("applies the model-facing budget across accumulated file reads", async function () {
+    const snapshot = createSnapshot(
+      {
+        "/main.tex": {
+          _id: "document-accumulated-budget",
+          version: 1,
+          lines: ["x".repeat(3_000)],
+        },
+      },
+      4_096,
+    );
+    const read = {
+      path: "main.tex",
+      range: { from: 0, to: 700 },
+    };
+
+    expect(
+      await snapshot.readProjectFile(read, { request: request() }),
+    ).toMatchObject({ text: "x".repeat(700) });
+    expect(
+      await captureError(
+        snapshot.readProjectFile(read, { request: request() }),
+      ),
+    ).toBeInstanceOf(AgentGatewayError);
   });
 });

@@ -4,6 +4,10 @@ import {
   AgentErrorSchema,
   AgentEventSchema,
   AgentRequestSchema,
+  DiscussionEventSchema,
+  DiscussionRequestSchema,
+  DiscussionSubjectSchema,
+  DiscussionTurnSchema,
   EvidenceReferenceSchema,
   FindingSchema,
   ProjectRelativePathSchema,
@@ -18,6 +22,10 @@ import {
 export type AgentError = z.infer<typeof AgentErrorSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
+export type DiscussionEvent = z.infer<typeof DiscussionEventSchema>;
+export type DiscussionRequest = z.infer<typeof DiscussionRequestSchema>;
+export type DiscussionSubject = z.infer<typeof DiscussionSubjectSchema>;
+export type DiscussionTurn = z.infer<typeof DiscussionTurnSchema>;
 export type EvidenceReference = z.infer<typeof EvidenceReferenceSchema>;
 export type Finding = z.infer<typeof FindingSchema>;
 export type JsonValue =
@@ -44,4 +52,8 @@ export interface AgentGateway {
     request: AgentRequest,
     options?: AgentGatewayOptions,
   ): AsyncIterable<AgentEvent>;
+  streamDiscussion(
+    request: DiscussionRequest,
+    options?: AgentGatewayOptions,
+  ): AsyncIterable<DiscussionEvent>;
 }

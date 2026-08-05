@@ -8,7 +8,10 @@ import {
 } from "../../../app/src/AgentGateway.mjs";
 import { createAiReviewerController } from "../../../app/src/AiReviewerController.mjs";
 import { createAiReviewerRouter } from "../../../app/src/AiReviewerRouter.mjs";
-import { AgentEventSchema } from "../../../shared/contracts.mjs";
+import {
+  AgentEventSchema,
+  DiscussionEventSchema,
+} from "../../../shared/contracts.mjs";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
 
@@ -56,6 +59,54 @@ function events() {
   ];
 }
 
+function discussionRequest() {
+  return {
+    requestId: "discussion-request-0001",
+    discussionId: "discussion-0001",
+    projectId: "project-0001",
+    subject: {
+      kind: "scope",
+      sourceRequest: documentRequest(),
+    },
+    turns: [
+      {
+        role: "user",
+        text: "Explain the proposed review in more detail.",
+      },
+    ],
+  };
+}
+
+function discussionEvents() {
+  return [
+    {
+      type: "started",
+      eventId: "discussion-event-0001",
+      requestId: "discussion-request-0001",
+      sequence: 0,
+      createdAt,
+      provider: "fake",
+      model: "deterministic-v1",
+    },
+    {
+      type: "text.delta",
+      eventId: "discussion-event-0002",
+      requestId: "discussion-request-0001",
+      sequence: 1,
+      createdAt,
+      delta: "Synthetic discussion response.",
+    },
+    {
+      type: "completed",
+      eventId: "discussion-event-0003",
+      requestId: "discussion-request-0001",
+      sequence: 2,
+      createdAt,
+      finishReason: "stop",
+    },
+  ];
+}
+
 function findingEvent(projectId = "project-0001") {
   return {
     type: "finding",
@@ -64,6 +115,7 @@ function findingEvent(projectId = "project-0001") {
     sequence: 0,
     createdAt,
     finding: {
+      artifactKind: "finding",
       id: "finding-0001",
       requestId: "request-0001",
       projectId,
@@ -258,6 +310,15 @@ function parseNdjson(response) {
     .map((line) => AgentEventSchema.parse(JSON.parse(line)));
 }
 
+function parseDiscussionNdjson(response) {
+  return response.chunks
+    .join("")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => DiscussionEventSchema.parse(JSON.parse(line)));
+}
+
 function nonCooperativeGateway() {
   const next = vi.fn(() => new Promise(() => {}));
   const returnIterator = vi.fn(async () => ({ done: true, value: undefined }));
@@ -295,6 +356,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     const saveConfiguration = vi.fn();
     const testConnection = vi.fn();
     const stream = vi.fn();
+    const discussionStream = vi.fn();
     const requireLogin = vi.fn(() => login);
     const get = vi.fn();
     const post = vi.fn();
@@ -316,6 +378,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       saveConfiguration,
       testConnection,
       stream,
+      discussionStream,
     });
 
     router.apply(webRouter);
@@ -357,9 +420,18 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       stream,
     );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/project/:project_id/ai-reviewer/discussion-stream",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      discussionStream,
+    );
     expect(anotherRouter.get).toHaveBeenCalledOnce();
     expect(anotherRouter.put).toHaveBeenCalledOnce();
-    expect(anotherRouter.post).toHaveBeenCalledTimes(2);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(3);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
     expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);
@@ -385,6 +457,138 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(response.writableEnded).toBe(true);
     expect(parseNdjson(response)).toEqual(events());
     expect(gateway.calls).toEqual([request()]);
+  });
+
+  it("streams discussion events through the discussion gateway path", async function () {
+    const reviewStream = vi.fn();
+    const streamDiscussion = vi.fn(async function* (input) {
+      expect(input).toEqual(discussionRequest());
+      yield* discussionEvents();
+    });
+    const gatewayFactory = vi.fn(() => ({
+      stream: reviewStream,
+      streamDiscussion,
+    }));
+    const controller = createAiReviewerController({
+      gatewayFactory,
+      now: () => createdAt,
+      eventId: () => "event-error",
+    });
+    const rawHttpRequest = httpRequest(discussionRequest());
+    const response = new FakeResponse();
+
+    await controller.discussionStream(rawHttpRequest, response);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/x-ndjson; charset=utf-8",
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-accel-buffering")).toBe("no");
+    expect(response.writableEnded).toBe(true);
+    expect(parseDiscussionNdjson(response)).toEqual(discussionEvents());
+    expect(gatewayFactory).toHaveBeenCalledExactlyOnceWith({
+      request: discussionRequest(),
+      httpRequest: rawHttpRequest,
+      signal: expect.any(AbortSignal),
+    });
+    expect(streamDiscussion).toHaveBeenCalledExactlyOnceWith(
+      discussionRequest(),
+      { signal: expect.any(AbortSignal) },
+    );
+    expect(reviewStream).not.toHaveBeenCalled();
+  });
+
+  it("redacts discussion provider failures into a typed terminal event", async function () {
+    const secretSentinel = "PRIVATE_DISCUSSION_PROVIDER_SECRET";
+    const gateway = {
+      stream: vi.fn(),
+      streamDiscussion() {
+        throw new AgentGatewayError(secretSentinel, {
+          code: secretSentinel,
+          category: "provider",
+          retryable: false,
+        });
+      },
+    };
+    const controller = createAiReviewerController({
+      gatewayFactory: () => gateway,
+      now: () => createdAt,
+      eventId: () => "event-error",
+    });
+    const response = new FakeResponse();
+
+    await controller.discussionStream(
+      httpRequest(discussionRequest()),
+      response,
+    );
+
+    expect(parseDiscussionNdjson(response)).toEqual([
+      {
+        type: "error",
+        eventId: "event-error",
+        requestId: "discussion-request-0001",
+        sequence: 0,
+        createdAt,
+        error: publicProviderError,
+      },
+    ]);
+    expect(response.chunks.join("")).not.toContain(secretSentinel);
+    expect(response.writableEnded).toBe(true);
+  });
+
+  it("applies the shared timeout handling to a discussion stream", async function () {
+    const timeout = new AbortController();
+    const next = vi.fn(() => new Promise(() => {}));
+    const returnIterator = vi.fn(async () => ({
+      done: true,
+      value: undefined,
+    }));
+    const gateway = {
+      stream: vi.fn(),
+      streamDiscussion() {
+        return {
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+          next,
+          return: returnIterator,
+        };
+      },
+    };
+    const controller = createAiReviewerController({
+      gatewayFactory: () => gateway,
+      timeoutSignalFactory: () => timeout.signal,
+      now: () => createdAt,
+      eventId: () => "event-error",
+    });
+    const response = new FakeResponse();
+
+    const streaming = controller.discussionStream(
+      httpRequest(discussionRequest()),
+      response,
+    );
+    await vi.waitFor(() => expect(next).toHaveBeenCalledOnce());
+    timeout.abort(new DOMException("Synthetic timeout", "TimeoutError"));
+
+    expect(await settlesWithin(streaming)).toBe(true);
+    expect(returnIterator).toHaveBeenCalledOnce();
+    expect(parseDiscussionNdjson(response)).toEqual([
+      {
+        type: "error",
+        eventId: "event-error",
+        requestId: "discussion-request-0001",
+        sequence: 0,
+        createdAt,
+        error: {
+          code: "AI_REQUEST_TIMEOUT",
+          category: "timeout",
+          message: "The AI reviewer request timed out.",
+          retryable: true,
+        },
+      },
+    ]);
+    expect(response.writableEnded).toBe(true);
   });
 
   it.each([

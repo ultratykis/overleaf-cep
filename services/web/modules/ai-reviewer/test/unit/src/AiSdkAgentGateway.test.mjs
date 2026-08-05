@@ -59,12 +59,13 @@ function finish(finishReason, tokenUsage = usage()) {
   };
 }
 
-function structuredOutput() {
+function structuredOutput(findingOverrides = {}) {
   return {
     narrative: "Synthetic structured review.",
     suggestions: [],
     findings: [
       {
+        artifactKind: "finding",
         severity: "suggestion",
         category: "style",
         title: "Synthetic finding",
@@ -77,6 +78,7 @@ function structuredOutput() {
             textHash: "a".repeat(64),
           },
         ],
+        ...findingOverrides,
       },
     ],
   };
@@ -105,6 +107,7 @@ function createGateway(model, overrides = {}) {
     model,
     provider: "fixture-provider",
     modelId: "fixture-model",
+    contextLength: 8_192,
     readProjectFile: async () => ({
       path: "main.tex",
       text: "Synthetic tool result.",
@@ -193,10 +196,12 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     });
     expect(events[3]).toMatchObject({
       finding: {
+        artifactKind: "finding",
         requestId: "request-sdk-0001",
         projectId: "project-sdk-0001",
       },
     });
+    expect(events[3].finding).not.toHaveProperty("proposedText");
     expect(events[4]).toMatchObject({
       finishReason: "stop",
       usage: {
@@ -209,6 +214,23 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     expect(model.doStreamCalls).toHaveLength(2);
     expect(model.doStreamCalls[0].abortSignal).toBe(controller.signal);
     expect(model.doStreamCalls[1].abortSignal).toBe(controller.signal);
+    expect(
+      model.doStreamCalls.map(
+        (call) => call.providerOptions.openai.reasoningEffort,
+      ),
+    ).toEqual(["none", "none"]);
+    expect(model.doStreamCalls[0].prompt[0].content).toContain(
+      "Act as a critical academic referee.",
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).toContain(
+      "Every finding must include at least one project-file evidence reference",
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).toContain(
+      'artifactKind "citation-finding"',
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).toContain(
+      'artifactKind "finding"',
+    );
     const userPrompt = model.doStreamCalls[0].prompt[1].content[0].text;
     expect(JSON.parse(userPrompt).project).toEqual({
       summary: { fileCount: 1 },
@@ -219,6 +241,47 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       {
         request: request(),
         signal: controller.signal,
+      },
+    );
+  });
+
+  it("emits an explicit citation finding with its proposed text", async function () {
+    const citationOutput = structuredOutput({
+      artifactKind: "citation-finding",
+      proposedText: "Add a bibliography entry for the synthetic citation.",
+    });
+    const output = JSON.stringify(citationOutput);
+    const structuredStep = streamResult([
+      { type: "text-start", id: "text-citation-0001" },
+      { type: "text-delta", id: "text-citation-0001", delta: output },
+      { type: "text-end", id: "text-citation-0001" },
+      finish("stop", usage(5, 8)),
+    ]);
+    const { model } = strictStreamModel([structuredStep]);
+    const validateEvidence = vi.fn();
+    const gateway = createGateway(model, { validateEvidence });
+
+    const events = await collect(gateway.stream(request()));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "finding",
+      "completed",
+    ]);
+    expect(events[2]).toMatchObject({
+      finding: {
+        artifactKind: "citation-finding",
+        proposedText: "Add a bibliography entry for the synthetic citation.",
+        requestId: "request-sdk-0001",
+        projectId: "project-sdk-0001",
+      },
+    });
+    expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
+      citationOutput.findings[0].evidence,
+      {
+        request: request(),
+        signal: undefined,
       },
     );
   });

@@ -57,7 +57,6 @@ export function createOllamaProviderService(dependencies = {}) {
       const result = await transport.generateChat(
         {
           prompt: "Return exactly COMPAT_OK and nothing else.",
-          maxOutputTokens: 32,
         },
         { signal },
       );
@@ -68,6 +67,19 @@ export function createOllamaProviderService(dependencies = {}) {
         provider: "ollama",
         model: config.model,
         classification: "local",
+      });
+    },
+
+    /**
+     * @param {unknown} input
+     */
+    createDiscussionGateway(input) {
+      const config = parseAiReviewerProviderConfig(input);
+      return transportFactory({
+        baseUrl: config.baseUrl,
+        modelTag: config.model,
+      }).createDiscussionGateway({
+        contextLength: config.contextLength,
       });
     },
 
@@ -92,6 +104,7 @@ export function createOllamaProviderService(dependencies = {}) {
         baseUrl: config.baseUrl,
         modelTag: config.model,
       }).createAgentGateway({
+        contextLength: config.contextLength,
         readProjectFile,
         projectContext,
         searchZotero,

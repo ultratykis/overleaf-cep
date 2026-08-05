@@ -22,4 +22,5 @@ export default createAiReviewerRouter({
   saveConfiguration: AiReviewerController.saveConfiguration,
   testConnection: AiReviewerController.testConnection,
   stream: AiReviewerController.stream,
+  discussionStream: AiReviewerController.discussionStream,
 });

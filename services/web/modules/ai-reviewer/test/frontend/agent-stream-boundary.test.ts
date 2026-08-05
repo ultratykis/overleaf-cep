@@ -114,6 +114,7 @@ function findingEvent({
       id: "finding-0001",
       requestId: "request-stream-0001",
       projectId: "project-0001",
+      artifactKind: "finding",
       severity: "warning",
       category: "clarity",
       title: "Synthetic finding",
@@ -418,14 +419,14 @@ describe("AI reviewer: single document stream boundary", function () {
     }
   });
 
-  it("allows project-scoped cross-file events without claiming snapshot verification", async function () {
+  it("allows project-scoped cross-file findings without claiming snapshot verification", async function () {
     const events = [
       startedEvent({
         skill: "referee-review",
       }),
       findingEvent({
         findingOverrides: {
-          suggestionIds: ["suggestion-project-0001"],
+          suggestionIds: [],
         },
         evidenceOverrides: {
           path: "sections/other.tex",
@@ -437,38 +438,9 @@ describe("AI reviewer: single document stream boundary", function () {
           textHash: otherTextHash,
         },
       }),
-      suggestionEvent({
-        eventOverrides: {
-          sequence: 2,
-          eventId: "event-suggestion-project",
-        },
-        suggestionOverrides: {
-          id: "suggestion-project-0001",
-          documentId: "document-other",
-          path: "sections/other.tex",
-          baseRevision: 3,
-          baseTextHash: otherTextHash,
-          range: {
-            from: 0,
-            to: 5,
-          },
-          original: "Gamma",
-          replacement: "Delta",
-          skill: "referee-review",
-        },
-        evidenceOverrides: {
-          path: "references.bib",
-          range: {
-            from: 10,
-            to: 20,
-          },
-          revision: 2,
-          textHash: otherTextHash,
-        },
-      }),
       toolCallEvent({
         eventOverrides: {
-          sequence: 3,
+          sequence: 2,
           eventId: "event-tool-project",
         },
         argumentOverrides: {
@@ -476,7 +448,7 @@ describe("AI reviewer: single document stream boundary", function () {
           range: undefined,
         },
       }),
-      completedEvent(4),
+      completedEvent(3),
     ];
     const run = await runStream({
       request: projectRequest(),
@@ -1047,7 +1019,7 @@ describe("AI reviewer: OT safety stream boundary", function () {
     expect(run.received).to.deep.equal([]);
   });
 
-  it("rejects a project-scoped suggestion project mismatch before callback delivery", async function () {
+  it("rejects every project-scoped suggestion before callback delivery", async function () {
     const start = startedEvent({
       skill: "referee-review",
     });
@@ -1057,7 +1029,6 @@ describe("AI reviewer: OT safety stream boundary", function () {
         start,
         suggestionEvent({
           suggestionOverrides: {
-            projectId: "project-other",
             skill: "referee-review",
           },
         }),

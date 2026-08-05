@@ -826,6 +826,7 @@ async function runAiSdkProbe(expectedVersion) {
     model,
     provider: "fixture-provider",
     modelId: "fixture-model",
+    contextLength: 8_192,
     readProjectFile: async (input) => {
       const key = `${input.path}:${input.range?.from}:${input.range?.to}`;
       if (!allowedReads.has(key)) {

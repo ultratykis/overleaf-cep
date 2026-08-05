@@ -418,6 +418,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       fetchImpl,
     });
     const gateway = transport.createAgentGateway({
+      contextLength: 8_192,
       readProjectFile: vi.fn(),
     });
 
@@ -438,6 +439,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     const fixture = transportFixture();
     const readProjectFile = vi.fn();
     const gateway = fixture.transport.createAgentGateway({
+      contextLength: 8_192,
       readProjectFile,
       now: () => "2026-07-25T00:00:00.000Z",
       createId: () => "synthetic-id",
@@ -454,7 +456,26 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(Reflect.ownKeys(fixture.transport)).toEqual([]);
   });
 
-  it("generates one fixed non-stream request and exposes only a local result", async function () {
+  it("creates the discussion gateway from the same private concrete model", function () {
+    const fixture = transportFixture();
+    const gateway = fixture.transport.createDiscussionGateway({
+      contextLength: 8_192,
+      now: () => "2026-07-25T00:00:00.000Z",
+      createId: () => "synthetic-id",
+    });
+
+    expect(gateway).toBeInstanceOf(AiSdkAgentGateway);
+    expect(gateway).toMatchObject({
+      provider: "ollama",
+      modelId: modelTag,
+      streamDiscussion: expect.any(Function),
+    });
+    expect("languageModel" in fixture.transport).toBe(false);
+    expect("model" in fixture.transport).toBe(false);
+    expect(Reflect.ownKeys(fixture.transport)).toEqual([]);
+  });
+
+  it("generates one fixed non-stream request without a generation cap", async function () {
     const fixture = transportFixture();
     const controller = new AbortController();
     fixture.model.doGenerate.mockResolvedValue({
@@ -500,7 +521,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     const result = await fixture.transport.generateChat(
       {
         prompt: "Return exactly COMPAT_OK and nothing else.",
-        maxOutputTokens: 32,
       },
       {
         signal: controller.signal,
@@ -519,7 +539,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           ],
         },
       ],
-      maxOutputTokens: 32,
       temperature: 0,
       topP: 1,
       seed: 424242,
@@ -2231,7 +2250,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     },
     {
       prompt: "COMPAT_OK",
-      maxOutputTokens: 513,
+      maxOutputTokens: Number.MAX_SAFE_INTEGER + 1,
     },
     {
       prompt: "COMPAT_OK",
@@ -2288,7 +2307,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(error.message).not.toContain("AI_REVIEWER_PROVIDER_WARNING_SECRET");
   });
 
-  it.each([1, 32, 48, 64, 96, 512])(
+  it.each([1, 32, 48, 64, 96, 512, 513, Number.MAX_SAFE_INTEGER])(
     "forwards supported maxOutputTokens value %i",
     async function (maxOutputTokens) {
       const fixture = transportFixture();
@@ -3660,7 +3679,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         },
       },
     })),
-    ...[-1, 1.5, Number.MAX_SAFE_INTEGER + 1, 97].map((total) => ({
+    ...[-1, 1.5, Number.MAX_SAFE_INTEGER + 1].map((total) => ({
       name: `invalid output token total ${String(total)}`,
       finish: {
         usage: {
@@ -6871,6 +6890,38 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     },
   );
 
+  it("accepts stream usage above a provided output token value", async function () {
+    const fixture = transportFixture();
+    const parts = plainStreamParts().map((part) =>
+      part.type === "finish"
+        ? {
+            ...part,
+            usage: {
+              ...part.usage,
+              outputTokens: {
+                ...part.usage.outputTokens,
+                total: 97,
+              },
+            },
+          }
+        : part,
+    );
+    fixture.model.doStream.mockResolvedValue(
+      providerStreamResult(parts).result,
+    );
+
+    const events = await captureStream(fixture.transport);
+
+    expect(events.at(-1)).toEqual({
+      type: "completed",
+      finishReason: "stop",
+      usage: {
+        inputTokens: 528,
+        outputTokens: 97,
+      },
+    });
+  });
+
   it("does not inspect a non-stream result that resolves after abort", async function () {
     const fixture = transportFixture();
     const provider = deferred();
@@ -6974,7 +7025,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
   );
 
   it.each(["chat", "structured", "tool proposal", "tool continuation"])(
-    "rejects %s usage above the request token ceiling",
+    "accepts %s usage above a provided output token value",
     async function (name) {
       const fixture = transportFixture();
       const invoke = await createDirectInvocation(fixture, name);
@@ -6987,12 +7038,10 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       result.usage.outputTokens.total = 33;
       fixture.model.doGenerate.mockResolvedValue(result);
 
-      const error = await captureError(invoke());
+      const completed = await invoke();
 
-      expect(error).toMatchObject({
-        code: "AI_PROVIDER_SCHEMA_INVALID",
-        category: "schema",
-        retryable: false,
+      expect(completed.usage).toMatchObject({
+        outputTokens: 33,
       });
     },
   );

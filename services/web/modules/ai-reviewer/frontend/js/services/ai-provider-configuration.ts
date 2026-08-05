@@ -9,6 +9,7 @@ export type AiProviderConfiguration = {
   provider: "ollama";
   baseUrl: string;
   model: string;
+  contextLength: number;
 };
 
 export type AiProviderConfigurationResponse = {
@@ -84,6 +85,7 @@ export function saveAiProviderConfiguration(
     provider: config.provider,
     baseUrl: config.baseUrl,
     model: config.model,
+    contextLength: config.contextLength,
   };
   return request(signal, () =>
     putJSON<AiProviderConfigurationResponse>(

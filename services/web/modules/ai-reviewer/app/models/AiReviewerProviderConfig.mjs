@@ -10,6 +10,16 @@ export const AiReviewerProviderConfigSchema = new mongoose.Schema(
     provider: { type: String, required: true },
     baseUrl: { type: String, required: true },
     model: { type: String, required: true },
+    contextLength: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: Number.MAX_SAFE_INTEGER,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "contextLength must be a positive safe integer.",
+      },
+    },
   },
   {
     collection: "aiReviewerProviderConfigs",

@@ -4,11 +4,15 @@ import {
   AgentErrorSchema,
   AgentEventSchema,
   AgentRequestSchema,
+  DiscussionEventSchema,
+  DiscussionRequestSchema,
 } from "../../../shared/contracts.mjs";
 import type {
   AgentError,
   AgentEvent,
   AgentRequest,
+  DiscussionEvent,
+  DiscussionRequest,
   EvidenceReference,
 } from "../../../shared/contract-types";
 import { prepareSingleDocumentSuggestion } from "./single-document-suggestions";
@@ -27,6 +31,27 @@ type StreamAgentEventsOptions = {
   onEvent: (event: AgentEvent) => void;
   csrfToken?: string;
   fetchImpl?: typeof fetch;
+};
+
+type StreamDiscussionEventsOptions = {
+  projectId: string;
+  request: DiscussionRequest;
+  signal: AbortSignal;
+  onEvent: (event: DiscussionEvent) => void;
+  csrfToken?: string;
+  fetchImpl?: typeof fetch;
+};
+
+type StreamEnvelope = {
+  requestId: string;
+  sequence: number;
+  type: string;
+};
+
+type RuntimeSchema<Value> = {
+  safeParse: (
+    value: unknown,
+  ) => { success: true; data: Value } | { success: false; error: unknown };
 };
 
 function genericStreamError(
@@ -265,7 +290,10 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
       );
     }
     if (request.scope.kind === "project") {
-      return;
+      throw protocolError(
+        "AI_STREAM_EVENT_SCOPE_INVALID",
+        "A project review cannot return edit suggestions.",
+      );
     }
     try {
       prepareSingleDocumentSuggestion({
@@ -286,42 +314,43 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
   }
 }
 
-export async function streamAgentEvents({
-  projectId,
-  request,
+async function streamAuthenticatedEvents<
+  Request extends { projectId: string; requestId: string },
+  Event extends StreamEnvelope,
+>({
+  boundRequest,
+  endpoint,
+  eventSchema,
   signal,
   onEvent,
-  csrfToken = getMeta("ol-csrfToken"),
-  fetchImpl = fetch,
-}: StreamAgentEventsOptions) {
-  throwIfAborted(signal);
-  const parsedRequest = AgentRequestSchema.safeParse(request);
-  if (!parsedRequest.success || parsedRequest.data.projectId !== projectId) {
-    throw protocolError(
-      "AI_STREAM_REQUEST_INVALID",
-      "The AI reviewer request does not match the active project.",
-    );
-  }
-  const boundRequest = parsedRequest.data;
-
+  assertEvent,
+  csrfToken,
+  fetchImpl,
+}: {
+  boundRequest: Request;
+  endpoint: string;
+  eventSchema: RuntimeSchema<Event>;
+  signal: AbortSignal;
+  onEvent: (event: Event) => void;
+  assertEvent: (request: Request, event: Event) => void;
+  csrfToken: string;
+  fetchImpl: typeof fetch;
+}) {
   let response: Response;
   try {
     response = await waitWithAbort(
       Promise.resolve(
-        fetchImpl(
-          `/project/${encodeURIComponent(boundRequest.projectId)}/ai-reviewer/stream`,
-          {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Csrf-Token": csrfToken,
-              Accept: "application/x-ndjson, application/json",
-            },
-            body: JSON.stringify(boundRequest),
-            signal,
+        fetchImpl(endpoint, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Csrf-Token": csrfToken,
+            Accept: "application/x-ndjson, application/json",
           },
-        ),
+          body: JSON.stringify(boundRequest),
+          signal,
+        }),
       ),
       signal,
     );
@@ -375,7 +404,7 @@ export async function streamAgentEvents({
         "The AI reviewer returned malformed stream data.",
       );
     }
-    const parsed = AgentEventSchema.safeParse(rawEvent);
+    const parsed = eventSchema.safeParse(rawEvent);
     if (
       !parsed.success ||
       parsed.data.requestId !== boundRequest.requestId ||
@@ -387,7 +416,7 @@ export async function streamAgentEvents({
       );
     }
 
-    assertEventForRequest(boundRequest, parsed.data);
+    assertEvent(boundRequest, parsed.data);
     nextSequence += 1;
     terminal = parsed.data.type === "completed" || parsed.data.type === "error";
     onEvent(parsed.data);
@@ -438,4 +467,90 @@ export async function streamAgentEvents({
   if (failed) {
     throw failure;
   }
+}
+
+export async function streamAgentEvents({
+  projectId,
+  request,
+  signal,
+  onEvent,
+  csrfToken = getMeta("ol-csrfToken"),
+  fetchImpl = fetch,
+}: StreamAgentEventsOptions) {
+  throwIfAborted(signal);
+  const parsedRequest = AgentRequestSchema.safeParse(request);
+  if (!parsedRequest.success || parsedRequest.data.projectId !== projectId) {
+    throw protocolError(
+      "AI_STREAM_REQUEST_INVALID",
+      "The AI reviewer request does not match the active project.",
+    );
+  }
+  const boundRequest = parsedRequest.data;
+  await streamAuthenticatedEvents({
+    boundRequest,
+    endpoint: `/project/${encodeURIComponent(boundRequest.projectId)}/ai-reviewer/stream`,
+    eventSchema: AgentEventSchema,
+    signal,
+    onEvent,
+    assertEvent: assertEventForRequest,
+    csrfToken,
+    fetchImpl,
+  });
+}
+
+function assertDiscussionEventForRequest(
+  request: DiscussionRequest,
+  event: DiscussionEvent,
+) {
+  if (event.type !== "suggestion") {
+    return;
+  }
+
+  const sourceRequest = request.subject.sourceRequest;
+  if (sourceRequest.scope.kind === "project") {
+    throw protocolError(
+      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+      "A project discussion cannot return edit suggestions.",
+    );
+  }
+  try {
+    prepareSingleDocumentSuggestion({
+      request: sourceRequest,
+      suggestion: event.suggestion,
+    });
+  } catch {
+    throw protocolError(
+      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+      "The AI reviewer returned a discussion suggestion outside the subject scope.",
+    );
+  }
+}
+
+export async function streamDiscussionEvents({
+  projectId,
+  request,
+  signal,
+  onEvent,
+  csrfToken = getMeta("ol-csrfToken"),
+  fetchImpl = fetch,
+}: StreamDiscussionEventsOptions) {
+  throwIfAborted(signal);
+  const parsedRequest = DiscussionRequestSchema.safeParse(request);
+  if (!parsedRequest.success || parsedRequest.data.projectId !== projectId) {
+    throw protocolError(
+      "AI_DISCUSSION_REQUEST_INVALID",
+      "The AI reviewer discussion does not match the active project.",
+    );
+  }
+  const boundRequest = parsedRequest.data;
+  await streamAuthenticatedEvents({
+    boundRequest,
+    endpoint: `/project/${encodeURIComponent(boundRequest.projectId)}/ai-reviewer/discussion-stream`,
+    eventSchema: DiscussionEventSchema,
+    signal,
+    onEvent,
+    assertEvent: assertDiscussionEventForRequest,
+    csrfToken,
+    fetchImpl,
+  });
 }

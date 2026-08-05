@@ -217,7 +217,12 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
       "AI reviewer Ollama smoke project",
     );
     const route = `/project/${projectId}/ai-reviewer`;
-    const configuration = { provider: "ollama", baseUrl, model };
+    const configuration = {
+      provider: "ollama",
+      baseUrl,
+      model,
+      contextLength: 8_192,
+    };
     const csrfHeaders = { "x-csrf-token": owner.csrfToken };
 
     const saved = await owner.doRequest("PUT", {
@@ -260,7 +265,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         action: "review",
         instruction:
           "Return one short narrative review. Use empty findings and suggestions arrays.",
-        skill: null,
+        skill: "referee-review",
         scope: {
           kind: "document",
           documentId: "main-document",
@@ -309,7 +314,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         action: "review",
         instruction:
           "Return one short narrative based on the project manifest. Use empty findings and suggestions arrays.",
-        skill: null,
+        skill: "referee-review",
         scope: { kind: "project" },
       }),
     });

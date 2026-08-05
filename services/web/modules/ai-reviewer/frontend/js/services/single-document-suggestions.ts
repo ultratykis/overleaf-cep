@@ -13,8 +13,8 @@ type SingleDocumentRequest = Omit<AgentRequest, "scope"> & {
   scope: Exclude<AgentRequest["scope"], { kind: "project" }>;
 };
 
-type RejectedSuggestion = Omit<ProposedSuggestion, "status"> & {
-  status: "rejected";
+type DiscardedSuggestion = Omit<ProposedSuggestion, "status"> & {
+  status: "discarded";
 };
 
 const SingleDocumentSnapshotSchema = z
@@ -255,9 +255,9 @@ export function preflightSingleDocumentSuggestion({
   };
 }
 
-export function rejectSingleDocumentSuggestion(
+export function discardSingleDocumentSuggestion(
   rawSuggestion: unknown,
-): RejectedSuggestion {
+): DiscardedSuggestion {
   const parsed = ProposedSuggestionSchema.safeParse(rawSuggestion);
   if (!parsed.success) {
     throw new SingleDocumentSuggestionError(
@@ -267,6 +267,6 @@ export function rejectSingleDocumentSuggestion(
   }
   return {
     ...parsed.data,
-    status: "rejected",
+    status: "discarded",
   };
 }

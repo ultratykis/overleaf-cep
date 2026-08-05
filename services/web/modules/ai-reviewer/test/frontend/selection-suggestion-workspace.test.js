@@ -274,7 +274,7 @@ describe("AI reviewer: single document suggestion workspace", function () {
       name: "Apply selected changes",
     });
     const rejectButton = screen.getByRole("button", {
-      name: "Reject suggestion",
+      name: "Discard suggestion",
     });
     expect(applyButton.disabled).to.equal(false);
     act(() => {
@@ -356,16 +356,16 @@ describe("AI reviewer: single document suggestion workspace", function () {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Reject suggestion",
+        name: "Discard suggestion",
       }),
     );
-    await screen.findByText("Suggestion rejected");
+    await screen.findByText("Suggestion discarded");
 
     expect(harness.applySuggestion.called).to.equal(false);
     expect(harness.getContext.called).to.equal(false);
     expect(
       harness.onDecision.calledOnceWithExactly({
-        status: "rejected",
+        status: "discarded",
       }),
     ).to.equal(true);
     expect(harness.destroy.calledOnce).to.equal(true);
@@ -390,10 +390,10 @@ describe("AI reviewer: single document suggestion workspace", function () {
     await waitFor(() => expect(mountPreview.calledOnce).to.equal(true));
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Reject suggestion",
+        name: "Discard suggestion",
       }),
     );
-    await screen.findByText("Suggestion rejected");
+    await screen.findByText("Suggestion discarded");
     await act(async () => {
       mounting.resolve({
         hunkIds: Object.freeze(["ai-hunk-v1-late"]),
@@ -404,7 +404,7 @@ describe("AI reviewer: single document suggestion workspace", function () {
 
     expect(lateDestroy.calledOnce).to.equal(true);
     expect(
-      harness.onDecision.calledOnceWithExactly({ status: "rejected" }),
+      harness.onDecision.calledOnceWithExactly({ status: "discarded" }),
     ).to.equal(true);
   });
 

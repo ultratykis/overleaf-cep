@@ -227,6 +227,7 @@ function createGateway(model, overrides = {}) {
     model,
     provider: "fixture-provider",
     modelId: "fixture-model",
+    contextLength: 8_192,
     readProjectFile: async () => ({
       path: "main.tex",
       text: "Synthetic tool result.",
@@ -1910,13 +1911,60 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
   });
 
-  it("sets a fixed provider output-token ceiling", async function () {
+  it("does not send a generation token cap to the provider", async function () {
     const { model } = strictStreamModel([outputStep(validOutput())]);
 
     await collect(createGateway(model).stream(projectRequest()));
 
     expect(model.doStreamCalls).toHaveLength(1);
-    expect(model.doStreamCalls[0].maxOutputTokens).toBe(512);
+    expect(model.doStreamCalls[0].maxOutputTokens).toBeUndefined();
+  });
+
+  it("derives a smaller prompt budget from a smaller context length", async function () {
+    const text = "x".repeat(2_000);
+    const boundedRequest = selectionRequest({
+      scope: {
+        kind: "selection",
+        documentId: "document-sdk-context-budget",
+        path: "main.tex",
+        baseRevision: 1,
+        baseTextHash: contentHash,
+        range: { from: 0, to: text.length },
+        text,
+      },
+    });
+    const { model: smallModel } = strictStreamModel([
+      outputStep(validOutput()),
+    ]);
+    const { model: largeModel } = strictStreamModel([
+      outputStep(validOutput()),
+    ]);
+
+    expect(
+      await captureError(
+        collect(
+          createGateway(smallModel, { contextLength: 4_096 }).stream(
+            boundedRequest,
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(smallModel.doStreamCalls).toHaveLength(0);
+
+    const events = await collect(
+      createGateway(largeModel, { contextLength: 8_192 }).stream(
+        boundedRequest,
+      ),
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
+    expect(largeModel.doStreamCalls).toHaveLength(1);
   });
 
   it.each([
@@ -2257,7 +2305,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
   });
 
-  it("rejects finish usage above the output-token ceiling", async function () {
+  it("accepts large reported output token usage", async function () {
     const { model } = strictStreamModel([
       streamResult(
         outputChunks(validOutput())
@@ -2266,18 +2314,19 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       ),
     ]);
 
-    expect(
-      await captureError(
-        collect(createGateway(model).stream(projectRequest())),
-      ),
-    ).toMatchObject({
-      code: "AI_PROVIDER_FAILED",
-      category: "provider",
-      retryable: true,
+    const events = await collect(createGateway(model).stream(projectRequest()));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+      usage: {
+        inputTokens: 3,
+        outputTokens: 513,
+      },
     });
   });
 
-  it("accepts finish usage at the output-token ceiling", async function () {
+  it("accepts reported output usage at the previous ceiling", async function () {
     const { model } = strictStreamModel([
       streamResult(
         outputChunks(validOutput())

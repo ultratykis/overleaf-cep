@@ -36,11 +36,13 @@ const configuration: AiProviderConfiguration = {
   provider: "ollama",
   baseUrl: "http://127.0.0.1:11434/v1",
   model: "qwen3.5:4b",
+  contextLength: 8_192,
 };
 const otherConfiguration: AiProviderConfiguration = {
   provider: "ollama",
   baseUrl: "http://localhost:11434/v1",
   model: "other-model:latest",
+  contextLength: 4_096,
 };
 const unconfigured: AiProviderConfigurationResponse = {
   configured: false,
@@ -158,7 +160,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(headers.get("content-type")).to.equal("application/json");
   });
 
-  it("saves exactly the three provider fields through PUT", async function () {
+  it("saves exactly the four provider fields through PUT", async function () {
     const route = fetchMock.put(
       `/project/${projectId}/ai-reviewer/config`,
       configured,
@@ -180,6 +182,7 @@ describe("AI reviewer: provider configuration", function () {
       "provider",
       "baseUrl",
       "model",
+      "contextLength",
     ]);
     expect(JSON.parse(String(call.options.body))).to.deep.equal(configuration);
   });
@@ -211,6 +214,9 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Model"), {
       target: { value: configuration.model },
     });
+    fireEvent.change(input("Context length (tokens)"), {
+      target: { value: String(configuration.contextLength) },
+    });
     fireEvent.click(button("Save"));
 
     await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
@@ -225,6 +231,27 @@ describe("AI reviewer: provider configuration", function () {
     expect(testConnection.firstCall.args).to.have.length(2);
     expect(testConnection.firstCall.args[0]).to.equal(projectId);
     await screen.findByText("Connection successful");
+  });
+
+  it("requires a positive integer context length before saving", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+    fireEvent.change(input("Base URL"), {
+      target: { value: configuration.baseUrl },
+    });
+    fireEvent.change(input("Model"), {
+      target: { value: configuration.model },
+    });
+
+    for (const value of ["0", "-1", "1.5"]) {
+      fireEvent.change(input("Context length (tokens)"), { target: { value } });
+      expect(button("Save").disabled).to.equal(true);
+    }
+
+    fireEvent.change(input("Context length (tokens)"), {
+      target: { value: String(configuration.contextLength) },
+    });
+    expect(button("Save").disabled).to.equal(false);
   });
 
   it("keeps Test disabled until the current draft is persisted", async function () {
@@ -249,6 +276,9 @@ describe("AI reviewer: provider configuration", function () {
       expect(button("Test connection").disabled).to.equal(false),
     );
     expect(input("Model").value).to.equal(otherConfiguration.model);
+    expect(input("Context length (tokens)").value).to.equal(
+      String(otherConfiguration.contextLength),
+    );
   });
 
   it("aborts and ignores a stale load after the project changes", async function () {
@@ -276,6 +306,9 @@ describe("AI reviewer: provider configuration", function () {
     );
     await act(async () => firstLoad.resolve(configured));
     expect(input("Model").value).to.equal(otherConfiguration.model);
+    expect(input("Context length (tokens)").value).to.equal(
+      String(otherConfiguration.contextLength),
+    );
   });
 
   it("aborts the active request when the view unmounts", async function () {

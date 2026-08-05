@@ -2,6 +2,7 @@
 
 import { AgentRequestSchema } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
+import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 import { createProjectSnapshot } from "./ProjectSnapshot.mjs";
 
 function rejected() {
@@ -16,7 +17,7 @@ function rejected() {
 }
 
 /** @param {any} request */
-function authenticatedUserId(request) {
+export function authenticatedUserId(request) {
   const value = request?.user?._id?.toString?.();
   if (typeof value !== "string" || value.length === 0) {
     throw rejected();
@@ -66,9 +67,9 @@ export function createRequestScopeReader({
   return {
     /**
      * @param {any} httpRequest
-     * @param {{ signal?: AbortSignal }} [options]
+     * @param {{ signal?: AbortSignal, contextLength?: unknown }} [options]
      */
-    async read(httpRequest, { signal } = {}) {
+    async read(httpRequest, { signal, contextLength } = {}) {
       const parsed = AgentRequestSchema.safeParse(httpRequest?.body);
       if (!parsed.success) {
         throw rejected();
@@ -79,6 +80,13 @@ export function createRequestScopeReader({
         throw rejected();
       }
       const userId = authenticatedUserId(httpRequest);
+      /** @type {number} */
+      let maxModelInputCharacters;
+      try {
+        maxModelInputCharacters = modelInputCharacterBudget(contextLength);
+      } catch {
+        throw rejected();
+      }
       if (scope.kind === "project") {
         if (typeof loadProjectDocuments !== "function") {
           throw rejected();
@@ -86,6 +94,7 @@ export function createRequestScopeReader({
         const snapshot = createProjectSnapshot(
           request.projectId,
           await loadProjectDocuments(request.projectId, { signal }),
+          { contextLength, request },
         );
         const zoteroSearchRelevant =
           request.action === "citation-audit" ||
@@ -115,6 +124,10 @@ export function createRequestScopeReader({
       const lower = scope.kind === "selection" ? scope.range.from : 0;
       const upper =
         scope.kind === "selection" ? scope.range.to : scope.text.length;
+      let modelInputCharacters = JSON.stringify(request).length;
+      if (modelInputCharacters > maxModelInputCharacters) {
+        throw rejected();
+      }
 
       /**
        * @param {any} input
@@ -138,11 +151,17 @@ export function createRequestScopeReader({
         ) {
           throw rejected();
         }
-        return Object.freeze({
+        const result = Object.freeze({
           path: scope.path,
           range: Object.freeze({ from: range.from, to: range.to }),
           text: scope.text.slice(range.from - lower, range.to - lower),
         });
+        const resultCharacters = JSON.stringify(result).length;
+        if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
+          throw rejected();
+        }
+        modelInputCharacters += resultCharacters;
+        return result;
       }
 
       return Object.freeze({

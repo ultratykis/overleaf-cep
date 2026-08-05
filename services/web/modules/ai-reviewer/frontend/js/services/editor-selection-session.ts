@@ -7,6 +7,7 @@ import type { AgentRequest } from "../../../shared/contract-types";
 import { aiReviewerDocumentIdentity } from "../extensions/document-identity";
 
 export type EditorSelectionSessionAction = "review" | "rewrite" | "shorten";
+export type EditorSelectionSessionTarget = "selection" | "document";
 
 export type EditorSelectionShareDocument = {
   connection: {
@@ -91,11 +92,13 @@ export type CaptureEditorSelectionSessionOptions = {
   requestId: string;
   action: EditorSelectionSessionAction;
   instruction: string;
+  target?: EditorSelectionSessionTarget;
   getContext: () => EditorSelectionSessionContext;
   hashText?: (text: string) => Promise<string>;
 };
 
 type CapturedSelection = {
+  target: EditorSelectionSessionTarget;
   view: EditorView;
   currentDocument: EditorSelectionDocument;
   shareDocument: EditorSelectionShareDocument;
@@ -132,6 +135,10 @@ const actions = new Set<EditorSelectionSessionAction>([
   "rewrite",
   "shorten",
 ]);
+const targets = new Set<EditorSelectionSessionTarget>([
+  "selection",
+  "document",
+]);
 
 const skills: Record<EditorSelectionSessionAction, string> = {
   review: "referee-review",
@@ -153,6 +160,7 @@ function conflict(
 function captureContextUnsafe(
   getContext: () => EditorSelectionSessionContext,
   action: EditorSelectionSessionAction,
+  target: EditorSelectionSessionTarget,
 ): CaptureResult {
   const context = getContext();
   const view = context.view;
@@ -262,6 +270,36 @@ function captureContextUnsafe(
   if (editorText !== text) {
     return conflict("AI_SELECTION_DIVERGED");
   }
+  if (target === "document") {
+    return {
+      status: "ready",
+      snapshot: {
+        target,
+        view,
+        currentDocument,
+        shareDocument,
+        projectId,
+        currentDocumentId,
+        path: path ?? "",
+        sourceMode,
+        connected,
+        connectionEpoch,
+        permissionRead,
+        permissionWrite,
+        permissionTrackedWrite,
+        trackChanges,
+        wantTrackChanges,
+        realtimeTrackChanges,
+        revision: revisionBefore,
+        text: editorText,
+        anchor: 0,
+        head: editorText.length,
+        from: 0,
+        to: editorText.length,
+        selectionText: editorText,
+      },
+    };
+  }
   const ranges = view.state.selection.ranges;
   if (ranges.length !== 1) {
     return conflict("AI_SELECTION_MULTIPLE_UNSUPPORTED");
@@ -274,6 +312,7 @@ function captureContextUnsafe(
   return {
     status: "ready",
     snapshot: {
+      target,
       view,
       currentDocument,
       shareDocument,
@@ -303,9 +342,10 @@ function captureContextUnsafe(
 function captureContext(
   getContext: () => EditorSelectionSessionContext,
   action: EditorSelectionSessionAction,
+  target: EditorSelectionSessionTarget,
 ): CaptureResult {
   try {
-    return captureContextUnsafe(getContext, action);
+    return captureContextUnsafe(getContext, action, target);
   } catch {
     return conflict("AI_SELECTION_SYNC_PENDING");
   }
@@ -316,6 +356,7 @@ function equalCapture(
   after: CapturedSelection,
 ): boolean {
   return (
+    before.target === after.target &&
     before.view === after.view &&
     before.currentDocument === after.currentDocument &&
     before.shareDocument === after.shareDocument &&
@@ -345,6 +386,7 @@ function createRequest(
   requestId: string,
   action: EditorSelectionSessionAction,
   instruction: string,
+  target: EditorSelectionSessionTarget,
   snapshot: CapturedSelection,
   baseTextHash: string,
 ): AgentRequest | null {
@@ -354,23 +396,35 @@ function createRequest(
     action,
     instruction,
     skill: skills[action],
-    scope: {
-      kind: "selection",
-      documentId: snapshot.currentDocumentId,
-      path: snapshot.path,
-      baseRevision: snapshot.revision,
-      baseTextHash,
-      range: {
-        from: snapshot.from,
-        to: snapshot.to,
-      },
-      text: snapshot.selectionText,
-    },
+    scope:
+      target === "selection"
+        ? {
+            kind: "selection",
+            documentId: snapshot.currentDocumentId,
+            path: snapshot.path,
+            baseRevision: snapshot.revision,
+            baseTextHash,
+            range: {
+              from: snapshot.from,
+              to: snapshot.to,
+            },
+            text: snapshot.selectionText,
+          }
+        : {
+            kind: "document",
+            documentId: snapshot.currentDocumentId,
+            path: snapshot.path,
+            baseRevision: snapshot.revision,
+            baseTextHash,
+            text: snapshot.text,
+          },
   });
-  if (!parsed.success || parsed.data.scope.kind !== "selection") {
+  if (!parsed.success || parsed.data.scope.kind !== target) {
     return null;
   }
-  Object.freeze(parsed.data.scope.range);
+  if (parsed.data.scope.kind === "selection") {
+    Object.freeze(parsed.data.scope.range);
+  }
   Object.freeze(parsed.data.scope);
   Object.freeze(parsed.data);
   return parsed.data;
@@ -392,18 +446,20 @@ export async function captureEditorSelectionSession(
   const requestId = options.requestId;
   const action = options.action;
   const instruction = options.instruction;
+  const target = options.target ?? "selection";
   const getContext = options.getContext;
   const hashText = options.hashText ?? sha256Text;
 
   if (
     !actions.has(action) ||
+    !targets.has(target) ||
     typeof instruction !== "string" ||
     instruction.trim().length === 0
   ) {
     return conflict("AI_SELECTION_REQUEST_INVALID");
   }
 
-  const before = captureContext(getContext, action);
+  const before = captureContext(getContext, action, target);
   if (before.status === "conflict") {
     return before;
   }
@@ -412,6 +468,7 @@ export async function captureEditorSelectionSession(
       requestId,
       action,
       instruction,
+      target,
       before.snapshot,
       validationHash,
     ) == null
@@ -426,7 +483,7 @@ export async function captureEditorSelectionSession(
     return conflict("AI_SELECTION_HASH_FAILED");
   }
 
-  const after = captureContext(getContext, action);
+  const after = captureContext(getContext, action, target);
   if (after.status === "conflict") {
     return after;
   }
@@ -438,6 +495,7 @@ export async function captureEditorSelectionSession(
     requestId,
     action,
     instruction,
+    target,
     before.snapshot,
     baseTextHash,
   );

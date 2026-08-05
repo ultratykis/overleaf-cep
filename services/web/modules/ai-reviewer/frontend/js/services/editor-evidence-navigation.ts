@@ -300,7 +300,7 @@ export function createEditorEvidenceNavigationTarget({
 
     const request = parsedRequest.data;
     if (
-      request.scope.kind !== "selection" ||
+      request.scope.kind === "project" ||
       !Number.isSafeInteger(evidenceIndex) ||
       evidenceIndex < 0
     ) {
@@ -308,6 +308,9 @@ export function createEditorEvidenceNavigationTarget({
     }
 
     const scope = request.scope;
+    const scopeFrom = scope.kind === "selection" ? scope.range.from : 0;
+    const scopeTo =
+      scope.kind === "selection" ? scope.range.to : scope.text.length;
     const acceptedFinding = parsedFinding.data;
     const reference = acceptedFinding.evidence[evidenceIndex];
     const currentDocument = session.binding?.currentDocument;
@@ -318,8 +321,8 @@ export function createEditorEvidenceNavigationTarget({
       acceptedFinding.requestId !== request.requestId ||
       acceptedFinding.projectId !== request.projectId ||
       reference.path !== scope.path ||
-      reference.range.from < scope.range.from ||
-      reference.range.to > scope.range.to ||
+      reference.range.from < scopeFrom ||
+      reference.range.to > scopeTo ||
       (reference.revision != null &&
         reference.revision !== scope.baseRevision) ||
       (reference.textHash != null &&
@@ -332,8 +335,8 @@ export function createEditorEvidenceNavigationTarget({
     }
 
     const selectionRange = Object.freeze({
-      from: scope.range.from,
-      to: scope.range.to,
+      from: scopeFrom,
+      to: scopeTo,
     });
     const range = Object.freeze({
       from: reference.range.from,

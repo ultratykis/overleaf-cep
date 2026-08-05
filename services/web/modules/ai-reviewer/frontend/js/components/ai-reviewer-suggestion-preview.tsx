@@ -27,7 +27,7 @@ type PreviewStatus =
   | "ready"
   | "applying"
   | "applied"
-  | "rejected"
+  | "discarded"
   | "conflict"
   | "cancelled"
   | "error";
@@ -49,7 +49,7 @@ const statusLabels: Record<PreviewStatus, string> = {
   ready: "Suggestion preview ready",
   applying: "Applying selected changes",
   applied: "Selected changes applied",
-  rejected: "Suggestion rejected",
+  discarded: "Suggestion discarded",
   conflict: "Suggestion conflict",
   cancelled: "Suggestion application cancelled",
   error: "Suggestion preview error",
@@ -117,8 +117,8 @@ function decisionMessage(decision: SelectionSuggestionDecision) {
   if (decision.status === "applied") {
     return "The selected changes were applied through the editor.";
   }
-  if (decision.status === "rejected") {
-    return "The suggestion was rejected without changing the document.";
+  if (decision.status === "discarded") {
+    return "The suggestion was discarded without changing the document.";
   }
   if (decision.status === "cancelled") {
     return "The suggestion application was cancelled.";
@@ -466,7 +466,7 @@ export function AiReviewerSuggestionPreview({
       });
   }, [applySuggestion, finish, getContext, session, suggestion]);
 
-  const reject = useCallback(() => {
+  const discard = useCallback(() => {
     const candidate = lease.current;
     if (
       candidate == null ||
@@ -478,7 +478,7 @@ export function AiReviewerSuggestionPreview({
     }
     candidate.actionLocked = true;
     finish(candidate, {
-      status: "rejected",
+      status: "discarded",
     });
   }, [finish]);
 
@@ -506,7 +506,7 @@ export function AiReviewerSuggestionPreview({
 
   const terminal =
     status === "applied" ||
-    status === "rejected" ||
+    status === "discarded" ||
     status === "conflict" ||
     status === "cancelled" ||
     status === "error";
@@ -531,9 +531,9 @@ export function AiReviewerSuggestionPreview({
           type="button"
           className="btn btn-secondary"
           disabled={status === "applying" || terminal}
-          onClick={reject}
+          onClick={discard}
         >
-          Reject suggestion
+          Discard suggestion
         </button>
         {status === "applying" && (
           <button

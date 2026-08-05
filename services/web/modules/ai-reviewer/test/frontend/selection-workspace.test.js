@@ -5,6 +5,7 @@ const {
   render,
   screen,
   waitFor,
+  within,
 } = require("@testing-library/react");
 const { expect } = require("chai");
 const React = require("react");
@@ -68,6 +69,28 @@ function selectionRequest({
     }),
   });
 }
+function documentRequest({
+  action = "review",
+  instruction,
+  requestId = "request-document",
+  requestProjectId = projectId,
+}) {
+  return Object.freeze({
+    requestId,
+    projectId: requestProjectId,
+    action,
+    instruction,
+    skill: action === "review" ? "referee-review" : "line-edit",
+    scope: Object.freeze({
+      kind: "document",
+      documentId,
+      path,
+      baseRevision: 7,
+      baseTextHash,
+      text: baseText,
+    }),
+  });
+}
 function selectionSession(options) {
   const currentDocument = {
     doc_id: documentId,
@@ -84,6 +107,29 @@ function selectionSession(options) {
   };
   return Object.freeze({
     request: selectionRequest(options),
+    binding: Object.freeze({
+      currentDocument,
+      shareDocument: currentDocument.doc,
+      trackChanges: false,
+    }),
+  });
+}
+function documentSession(options) {
+  const currentDocument = {
+    doc_id: documentId,
+    joined: true,
+    doc: {
+      connection: {
+        state: "ok",
+      },
+      getVersion: () => 7,
+    },
+    getSnapshot: () => baseText,
+    hasBufferedOps: () => false,
+    getTrackingChanges: () => false,
+  };
+  return Object.freeze({
+    request: documentRequest(options),
     binding: Object.freeze({
       currentDocument,
       shareDocument: currentDocument.doc,
@@ -114,6 +160,7 @@ function finding(request) {
     id: "finding-0001",
     requestId: request.requestId,
     projectId: request.projectId,
+    artifactKind: "finding",
     severity: "warning",
     category: "clarity",
     title: "Ambiguous synthetic phrase",
@@ -193,53 +240,55 @@ function reviewEvents(request) {
 }
 function renderPanel({
   captureSelectionSession,
+  captureDocumentSession,
   streamRequest,
   createRequestId = () => "request-duplicate",
   getSelectionContext,
   navigateEvidence,
   mountSuggestionPreview,
   applySelectionSuggestion,
+  copyText,
 }) {
   return render(
     React.createElement(AiReviewerPanelView, {
       projectId,
       createRequestId,
       captureSelectionSession,
+      captureDocumentSession,
       streamRequest,
       getSelectionContext,
       navigateEvidence,
       mountSuggestionPreview,
       applySelectionSuggestion,
+      copyText,
     }),
   );
 }
 async function clickSelectionAction(buttonName, instruction) {
-  fireEvent.change(screen.getByLabelText("Review instruction"), {
-    target: {
-      value: instruction,
-    },
-  });
+  void instruction;
   fireEvent.click(screen.getByRole("button", { name: buttonName }));
-  await screen.findByText("Capturing selection");
+  await screen.findByText("Capturing review target");
 }
 describe("AI reviewer: single document selection workspace", function () {
   const actions = [
     {
       action: "review",
       buttonName: "Review selection",
+      instruction: "Review the selected phrase.",
     },
     {
       action: "rewrite",
       buttonName: "Rewrite selection",
+      instruction: "Rewrite the selected phrase.",
     },
     {
       action: "shorten",
       buttonName: "Shorten selection",
+      instruction: "Shorten the selected phrase.",
     },
   ];
-  for (const { action, buttonName } of actions) {
+  for (const { action, buttonName, instruction } of actions) {
     it(`captures and displays a read-only ${action} result from the exact frozen request`, async function () {
-      const instruction = `Synthetic ${action} instruction.`;
       const capture = deferred();
       const stream = deferred();
       const captureSelectionSession = sinon
@@ -304,6 +353,278 @@ describe("AI reviewer: single document selection workspace", function () {
       expect(session.binding.currentDocument.getSnapshot()).to.equal(baseText);
     });
   }
+  it("captures the current document and streams its exact document-scoped request", async function () {
+    const instruction = "Review the current document.";
+    const capture = deferred();
+    const stream = deferred();
+    const captureDocumentSession = sinon.stub().returns(capture.promise);
+    let streamCall;
+    const streamRequest = sinon.stub().callsFake((call) => {
+      streamCall = call;
+      return stream.promise;
+    });
+    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
+      options.onSelectionChange(["ai-hunk-v1-document"]);
+      return {
+        hunkIds: Object.freeze(["ai-hunk-v1-document"]),
+        destroy: sinon.stub(),
+      };
+    });
+    const applySelectionSuggestion = sinon.stub().resolves({
+      status: "applied",
+    });
+    renderPanel({
+      captureDocumentSession,
+      streamRequest,
+      getSelectionContext: sinon.stub(),
+      mountSuggestionPreview,
+      applySelectionSuggestion,
+    });
+
+    await clickSelectionAction("Review current document", instruction);
+    expect(
+      captureDocumentSession.calledOnceWithExactly({
+        requestId: "request-duplicate",
+        action: "review",
+        instruction,
+      }),
+    ).to.equal(true);
+    const session = documentSession({
+      instruction,
+      requestId: "request-duplicate",
+    });
+    await act(async () => {
+      capture.resolve({
+        status: "ready",
+        session,
+      });
+      await capture.promise;
+    });
+    await waitFor(() => expect(streamRequest.calledOnce).to.equal(true));
+
+    expect(streamCall.request).to.equal(session.request);
+    expect(streamCall.request.scope).to.deep.equal({
+      kind: "document",
+      documentId,
+      path,
+      baseRevision: 7,
+      baseTextHash,
+      text: baseText,
+    });
+    act(() => {
+      for (const event of reviewEvents(session.request)) {
+        streamCall.onEvent(event);
+      }
+    });
+    await act(async () => {
+      stream.resolve();
+      await stream.promise;
+    });
+    await screen.findByText("Completed");
+    expect(
+      screen.getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    ).to.exist;
+    expect(
+      screen.getByRole("button", {
+        name: "Discard suggestion",
+      }),
+    ).to.exist;
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+    await screen.findByText("Suggestion preview ready");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Apply selected changes",
+      }),
+    );
+    await screen.findByText("Status: Applied");
+    expect(applySelectionSuggestion.calledOnce).to.equal(true);
+    expect(
+      applySelectionSuggestion.firstCall.args[0].session.request.scope.kind,
+    ).to.equal("document");
+  });
+  it("pins distinct actions and discard states for findings, citation findings, and suggestions", async function () {
+    const instruction = "Review the selected phrase.";
+    const session = selectionSession({
+      action: "review",
+      instruction,
+    });
+    const ordinaryFinding = {
+      ...finding(session.request),
+      category: "citation-audit",
+      suggestionIds: [],
+    };
+    const citationFinding = {
+      ...finding(session.request),
+      id: "citation-finding-0001",
+      artifactKind: "citation-finding",
+      category: "clarity",
+      title: "Synthetic citation issue",
+      proposedText: "Add the missing synthetic bibliography entry.",
+      suggestionIds: [],
+    };
+    const emittedSuggestion = suggestion(session.request);
+    const stream = deferred();
+    const streamRequest = sinon.stub().callsFake((call) => {
+      call.onEvent(startedEvent(session.request));
+      call.onEvent({
+        ...eventBase(session.request.requestId, 1, "finding"),
+        type: "finding",
+        finding: ordinaryFinding,
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 2, "finding"),
+        type: "finding",
+        finding: citationFinding,
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 3, "suggestion"),
+        type: "suggestion",
+        suggestion: emittedSuggestion,
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 4, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+      return stream.promise;
+    });
+    const copyText = sinon.stub().resolves();
+    renderPanel({
+      captureSelectionSession: sinon.stub().resolves({
+        status: "ready",
+        session,
+      }),
+      streamRequest,
+      getSelectionContext: sinon.stub(),
+      copyText,
+    });
+
+    await clickSelectionAction("Review selection", instruction);
+    await act(async () => {
+      stream.resolve();
+      await stream.promise;
+    });
+    await screen.findByText("Completed");
+
+    const findingsSection = screen.getByRole("region", {
+      name: "Review findings",
+    });
+    expect(
+      within(findingsSection)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).to.deep.equal(["Go to location 1", "Discuss finding", "Discard finding"]);
+    expect(within(findingsSection).queryByText(/Apply/u)).not.to.exist;
+    expect(within(findingsSection).queryByText(/Copy proposed text/u)).not.to
+      .exist;
+
+    const citationSection = screen.getByRole("region", {
+      name: "Review citation findings",
+    });
+    expect(
+      within(citationSection)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).to.deep.equal([
+      "Go to location 1",
+      "Discuss citation finding",
+      "Copy proposed text",
+      "Discard citation finding",
+    ]);
+    expect(within(citationSection).queryByText(/Apply/u)).not.to.exist;
+
+    const suggestionsSection = screen.getByRole("region", {
+      name: "Review suggestions",
+    });
+    expect(
+      within(suggestionsSection)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).to.deep.equal([
+      "Discuss suggestion",
+      "Preview diff 1",
+      "Discard suggestion",
+    ]);
+    expect(
+      within(suggestionsSection).queryByRole("button", {
+        name: "Apply selected changes",
+      }),
+    ).not.to.exist;
+
+    fireEvent.click(
+      within(citationSection).getByRole("button", {
+        name: "Copy proposed text",
+      }),
+    );
+    await screen.findByText("Proposed text copied");
+    expect(
+      copyText.calledOnceWithExactly(
+        "Add the missing synthetic bibliography entry.",
+      ),
+    ).to.equal(true);
+
+    fireEvent.click(
+      within(findingsSection).getByRole("button", {
+        name: "Discard finding",
+      }),
+    );
+    expect(within(findingsSection).getByText("Status: Discarded")).to.exist;
+    expect(
+      within(findingsSection)
+        .getByText("Ambiguous synthetic phrase")
+        .closest("details")?.open,
+    ).to.equal(false);
+    expect(within(findingsSection).queryAllByRole("button")).to.have.length(1);
+    expect(
+      within(findingsSection).getByRole("button", {
+        name: "Discuss finding",
+      }),
+    ).to.exist;
+
+    fireEvent.click(
+      within(citationSection).getByRole("button", {
+        name: "Discard citation finding",
+      }),
+    );
+    expect(within(citationSection).getByText("Status: Discarded")).to.exist;
+    expect(
+      within(citationSection)
+        .getByText("Synthetic citation issue")
+        .closest("details")?.open,
+    ).to.equal(false);
+    expect(within(citationSection).queryAllByRole("button")).to.have.length(1);
+    expect(
+      within(citationSection).getByRole("button", {
+        name: "Discuss citation finding",
+      }),
+    ).to.exist;
+
+    fireEvent.click(
+      within(suggestionsSection).getByRole("button", {
+        name: "Discard suggestion",
+      }),
+    );
+    expect(within(suggestionsSection).getByText("Status: Discarded")).to.exist;
+    expect(
+      within(suggestionsSection)
+        .getByText("Use a more precise synthetic term.")
+        .closest("details")?.open,
+    ).to.equal(false);
+    expect(within(suggestionsSection).queryAllByRole("button")).to.have.length(
+      1,
+    );
+    expect(
+      within(suggestionsSection).getByRole("button", {
+        name: "Discuss suggestion",
+      }),
+    ).to.exist;
+  });
   it("retains the exact capture-time session and binding in workspace state", function () {
     const session = selectionSession({
       action: "rewrite",
@@ -445,7 +766,7 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(screen.queryByText("Completed")).not.to.exist;
     expect(
       screen.queryByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     ).not.to.exist;
     expect(mountSuggestionPreview.called).to.equal(false);
@@ -456,7 +777,7 @@ describe("AI reviewer: single document selection workspace", function () {
     await screen.findByText("Completed");
     expect(
       screen.getByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     ).to.exist;
     expect(mountSuggestionPreview.called).to.equal(false);
@@ -507,7 +828,7 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(screen.queryByRole("button", { name: /accept/i })).not.to.exist;
     expect(
       screen.queryByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     ).not.to.exist;
     expect(mountSuggestionPreview.called).to.equal(false);
@@ -532,7 +853,7 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(screen.queryByRole("button", { name: /accept/i })).not.to.exist;
     expect(
       screen.queryByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     ).not.to.exist;
     expect(mountSuggestionPreview.called).to.equal(false);
@@ -795,7 +1116,7 @@ describe("AI reviewer: single document selection workspace", function () {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     );
     await screen.findByText("Suggestion preview ready");
@@ -816,7 +1137,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
     );
 
-    await screen.findByText("Applied");
+    await screen.findByText("Status: Applied");
     expect(applySelectionSuggestion.calledOnce).to.equal(true);
     const application = applySelectionSuggestion.firstCall.args[0];
     expect(application.session).to.equal(session);
@@ -827,9 +1148,79 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(destroy.calledOnce).to.equal(true);
     expect(
       screen.queryByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     ).not.to.exist;
+  });
+  it("leaves only discard when a suggestion enters conflict", async function () {
+    const instruction = "Rewrite the selected phrase.";
+    const session = selectionSession({
+      action: "rewrite",
+      instruction,
+    });
+    const streamRequest = sinon.stub().callsFake(async (call) => {
+      call.onEvent(startedEvent(session.request));
+      call.onEvent({
+        ...eventBase(session.request.requestId, 1, "suggestion"),
+        type: "suggestion",
+        suggestion: suggestion(session.request),
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+    let onSelectionChange;
+    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
+      onSelectionChange = options.onSelectionChange;
+      options.onSelectionChange([]);
+      return {
+        hunkIds: Object.freeze(["ai-hunk-v1-conflict"]),
+        destroy: sinon.stub(),
+      };
+    });
+    renderPanel({
+      captureSelectionSession: sinon.stub().resolves({
+        status: "ready",
+        session,
+      }),
+      streamRequest,
+      getSelectionContext: sinon.stub(),
+      mountSuggestionPreview,
+      applySelectionSuggestion: sinon.stub().resolves({
+        status: "conflict",
+        code: "AI_SUGGESTION_HASH_STALE",
+      }),
+    });
+
+    await clickSelectionAction("Rewrite selection", instruction);
+    await screen.findByText("Completed");
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+    await screen.findByText("Suggestion preview ready");
+    act(() => {
+      onSelectionChange(["ai-hunk-v1-conflict"]);
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Apply selected changes",
+      }),
+    );
+
+    await screen.findByText("Conflict: AI_SUGGESTION_HASH_STALE");
+    const suggestionsSection = screen.getByRole("region", {
+      name: "Review suggestions",
+    });
+    expect(
+      within(suggestionsSection)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).to.deep.equal(["Discuss suggestion", "Discard suggestion"]);
+    expect(within(suggestionsSection).getByText("Status: Conflict")).to.exist;
   });
   it("synchronously aborts and destroys an applying preview before a new run", async function () {
     const sessionA = selectionSession({
@@ -838,7 +1229,7 @@ describe("AI reviewer: single document selection workspace", function () {
     });
     const sessionB = selectionSession({
       action: "review",
-      instruction: "Rewrite the selected phrase.",
+      instruction: "Review the selected phrase.",
     });
     let applicationSignal;
     const destroy = sinon.stub();
@@ -899,7 +1290,7 @@ describe("AI reviewer: single document selection workspace", function () {
     await screen.findByText("Completed");
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     );
     await screen.findByText("Suggestion preview ready");
@@ -931,7 +1322,7 @@ describe("AI reviewer: single document selection workspace", function () {
       });
       await application.promise;
     });
-    expect(screen.queryByText("Applied")).not.to.exist;
+    expect(screen.queryByText("Status: Applied")).not.to.exist;
     rendered.unmount();
     replacementStream.resolve();
   });
@@ -1000,14 +1391,14 @@ describe("AI reviewer: single document selection workspace", function () {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     );
     await waitFor(() => expect(mountSuggestionPreview.callCount).to.equal(1));
     await screen.findByText("Suggestion preview ready");
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview suggestion 2",
+        name: "Preview diff 2",
       }),
     );
     expect(firstDestroy.calledOnce).to.equal(true);
@@ -1017,7 +1408,7 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     expect(secondDestroy.called).to.equal(false);
   });
-  it("keeps project-scope suggestions read-only without a selection session", async function () {
+  it("rejects project-scope suggestions without rendering any apply affordance", async function () {
     const request = {
       requestId: "request-project-0001",
       projectId,
@@ -1055,17 +1446,17 @@ describe("AI reviewer: single document selection workspace", function () {
       getSelectionContext: sinon.stub(),
       mountSuggestionPreview: sinon.stub(),
     });
-    fireEvent.change(screen.getByLabelText("Review instruction"), {
-      target: {
-        value: request.instruction,
-      },
-    });
     fireEvent.click(screen.getByRole("button", { name: "Run review" }));
-    await screen.findByText("Completed");
-    expect(screen.getByText("Replacement: clear")).to.exist;
+    await screen.findByText("A project review cannot return edit suggestions.");
+    expect(screen.queryByText("Replacement: clear")).not.to.exist;
     expect(
       screen.queryByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
+      }),
+    ).not.to.exist;
+    expect(
+      screen.queryByRole("button", {
+        name: "Apply selected changes",
       }),
     ).not.to.exist;
   });
@@ -1115,7 +1506,7 @@ describe("AI reviewer: single document selection workspace", function () {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview suggestion 1",
+        name: "Preview diff 1",
       }),
     );
     await screen.findByText("Suggestion preview ready");
@@ -1123,7 +1514,7 @@ describe("AI reviewer: single document selection workspace", function () {
       prototypeSuggestion,
     );
   });
-  it("stores decisions for prototype-shaped suggestion IDs as own entries", function () {
+  it("stores statuses for prototype-shaped suggestion IDs as own entries", function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1140,7 +1531,9 @@ describe("AI reviewer: single document selection workspace", function () {
         requestId: session.request.requestId,
         session,
         suggestions: [prototypeSuggestion],
-        suggestionDecisions: {},
+        suggestionStatuses: {
+          [suggestionId]: "unresolved",
+        },
       };
       const decided = reduceSelectionWorkspaceState(state, {
         type: "suggestion-decision",
@@ -1148,20 +1541,18 @@ describe("AI reviewer: single document selection workspace", function () {
         requestId: session.request.requestId,
         suggestionId,
         decision: {
-          status: "rejected",
+          status: "discarded",
         },
       });
 
       expect(decided).not.to.equal(state);
       expect(
         Object.prototype.hasOwnProperty.call(
-          decided.suggestionDecisions,
+          decided.suggestionStatuses,
           suggestionId,
         ),
       ).to.equal(true);
-      expect(decided.suggestionDecisions[suggestionId]).to.deep.equal({
-        status: "rejected",
-      });
+      expect(decided.suggestionStatuses[suggestionId]).to.equal("discarded");
       expect(
         reduceSelectionWorkspaceState(decided, {
           type: "suggestion-decision",
@@ -1175,7 +1566,7 @@ describe("AI reviewer: single document selection workspace", function () {
       ).to.equal(decided);
     }
   });
-  it("does not revive a stale preview closure across a same-identity generation", async function () {
+  it("keeps a prior run suggestion actionable across a same-identity generation", async function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1221,7 +1612,7 @@ describe("AI reviewer: single document selection workspace", function () {
       name: "Rewrite selection",
     });
     const stalePreviewButton = screen.getByRole("button", {
-      name: "Preview suggestion 1",
+      name: "Preview diff 1",
     });
 
     await act(async () => {
@@ -1229,16 +1620,24 @@ describe("AI reviewer: single document selection workspace", function () {
       stalePreviewButton.click();
     });
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
-    await screen.findByText("Completed");
+    await waitFor(() =>
+      expect(screen.getAllByText("Completed")).to.have.length(2),
+    );
 
     expect(captureSelectionSession.callCount).to.equal(2);
-    expect(mountSuggestionPreview.called).to.equal(false);
-    expect(screen.queryByLabelText("Suggestion preview")).not.to.exist;
+    expect(mountSuggestionPreview.calledOnce).to.equal(true);
+    expect(mountSuggestionPreview.firstCall.args[0].request).to.equal(
+      session.request,
+    );
+    expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
+      emittedSuggestion,
+    );
+    expect(screen.getByLabelText("Suggestion preview")).to.exist;
     expect(
-      screen.getByRole("button", {
-        name: "Preview suggestion 1",
+      screen.getAllByRole("button", {
+        name: "Preview diff 1",
       }),
-    ).to.exist;
+    ).to.have.length(2);
   });
 });
 async function renderCompletedEvidenceWorkspace({
@@ -1307,7 +1706,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -1348,7 +1747,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
 
@@ -1361,7 +1760,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
     expect(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     ).to.exist;
   });
@@ -1398,7 +1797,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Go to evidence 1",
+          name: "Go to location 1",
         }),
       );
 
@@ -1424,7 +1823,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
 
@@ -1452,6 +1851,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
           id: "finding-project-0001",
           requestId: call.request.requestId,
           projectId: call.request.projectId,
+          artifactKind: "finding",
           severity: "warning",
           category: "structure",
           title: "Project evidence",
@@ -1492,7 +1892,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     expect(screen.getByText("chapters/other.tex:1-3")).to.exist;
     expect(
       screen.queryByRole("button", {
-        name: /Go to evidence/,
+        name: /Go to location/,
       }),
     ).not.to.exist;
     expect(navigateEvidence.called).to.equal(false);
@@ -1516,7 +1916,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     expect(screen.getByText(path)).to.exist;
     expect(
       screen.queryByRole("button", {
-        name: /Go to evidence/,
+        name: /Go to location/,
       }),
     ).not.to.exist;
     expect(navigateEvidence.called).to.equal(false);
@@ -1554,14 +1954,14 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
     await waitFor(() => expect(navigateEvidence.callCount).to.equal(1));
     const firstSignal = navigateEvidence.firstCall.args[0].signal;
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 2",
+        name: "Go to location 2",
       }),
     );
     await waitFor(() => expect(navigateEvidence.callCount).to.equal(2));
@@ -1618,7 +2018,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -1643,7 +2043,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     secondStream.resolve();
   });
 
-  it("does not revive a stale evidence closure across a same-identity generation", async function () {
+  it("keeps prior run evidence actionable across a same-identity generation", async function () {
     const navigateEvidence = sinon.stub().resolves({
       status: "navigated",
     });
@@ -1654,7 +2054,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
       name: "Review selection",
     });
     const staleEvidenceButton = screen.getByRole("button", {
-      name: "Go to evidence 1",
+      name: "Go to location 1",
     });
 
     await act(async () => {
@@ -1662,17 +2062,22 @@ describe("AI reviewer: single document evidence navigation workspace", function 
       staleEvidenceButton.click();
     });
     await waitFor(() => expect(workspace.streamRequest.callCount).to.equal(2));
-    await screen.findByText("Completed");
+    await waitFor(() =>
+      expect(screen.getAllByText("Completed")).to.have.length(2),
+    );
 
     expect(workspace.captureSelectionSession.callCount).to.equal(2);
-    expect(navigateEvidence.called).to.equal(false);
+    expect(navigateEvidence.calledOnce).to.equal(true);
+    expect(navigateEvidence.firstCall.args[0].target.findingId).to.equal(
+      workspace.emittedFinding.id,
+    );
     expect(screen.queryByText("Selecting evidence")).not.to.exist;
-    expect(screen.queryByText("Evidence selected")).not.to.exist;
+    expect(screen.getByText("Evidence selected")).to.exist;
     expect(
-      screen.getByRole("button", {
-        name: "Go to evidence 1",
+      screen.getAllByRole("button", {
+        name: "Go to location 1",
       }),
-    ).to.exist;
+    ).to.have.length(2);
   });
 
   it("aborts pending evidence navigation on unmount", async function () {
@@ -1684,7 +2089,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -1711,7 +2116,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to evidence 1",
+        name: "Go to location 1",
       }),
     );
 
@@ -1734,25 +2139,31 @@ describe("AI reviewer: OT safety selection workspace", function () {
       streamRequest,
       createRequestId: () => "request-duplicate",
     });
-    await clickSelectionAction("Review selection", "Instruction A.");
+    await clickSelectionAction(
+      "Review selection",
+      "Review the selected phrase.",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await screen.findByText("Cancelled");
-    await clickSelectionAction("Rewrite selection", "Instruction B.");
+    await clickSelectionAction(
+      "Rewrite selection",
+      "Rewrite the selected phrase.",
+    );
     await act(async () => {
       captureA.resolve({
         status: "ready",
         session: selectionSession({
           action: "review",
-          instruction: "Instruction A.",
+          instruction: "Review the selected phrase.",
         }),
       });
       await Promise.resolve();
     });
     expect(streamRequest.called).to.equal(false);
-    expect(screen.getByText("Capturing selection")).to.exist;
+    expect(screen.getByText("Capturing review target")).to.exist;
     const sessionB = selectionSession({
       action: "rewrite",
-      instruction: "Instruction B.",
+      instruction: "Rewrite the selected phrase.",
     });
     await act(async () => {
       captureB.resolve({
@@ -1769,11 +2180,11 @@ describe("AI reviewer: OT safety selection workspace", function () {
   it("uses run-object identity to discard old callbacks and settlement with duplicate request IDs", async function () {
     const sessionA = selectionSession({
       action: "review",
-      instruction: "Instruction A.",
+      instruction: "Review the selected phrase.",
     });
     const sessionB = selectionSession({
       action: "rewrite",
-      instruction: "Instruction B.",
+      instruction: "Rewrite the selected phrase.",
     });
     const streamA = deferred();
     const streamB = deferred();
@@ -1799,11 +2210,17 @@ describe("AI reviewer: OT safety selection workspace", function () {
       streamRequest,
       createRequestId: () => "request-duplicate",
     });
-    await clickSelectionAction("Review selection", "Instruction A.");
+    await clickSelectionAction(
+      "Review selection",
+      "Review the selected phrase.",
+    );
     await waitFor(() => expect(streamCalls).to.have.length(1));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(streamCalls[0].signal.aborted).to.equal(true);
-    await clickSelectionAction("Rewrite selection", "Instruction B.");
+    await clickSelectionAction(
+      "Rewrite selection",
+      "Rewrite the selected phrase.",
+    );
     await waitFor(() => expect(streamCalls).to.have.length(2));
     act(() => {
       streamCalls[0].onEvent({

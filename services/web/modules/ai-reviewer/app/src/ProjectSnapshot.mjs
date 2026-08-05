@@ -13,13 +13,12 @@ import {
 } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { extractLatexProjectRelations } from "./LatexProjectRelations.mjs";
+import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
 export const PROJECT_SNAPSHOT_DOCUMENT_LIMIT = 200;
 const MAX_DOCUMENT_CHARACTERS = 200_000;
 const MAX_PROJECT_CHARACTERS = 2_000_000;
-const MAX_READ_CHARACTERS = 20_000;
 const MAX_RELATIONSHIPS = 100;
-const MAX_CONTEXT_CHARACTERS = 20_000;
 const MAX_CITATION_AUDIT_ISSUES = 25;
 const REQUIRED_BIBLIOGRAPHY_FIELDS = new Map([
   [
@@ -255,8 +254,13 @@ function buildCitationAudit(documents, relationships) {
 /**
  * @param {string} projectId
  * @param {unknown} input
+ * @param {{ contextLength?: unknown, request?: unknown }} [options]
  */
-export function createProjectSnapshot(projectId, input) {
+export function createProjectSnapshot(
+  projectId,
+  input,
+  { contextLength, request } = {},
+) {
   if (
     typeof projectId !== "string" ||
     projectId.length === 0 ||
@@ -264,6 +268,13 @@ export function createProjectSnapshot(projectId, input) {
     typeof input !== "object" ||
     Array.isArray(input)
   ) {
+    throw unavailable();
+  }
+  const projectRequest = assertProjectRequest(request, projectId);
+  let maxModelInputCharacters;
+  try {
+    maxModelInputCharacters = modelInputCharacterBudget(contextLength);
+  } catch {
     throw unavailable();
   }
   const entries = Object.entries(input);
@@ -366,21 +377,38 @@ export function createProjectSnapshot(projectId, input) {
     }
   }
 
-  const context = Object.freeze({
-    summary: Object.freeze({
-      fileCount: manifest.length,
-      characterCount: totalCharacters,
-      relationshipCount: relationships.length,
-      relationshipExclusionCount: relationshipExclusions.length,
-      relationshipsTruncated,
-    }),
-    files: Object.freeze(contextFiles),
-    relationships: Object.freeze(relationships),
-    relationshipExclusions: Object.freeze(relationshipExclusions),
-    citationAudit: buildCitationAudit(documents, relationships),
-  });
-  if (JSON.stringify(context).length > MAX_CONTEXT_CHARACTERS) {
-    throw unavailable();
+  const citationAudit = buildCitationAudit(documents, relationships);
+  const frozenContextFiles = Object.freeze(contextFiles);
+  const frozenRelationshipExclusions = Object.freeze(relationshipExclusions);
+  let context;
+  /** @type {number} */
+  let modelInputCharacters;
+  while (true) {
+    context = Object.freeze({
+      summary: Object.freeze({
+        fileCount: manifest.length,
+        characterCount: totalCharacters,
+        relationshipCount: relationships.length,
+        relationshipExclusionCount: relationshipExclusions.length,
+        relationshipsTruncated,
+      }),
+      files: frozenContextFiles,
+      relationships: Object.freeze([...relationships]),
+      relationshipExclusions: frozenRelationshipExclusions,
+      citationAudit,
+    });
+    modelInputCharacters = JSON.stringify({
+      request: projectRequest,
+      project: context,
+    }).length;
+    if (modelInputCharacters <= maxModelInputCharacters) {
+      break;
+    }
+    if (relationships.length === 0) {
+      throw unavailable();
+    }
+    relationships.pop();
+    relationshipsTruncated = true;
   }
 
   return Object.freeze({
@@ -406,19 +434,22 @@ export function createProjectSnapshot(projectId, input) {
         from: 0,
         to: document.text.length,
       };
-      if (
-        range.to > document.text.length ||
-        range.to - range.from > MAX_READ_CHARACTERS
-      ) {
+      if (range.to > document.text.length) {
         throw unavailable();
       }
-      return Object.freeze({
+      const result = Object.freeze({
         path: document.path,
         range: Object.freeze({ ...range }),
         revision: document.revision,
         textHash: document.textHash,
         text: document.text.slice(range.from, range.to),
       });
+      const resultCharacters = JSON.stringify(result).length;
+      if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
+        throw unavailable();
+      }
+      modelInputCharacters += resultCharacters;
+      return result;
     },
 
     /**

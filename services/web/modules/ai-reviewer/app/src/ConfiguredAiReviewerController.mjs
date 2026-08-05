@@ -2,6 +2,7 @@
 
 import { expressify } from "@overleaf/promise-utils";
 
+import { DiscussionRequestSchema } from "../../shared/contracts.mjs";
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
@@ -10,7 +11,10 @@ import { createAiReviewerProviderConfigStore } from "./AiReviewerProviderConfigS
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
 import { createOllamaProviderService } from "./OllamaProviderService.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
-import { createRequestScopeReader } from "./RequestScopeReader.mjs";
+import {
+  authenticatedUserId,
+  createRequestScopeReader,
+} from "./RequestScopeReader.mjs";
 
 /** @type {((context: any) => any) | null} */
 let testGatewayFactory = null;
@@ -53,10 +57,9 @@ export function createConfiguredAiReviewerController({
         return await testGatewayFactory(context);
       }
 
-      const scope = await requestScopeReader.read(context.httpRequest, {
-        signal: context.signal,
-      });
-      const configuration = await configStore.get(scope.userId);
+      const configuration = await configStore.get(
+        authenticatedUserId(context.httpRequest),
+      );
       if (configuration == null) {
         throw new AgentGatewayError("No AI provider is configured.", {
           code: "AI_PROVIDER_NOT_CONFIGURED",
@@ -64,6 +67,13 @@ export function createConfiguredAiReviewerController({
           retryable: false,
         });
       }
+      if (DiscussionRequestSchema.safeParse(context.request).success) {
+        return providerService.createDiscussionGateway(configuration);
+      }
+      const scope = await requestScopeReader.read(context.httpRequest, {
+        signal: context.signal,
+        contextLength: configuration.contextLength,
+      });
       return providerService.createAgentGateway(configuration, {
         readProjectFile: scope.readProjectFile,
         projectContext: scope.projectContext,
@@ -150,4 +160,5 @@ export default {
   saveConfiguration: expressify(providerController.saveConfiguration),
   testConnection: expressify(providerController.testConnection),
   stream: expressify(configuredController.stream),
+  discussionStream: expressify(configuredController.discussionStream),
 };

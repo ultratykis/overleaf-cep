@@ -10,6 +10,8 @@ import {
  *   AgentEvent,
  *   AgentGateway as AgentGatewayContract,
  *   AgentRequest,
+ *   DiscussionEvent,
+ *   DiscussionRequest,
  *   EvidenceReference,
  *   ToolCall,
  * } from '../../shared/contract-types'
@@ -121,8 +123,18 @@ async function waitForCheckpoint(beforeEvent, context, signal) {
  * @param {AgentEvent} event
  */
 function assertEventScope(request, event) {
-  if (event.type !== "suggestion" || request.scope.kind === "project") {
+  if (event.type !== "suggestion") {
     return;
+  }
+  if (request.scope.kind === "project") {
+    throw new AgentGatewayError(
+      "A project review cannot return edit suggestions.",
+      {
+        code: "AI_PROJECT_SUGGESTION_NOT_ALLOWED",
+        category: "schema",
+        retryable: false,
+      },
+    );
   }
 
   const { scope } = request;
@@ -310,6 +322,97 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
 }
 
 /**
+ * Validate the immutable subject before any part of it reaches the discussion
+ * prompt. Artifact subjects remain bound to the review request that produced
+ * them.
+ *
+ * @param {DiscussionRequest} request
+ */
+export function assertDiscussionSubjectForRequest(request) {
+  const { subject } = request;
+  if (subject.kind === "scope") {
+    return;
+  }
+  const { sourceRequest } = subject;
+  const eventBase = {
+    eventId: "discussion-subject",
+    requestId: sourceRequest.requestId,
+    sequence: 0,
+    createdAt: "1970-01-01T00:00:00.000Z",
+  };
+  if (subject.kind === "suggestion") {
+    assertAgentEventForRequest(
+      sourceRequest,
+      {
+        type: "suggestion",
+        ...eventBase,
+        suggestion: subject.artifact,
+      },
+      0,
+    );
+  } else {
+    assertAgentEventForRequest(
+      sourceRequest,
+      {
+        type: "finding",
+        ...eventBase,
+        finding: subject.artifact,
+      },
+      0,
+    );
+  }
+}
+
+/**
+ * Discussion event identity is independent from the source review request.
+ * Suggestions are the exception: their nested identity stays bound to the
+ * source request so the existing preview and apply path can validate them.
+ *
+ * @param {DiscussionRequest} request
+ * @param {DiscussionEvent} event
+ * @param {number} expectedSequence
+ */
+export function assertDiscussionEventForRequest(
+  request,
+  event,
+  expectedSequence,
+) {
+  if (event.requestId !== request.requestId) {
+    throw new AgentGatewayError(
+      "The provider discussion event does not belong to the active request.",
+      {
+        code: "AI_DISCUSSION_EVENT_REQUEST_MISMATCH",
+        category: "schema",
+        retryable: false,
+      },
+    );
+  }
+  if (event.sequence !== expectedSequence) {
+    throw new AgentGatewayError(
+      "The provider discussion event sequence is not contiguous.",
+      {
+        code: "AI_DISCUSSION_EVENT_SEQUENCE_INVALID",
+        category: "schema",
+        retryable: false,
+      },
+    );
+  }
+  if (event.type !== "suggestion") {
+    return;
+  }
+
+  const { sourceRequest } = request.subject;
+  assertAgentEventForRequest(
+    sourceRequest,
+    {
+      ...event,
+      requestId: sourceRequest.requestId,
+    },
+    expectedSequence,
+  );
+}
+
+/**
  * Deterministic test gateway. It never reads time, randomness, the filesystem,
  * network, or project state.
  */
@@ -388,5 +491,27 @@ export class ScriptedFakeAgentGateway {
       this.emittedEventCount += 1;
       yield event;
     }
+  }
+
+  /**
+   * The review fake intentionally has no implicit discussion script. Tests for
+   * the distinct discussion path provide an explicit discussion gateway.
+   *
+   * @returns {AsyncIterable<DiscussionEvent>}
+   */
+  streamDiscussion() {
+    const error = new TypeError(
+      "ScriptedFakeAgentGateway has no configured discussion events.",
+    );
+    /** @type {AsyncIterator<DiscussionEvent> & AsyncIterable<DiscussionEvent>} */
+    const iterator = {
+      [Symbol.asyncIterator]() {
+        return iterator;
+      },
+      async next() {
+        throw error;
+      },
+    };
+    return iterator;
   }
 }

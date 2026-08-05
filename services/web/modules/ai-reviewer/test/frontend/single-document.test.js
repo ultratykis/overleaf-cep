@@ -2,9 +2,9 @@ const { expect } = require("chai");
 
 const {
   SingleDocumentSuggestionError,
+  discardSingleDocumentSuggestion,
   prepareSingleDocumentSuggestion,
   preflightSingleDocumentSuggestion,
-  rejectSingleDocumentSuggestion,
 } = require("../../frontend/js/services/single-document-suggestions");
 
 const createdAt = "2026-07-24T00:00:00.000Z";
@@ -116,16 +116,16 @@ describe("AI reviewer: single document", function () {
     expect(source.text).to.equal(baseText);
   });
 
-  it("rejects a proposed rewrite without returning a document change", function () {
-    const rejected = rejectSingleDocumentSuggestion(
+  it("discards a proposed rewrite without returning a document change", function () {
+    const discarded = discardSingleDocumentSuggestion(
       prepareSingleDocumentSuggestion({
         request: request(),
         suggestion: suggestion(),
       }),
     );
 
-    expect(rejected.status).to.equal("rejected");
-    expect(rejected).not.to.have.property("change");
+    expect(discarded.status).to.equal("discarded");
+    expect(discarded).not.to.have.property("change");
   });
 });
 

@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentRequest,
   Finding,
   ProposedSuggestion,
 } from "../../../shared/contract-types";
@@ -21,23 +22,38 @@ export type SelectionWorkspaceStatus =
 
 export type SelectionSuggestionDecision =
   | {
-      status: "applied" | "rejected" | "cancelled" | "error";
+      status: "applied" | "discarded" | "cancelled" | "error";
     }
   | {
       status: "conflict";
       code: EditorSuggestionApplicationConflictCode;
     };
 
+export type FindingArtifactStatus = "unresolved" | "discarded";
+
+export type SuggestionArtifactStatus =
+  | "unresolved"
+  | "applied"
+  | "discarded"
+  | "conflict";
+
 export type SelectionWorkspaceState = {
   status: SelectionWorkspaceStatus;
   generation: number;
+  createdOrder: number;
   requestId: string | null;
+  scopeKind: AgentRequest["scope"]["kind"] | null;
+  request: AgentRequest | null;
   session: EditorSelectionSession | null;
   text: string;
   findings: Finding[];
   suggestions: ProposedSuggestion[];
-  suggestionDecisions: Readonly<
-    Record<string, SelectionSuggestionDecision | undefined>
+  findingStatuses: Readonly<Record<string, FindingArtifactStatus | undefined>>;
+  suggestionStatuses: Readonly<
+    Record<string, SuggestionArtifactStatus | undefined>
+  >;
+  suggestionConflictCodes: Readonly<
+    Record<string, EditorSuggestionApplicationConflictCode | undefined>
   >;
   conflict: EditorSelectionSessionConflictCode | null;
   error: string | null;
@@ -52,6 +68,12 @@ export type SelectionWorkspaceAction =
   | (BoundAction & {
       type: "begin";
       status: "capturing" | "streaming";
+      scopeKind?: AgentRequest["scope"]["kind"];
+      createdOrder?: number;
+    })
+  | (BoundAction & {
+      type: "request";
+      request: AgentRequest;
     })
   | (BoundAction & {
       type: "session";
@@ -70,6 +92,14 @@ export type SelectionWorkspaceAction =
       decision: SelectionSuggestionDecision;
     })
   | (BoundAction & {
+      type: "discard-finding";
+      findingId: string;
+    })
+  | (BoundAction & {
+      type: "discard-suggestion";
+      suggestionId: string;
+    })
+  | (BoundAction & {
       type: "conflict";
       conflict: EditorSelectionSessionConflictCode;
     })
@@ -84,12 +114,17 @@ export type SelectionWorkspaceAction =
 export const initialSelectionWorkspaceState: SelectionWorkspaceState = {
   status: "idle",
   generation: 0,
+  createdOrder: 0,
   requestId: null,
+  scopeKind: null,
+  request: null,
   session: null,
   text: "",
   findings: [],
   suggestions: [],
-  suggestionDecisions: {},
+  findingStatuses: {},
+  suggestionStatuses: {},
+  suggestionConflictCodes: {},
   conflict: null,
   error: null,
 };
@@ -109,12 +144,17 @@ export function reduceSelectionWorkspaceState(
     return {
       status: action.status,
       generation: action.generation,
+      createdOrder: action.createdOrder ?? action.generation,
       requestId: action.requestId,
+      scopeKind: action.scopeKind ?? null,
+      request: null,
       session: null,
       text: "",
       findings: [],
       suggestions: [],
-      suggestionDecisions: {},
+      findingStatuses: {},
+      suggestionStatuses: {},
+      suggestionConflictCodes: {},
       conflict: null,
       error: null,
     };
@@ -131,7 +171,23 @@ export function reduceSelectionWorkspaceState(
     return {
       ...state,
       status: "streaming",
+      scopeKind: action.session.request.scope.kind,
+      request: action.session.request,
       session: action.session,
+    };
+  }
+
+  if (action.type === "request") {
+    if (
+      state.status !== "streaming" ||
+      action.request.requestId !== state.requestId
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      scopeKind: action.request.scope.kind,
+      request: action.request,
     };
   }
 
@@ -153,12 +209,20 @@ export function reduceSelectionWorkspaceState(
       return {
         ...state,
         findings: [...state.findings, action.event.finding],
+        findingStatuses: {
+          ...state.findingStatuses,
+          [action.event.finding.id]: "unresolved",
+        },
       };
     }
     if (action.event.type === "suggestion") {
       return {
         ...state,
         suggestions: [...state.suggestions, action.event.suggestion],
+        suggestionStatuses: {
+          ...state.suggestionStatuses,
+          [action.event.suggestion.id]: "unresolved",
+        },
       };
     }
     if (action.event.type === "completed") {
@@ -194,21 +258,78 @@ export function reduceSelectionWorkspaceState(
     if (
       state.status !== "completed" ||
       state.session == null ||
-      Object.prototype.hasOwnProperty.call(
-        state.suggestionDecisions,
-        action.suggestionId,
-      ) ||
       suggestion == null ||
       suggestion.requestId !== state.requestId ||
-      state.session.request.requestId !== state.requestId
+      state.session.request.requestId !== state.requestId ||
+      state.suggestionStatuses[action.suggestionId] !== "unresolved"
+    ) {
+      return state;
+    }
+    if (
+      action.decision.status === "cancelled" ||
+      action.decision.status === "error"
     ) {
       return state;
     }
     return {
       ...state,
-      suggestionDecisions: {
-        ...state.suggestionDecisions,
-        [action.suggestionId]: action.decision,
+      suggestionStatuses: {
+        ...state.suggestionStatuses,
+        [action.suggestionId]: action.decision.status,
+      },
+      suggestionConflictCodes:
+        action.decision.status === "conflict"
+          ? {
+              ...state.suggestionConflictCodes,
+              [action.suggestionId]: action.decision.code,
+            }
+          : state.suggestionConflictCodes,
+    };
+  }
+
+  if (action.type === "discard-finding") {
+    const finding = state.findings.find(
+      (candidate) => candidate.id === action.findingId,
+    );
+    if (
+      state.status !== "completed" ||
+      finding == null ||
+      finding.requestId !== state.requestId ||
+      state.findingStatuses[action.findingId] !== "unresolved"
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      findingStatuses: {
+        ...state.findingStatuses,
+        [action.findingId]: "discarded",
+      },
+    };
+  }
+
+  if (action.type === "discard-suggestion") {
+    const suggestion = state.suggestions.find(
+      (candidate) => candidate.id === action.suggestionId,
+    );
+    const currentStatus = state.suggestionStatuses[action.suggestionId];
+    if (
+      state.status !== "completed" ||
+      suggestion == null ||
+      suggestion.requestId !== state.requestId ||
+      (currentStatus !== "unresolved" && currentStatus !== "conflict")
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      suggestionStatuses: {
+        ...state.suggestionStatuses,
+        [action.suggestionId]: "discarded",
+      },
+      suggestionConflictCodes: {
+        ...state.suggestionConflictCodes,
+        [action.suggestionId]: undefined,
       },
     };
   }
@@ -237,4 +358,40 @@ export function reduceSelectionWorkspaceState(
     conflict: null,
     error: action.error,
   };
+}
+
+export type ReviewWorkspaceState = {
+  runs: SelectionWorkspaceState[];
+};
+
+export const initialReviewWorkspaceState: ReviewWorkspaceState = {
+  runs: [],
+};
+
+export function reduceReviewWorkspaceState(
+  state: ReviewWorkspaceState,
+  action: SelectionWorkspaceAction,
+): ReviewWorkspaceState {
+  if (action.type === "begin") {
+    return {
+      runs: [
+        ...state.runs,
+        reduceSelectionWorkspaceState(initialSelectionWorkspaceState, action),
+      ],
+    };
+  }
+
+  let changed = false;
+  const runs = state.runs.map((run) => {
+    if (
+      run.generation !== action.generation ||
+      run.requestId !== action.requestId
+    ) {
+      return run;
+    }
+    const next = reduceSelectionWorkspaceState(run, action);
+    changed ||= next !== run;
+    return next;
+  });
+  return changed ? { runs } : state;
 }

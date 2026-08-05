@@ -85,6 +85,7 @@ function finding(
     id: "finding-evidence-0001",
     requestId: receivedRequest.requestId,
     projectId: receivedRequest.projectId,
+    artifactKind: "finding",
     severity: "warning",
     category: "clarity",
     title: "Inspect the synthetic symbol",
@@ -110,6 +111,7 @@ function createFixture({
   latexLanguage = false,
   readOnly = false,
   documentText = baseText,
+  requestTarget = "selection",
   selectedRange = selectionRange,
   referencedRange = evidenceRange,
   permissions = {
@@ -214,17 +216,27 @@ function createFixture({
     wantTrackChanges: false,
   };
   const receivedRequest = request({
-    scope: {
-      kind: "selection",
-      documentId,
-      path,
-      baseRevision,
-      baseTextHash: documentTextHash,
-      range: {
-        ...selectedRange,
-      },
-      text: documentText.slice(selectedRange.from, selectedRange.to),
-    },
+    scope:
+      requestTarget === "document"
+        ? {
+            kind: "document",
+            documentId,
+            path,
+            baseRevision,
+            baseTextHash: documentTextHash,
+            text: documentText,
+          }
+        : {
+            kind: "selection",
+            documentId,
+            path,
+            baseRevision,
+            baseTextHash: documentTextHash,
+            range: {
+              ...selectedRange,
+            },
+            text: documentText.slice(selectedRange.from, selectedRange.to),
+          },
   });
   const session = {
     request: receivedRequest,
@@ -707,6 +719,48 @@ describe("AI reviewer: single document evidence navigation", function () {
     expect(fixture.target.selectionRange).to.deep.equal(selectionRange);
     expect(fixture.target.currentDocument).to.equal(fixture.currentDocument);
     expect(fixture.target.shareDocument).to.equal(fixture.shareDocument);
+  });
+
+  it("creates and navigates a same-file target across the completed document request", async function () {
+    const documentEvidenceRange = {
+      from: 14,
+      to: 19,
+    };
+    const fixture = createFixture({
+      requestTarget: "document",
+      referencedRange: documentEvidenceRange,
+    });
+
+    expect(fixture.request.scope).to.deep.equal({
+      kind: "document",
+      documentId,
+      path,
+      baseRevision,
+      baseTextHash,
+      text: baseText,
+    });
+    expect(fixture.target.selectionRange).to.deep.equal({
+      from: 0,
+      to: baseText.length,
+    });
+    expect(fixture.target.range).to.deep.equal(documentEvidenceRange);
+
+    const result = await navigateToEditorEvidence(navigationOptions(fixture));
+
+    expect(result).to.deep.equal({
+      status: "navigated",
+    });
+    expect(fixture.view.state.selection.main.from).to.equal(
+      documentEvidenceRange.from,
+    );
+    expect(fixture.view.state.selection.main.to).to.equal(
+      documentEvidenceRange.to,
+    );
+    expect(
+      fixture.view.state.sliceDoc(...Object.values(documentEvidenceRange)),
+    ).to.equal("gamma");
+    expect(fixture.navigationTransactions).to.have.length(1);
+    expect(fixture.documentTransactions).to.have.length(0);
   });
 
   const invalidTargetCases = [
