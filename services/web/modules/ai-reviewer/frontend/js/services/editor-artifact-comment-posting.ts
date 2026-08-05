@@ -49,6 +49,7 @@ export type ArtifactCommentPostingResult =
       status: "error";
       code:
         | "AI_COMMENT_POST_FAILED"
+        | "AI_COMMENT_SECURE_CONTEXT_REQUIRED"
         | "AI_REVIEWER_COMMENT_POST_FAILED"
         | "AI_REVIEWER_COMMENT_POST_UNCERTAIN";
     };
@@ -303,6 +304,15 @@ export async function postAiReviewerArtifactComment({
   if (signal.aborted || navigationResult.status === "cancelled") {
     return {
       status: "cancelled",
+    };
+  }
+  if (
+    navigationResult.status === "error" &&
+    navigationResult.code === "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED"
+  ) {
+    return {
+      status: "error",
+      code: "AI_COMMENT_SECURE_CONTEXT_REQUIRED",
     };
   }
   if (navigationResult.status !== "navigated") {

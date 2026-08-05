@@ -22,6 +22,12 @@ OVERLEAF_AI_REVIEWER_ENABLED=true
 
 エディタ拡張はwebpackビルド時に解決されるため、`server-ce/Dockerfile`はコンパイル工程で本フラグを常に立てて拡張をバンドルに含める。有効・無効の判断は実行時の本フラグだけが行う。
 
+## HTTPSの要件
+
+フロントエンドはsecure context（HTTPSまたはlocalhost）でだけ存在するブラウザAPI（`crypto.subtle`、クリップボード）に依存する。
+
+平文HTTPで配信されたインスタンスでは選択範囲の査読を開始できず、`AI_SELECTION_SECURE_CONTEXT_REQUIRED`として「HTTPSが必要」であることを利用者に伝える。保存済み結果の証拠位置への移動、提案差分のプレビュー・適用、クリップボードへのコピーについても、secure contextが必要な操作では同じ専用文言を表示する。
+
 ## 設計資料
 
 - 製品範囲と安全境界：`../../../../.loop/SPEC.md`

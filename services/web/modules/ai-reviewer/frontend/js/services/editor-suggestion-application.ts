@@ -56,6 +56,7 @@ export type EditorSuggestionApplicationConflictCode =
   | "AI_EDITOR_DOCUMENT_UNBOUND"
   | "AI_EDITOR_PERMISSION_DENIED"
   | "AI_EDITOR_READ_ONLY"
+  | "AI_EDITOR_SECURE_CONTEXT_REQUIRED"
   | "AI_EDITOR_SOURCE_MODE_REQUIRED"
   | "AI_EDITOR_SYNC_PENDING"
   | "AI_EDITOR_TRACK_CHANGES_PENDING";
@@ -120,6 +121,7 @@ const conflictCodes = new Set<EditorSuggestionApplicationConflictCode>([
   "AI_EDITOR_DOCUMENT_UNBOUND",
   "AI_EDITOR_PERMISSION_DENIED",
   "AI_EDITOR_READ_ONLY",
+  "AI_EDITOR_SECURE_CONTEXT_REQUIRED",
   "AI_EDITOR_SOURCE_MODE_REQUIRED",
   "AI_EDITOR_SYNC_PENDING",
   "AI_EDITOR_TRACK_CHANGES_PENDING",
@@ -468,9 +470,12 @@ async function applyPreparedSingleDocumentSuggestion({
 }
 
 export async function applySingleDocumentSuggestion({
-  hashText = sha256Text,
+  hashText: injectedHashText,
   ...options
 }: ApplySingleDocumentSuggestionOptions): Promise<EditorSuggestionApplicationResult> {
+  if (injectedHashText == null && globalThis.crypto?.subtle == null) {
+    return conflict("AI_EDITOR_SECURE_CONTEXT_REQUIRED");
+  }
   const stableRequest = AgentRequestSchema.parse(options.request);
   const stableSuggestion = prepareSingleDocumentSuggestion({
     request: stableRequest,
@@ -486,18 +491,25 @@ export async function applySingleDocumentSuggestion({
     request: stableRequest,
     suggestion: stableSuggestion,
     binding: stableBinding,
-    hashText,
+    hashText: injectedHashText ?? sha256Text,
   });
 }
 
 export async function applySelectedSingleDocumentSuggestion({
   selectedHunkIds,
-  compileSelectedSuggestionHunks: compileHunks = compileSelectedSuggestionHunks,
-  hashText = sha256Text,
+  compileSelectedSuggestionHunks: injectedCompileHunks,
+  hashText: injectedHashText,
   ...options
 }: ApplySelectedSingleDocumentSuggestionOptions): Promise<SelectedEditorSuggestionApplicationResult> {
+  const compileHunks = injectedCompileHunks ?? compileSelectedSuggestionHunks;
   if (options.signal?.aborted) {
     return cancelled();
+  }
+  if (
+    (injectedCompileHunks == null || injectedHashText == null) &&
+    globalThis.crypto?.subtle == null
+  ) {
+    return conflict("AI_EDITOR_SECURE_CONTEXT_REQUIRED");
   }
   const compileInput = options.view.state.doc.toString();
   const stableBinding = Object.freeze({
@@ -554,7 +566,7 @@ export async function applySelectedSingleDocumentSuggestion({
     request: stableRequest,
     suggestion: stableSuggestion,
     binding: stableBinding,
-    hashText,
+    hashText: injectedHashText ?? sha256Text,
     changes: compiled.changes,
   });
 }

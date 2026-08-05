@@ -217,8 +217,11 @@ type CitationCopyNotice = {
   generation: number;
   requestId: string;
   finding: CitationFinding;
-  status: "copying" | "copied" | "error";
-};
+} & (
+  | { status: "copying" }
+  | { status: "copied" }
+  | { status: "error"; secureContextRequired: boolean }
+);
 
 type DiscussionStatus = "idle" | "streaming" | "error";
 type SubjectQuote = {
@@ -552,6 +555,12 @@ export function commentPostingErrorMessage(
 ) {
   if (
     result.status === "error" &&
+    result.code === "AI_COMMENT_SECURE_CONTEXT_REQUIRED"
+  ) {
+    return t("ai_reviewer_secure_context_required");
+  }
+  if (
+    result.status === "error" &&
     result.code === "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
   ) {
     return t(
@@ -620,6 +629,9 @@ function evidenceNavigationMessage(
   if (notice.result.status === "cancelled") {
     return t("ai_reviewer_evidence_navigation_cancelled");
   }
+  if (notice.result.code === "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED") {
+    return t("ai_reviewer_secure_context_required");
+  }
   return t("ai_reviewer_evidence_navigation_failed", {
     code: notice.result.code,
   });
@@ -673,6 +685,7 @@ function normalizeEvidenceNavigationResult(
     switch (candidate.code) {
       case "AI_EVIDENCE_HASH_FAILED":
       case "AI_EVIDENCE_NAVIGATION_FAILED":
+      case "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED":
         return {
           status: "error",
           code: candidate.code,
@@ -1303,7 +1316,15 @@ function isTerminalArtifactStatus(
   return status === "applied" || status === "discarded" || status === "posted";
 }
 
+class AiReviewerSecureContextRequiredError extends Error {}
+
 async function copyTextToClipboard(text: string) {
+  if (
+    globalThis.isSecureContext === false ||
+    globalThis.crypto?.subtle == null
+  ) {
+    throw new AiReviewerSecureContextRequiredError();
+  }
   if (globalThis.navigator?.clipboard?.writeText == null) {
     throw new Error("Clipboard access is unavailable.");
   }
@@ -2667,13 +2688,15 @@ export function AiReviewerPanelView({
             activeCitationCopy.current = settled;
             setCitationCopyNotice(settled);
           },
-          () => {
+          (error) => {
             if (!mounted.current || activeCitationCopy.current !== identity) {
               return;
             }
             const settled: CitationCopyNotice = {
               ...identity,
               status: "error",
+              secureContextRequired:
+                error instanceof AiReviewerSecureContextRequiredError,
             };
             activeCitationCopy.current = settled;
             setCitationCopyNotice(settled);
@@ -2935,9 +2958,15 @@ export function AiReviewerPanelView({
       if (activeSuggestionIdentity.current !== identity) {
         return;
       }
-      disposeActiveSuggestion(
-        cancellationReason("The suggestion preview reached a terminal state."),
-      );
+      // Error decisions do not change the persisted artifact state. Keep the
+      // preview mounted so its error message remains visible.
+      if (decision.status !== "error") {
+        disposeActiveSuggestion(
+          cancellationReason(
+            "The suggestion preview reached a terminal state.",
+          ),
+        );
+      }
       if (!mounted.current) {
         return;
       }
@@ -4417,7 +4446,9 @@ export function AiReviewerPanelView({
               ? t("ai_reviewer_copying_proposed_text")
               : copyNotice.status === "copied"
                 ? t("ai_reviewer_proposed_text_copied")
-                : t("ai_reviewer_proposed_text_copy_failed")}
+                : copyNotice.secureContextRequired
+                  ? t("ai_reviewer_secure_context_required")
+                  : t("ai_reviewer_proposed_text_copy_failed")}
           </p>
         )}
         {evidenceNavigationNotice?.identity.generation ===
@@ -4740,7 +4771,9 @@ export function AiReviewerPanelView({
           className="alert alert-warning ai-reviewer-panel-notice"
           role="alert"
         >
-          {t("ai_reviewer_selection_conflict", { code: runState.conflict })}
+          {runState.conflict === "AI_SELECTION_SECURE_CONTEXT_REQUIRED"
+            ? t("ai_reviewer_secure_context_required")
+            : t("ai_reviewer_selection_conflict", { code: runState.conflict })}
         </div>
       )}
       {contextTruncatedRuns.has(runState.generation) && (

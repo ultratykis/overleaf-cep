@@ -60,6 +60,7 @@ export type EditorSelectionSessionConflictCode =
   | "AI_SELECTION_PERMISSION_DENIED"
   | "AI_SELECTION_REQUEST_INVALID"
   | "AI_SELECTION_REQUIRED"
+  | "AI_SELECTION_SECURE_CONTEXT_REQUIRED"
   | "AI_SELECTION_SOURCE_MODE_REQUIRED"
   | "AI_SELECTION_SYNC_PENDING"
   | "AI_SELECTION_TRACK_CHANGES_PENDING";
@@ -458,6 +459,13 @@ export async function captureEditorSelectionSession(
     instruction.trim().length === 0
   ) {
     return conflict("AI_SELECTION_REQUEST_INVALID");
+  }
+
+  // The default hasher needs SubtleCrypto, which browsers only expose in a
+  // secure context (https or localhost). Failing here, before any capture,
+  // turns an opaque AI_SELECTION_HASH_FAILED into an actionable message.
+  if (options.hashText == null && globalThis.crypto?.subtle == null) {
+    return conflict("AI_SELECTION_SECURE_CONTEXT_REQUIRED");
   }
 
   const before = captureContext(getContext, action, target);

@@ -12,6 +12,7 @@ import type {
 import { applySelectedEditorSelectionSuggestion } from "../services/editor-suggestion-host-application";
 import type { SelectedEditorSuggestionApplicationResult } from "../services/editor-suggestion-application";
 import {
+  DetachedSuggestionDiffError,
   mountDetachedSuggestionDiff,
   type MountedDetachedSuggestionDiff,
 } from "../services/detached-suggestion-diff";
@@ -129,6 +130,9 @@ function decisionMessage(
   decision: SelectionSuggestionDecision,
 ) {
   if (decision.status === "conflict") {
+    if (decision.code === "AI_EDITOR_SECURE_CONTEXT_REQUIRED") {
+      return t("ai_reviewer_secure_context_required");
+    }
     return t("ai_reviewer_suggestion_could_not_be_applied", {
       code: decision.code,
     });
@@ -143,6 +147,16 @@ function decisionMessage(
     return t("ai_reviewer_suggestion_application_was_cancelled");
   }
   return t("ai_reviewer_suggestion_preview_could_not_be_completed");
+}
+
+function previewMountErrorMessage(
+  error: unknown,
+  t: TFunction<"translation">,
+) {
+  return error instanceof DetachedSuggestionDiffError &&
+    error.code === "AI_DIFF_CRYPTO_UNAVAILABLE"
+    ? t("ai_reviewer_secure_context_required")
+    : t("ai_reviewer_suggestion_preview_mount_failed");
 }
 
 export function AiReviewerSuggestionPreview({
@@ -319,13 +333,13 @@ export function AiReviewerSuggestionPreview({
           t,
         }),
       );
-    } catch {
+    } catch (error) {
       finish(
         candidate,
         {
           status: "error",
         },
-        t("ai_reviewer_suggestion_preview_mount_failed"),
+        previewMountErrorMessage(error, t),
       );
       mounting = Promise.reject(
         new Error("The detached suggestion preview could not be mounted."),
@@ -372,13 +386,13 @@ export function AiReviewerSuggestionPreview({
           );
         }
       },
-      () => {
+      (error) => {
         finish(
           candidate,
           {
             status: "error",
           },
-          t("ai_reviewer_suggestion_preview_mount_failed"),
+          previewMountErrorMessage(error, t),
         );
       },
     );

@@ -80,7 +80,10 @@ export type EditorEvidenceNavigationResult =
     }
   | {
       status: "error";
-      code: "AI_EVIDENCE_HASH_FAILED" | "AI_EVIDENCE_NAVIGATION_FAILED";
+      code:
+        | "AI_EVIDENCE_HASH_FAILED"
+        | "AI_EVIDENCE_NAVIGATION_FAILED"
+        | "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED";
     };
 
 export type EditorEvidenceDocumentResolution = Readonly<{
@@ -1282,7 +1285,7 @@ export async function navigateToEditorEvidence({
   target,
   getContext,
   signal,
-  hashText = sha256Text,
+  hashText: injectedHashText,
   resolveDocument,
   openDocument,
 }: NavigateToEditorEvidenceOptions): Promise<EditorEvidenceNavigationResult> {
@@ -1295,7 +1298,16 @@ export async function navigateToEditorEvidence({
   if (targetSnapshot == null) {
     return conflict("AI_EVIDENCE_REFERENCE_INVALID");
   }
+  const defaultHasherUnavailable =
+    injectedHashText == null && globalThis.crypto?.subtle == null;
+  const hashText = injectedHashText ?? sha256Text;
   if (validProjectTarget(targetSnapshot)) {
+    if (targetSnapshot.textHash !== undefined && defaultHasherUnavailable) {
+      return {
+        status: "error",
+        code: "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED",
+      };
+    }
     return navigateToProjectEditorEvidence({
       target: targetSnapshot,
       getContext,
@@ -1304,6 +1316,12 @@ export async function navigateToEditorEvidence({
       resolveDocument,
       openDocument,
     });
+  }
+  if (defaultHasherUnavailable) {
+    return {
+      status: "error",
+      code: "AI_EVIDENCE_SECURE_CONTEXT_REQUIRED",
+    };
   }
 
   const before = captureLiveEvidenceContext(targetSnapshot, getContext);

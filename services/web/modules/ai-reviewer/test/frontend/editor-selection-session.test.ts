@@ -436,6 +436,34 @@ describe("AI reviewer: single document selection session", function () {
     );
   });
 
+  it("reports a secure-context conflict when SubtleCrypto is unavailable", async function () {
+    // Browsers only expose crypto.subtle in a secure context (https or
+    // localhost); plain-http origins land here.
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      const injectedHasherResult = await capture();
+      const result = await capture({
+        hashText: undefined,
+      });
+
+      expect(injectedHasherResult).to.have.property("status", "ready");
+      expect(result).to.deep.equal({
+        status: "conflict",
+        code: "AI_SELECTION_SECURE_CONTEXT_REQUIRED",
+      });
+    } finally {
+      if (descriptor != null) {
+        Object.defineProperty(globalThis, "crypto", descriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "crypto");
+      }
+    }
+  });
+
   it("rejects empty and multiple selections before hashing", async function () {
     let hashCalls = 0;
     context.view?.dispatch({
