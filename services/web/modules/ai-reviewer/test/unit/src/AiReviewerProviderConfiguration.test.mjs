@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
 import {
   parseAiReviewerProviderConfig,
+  parseAiReviewerProviderConfigUpdate,
   publicAiReviewerProviderConfig,
 } from "../../../app/src/AiReviewerProviderConfig.mjs";
 import { createAiReviewerProviderConfigStore } from "../../../app/src/AiReviewerProviderConfigStore.mjs";
+import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
 import { createAiReviewerProviderController } from "../../../app/src/AiReviewerProviderController.mjs";
 import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
 import { createOllamaProviderService } from "../../../app/src/OllamaProviderService.mjs";
@@ -22,23 +24,55 @@ const otherUserId = "user-provider-0002";
 const projectId = "project-provider-0001";
 const baseUrl = "http://127.0.0.1:11434/v1";
 const otherBaseUrl = "http://localhost:11434/v1";
+const remoteBaseUrl = "https://api.example.com/openai/v1";
 const model = "overleaf-ai-reviewer-compat-8k:latest";
 const otherModel = "overleaf-ai-reviewer-other:latest";
+const remoteModel = "hosted/reviewer-v1";
 const contextLength = 8_192;
 const otherContextLength = 4_096;
 const createdAt = "2026-07-25T00:00:00.000Z";
+const credentialUpdatedAt = "2026-07-25T00:01:00.000Z";
+const credential = "PRIVATE_PROVIDER_CREDENTIAL";
 
 const configuration = Object.freeze({
-  provider: "ollama",
+  provider: "openai-compatible",
   baseUrl,
   model,
   contextLength,
 });
 const otherConfiguration = Object.freeze({
-  provider: "ollama",
+  provider: "openai-compatible",
   baseUrl: otherBaseUrl,
   model: otherModel,
   contextLength: otherContextLength,
+});
+const credentialConfiguration = Object.freeze({
+  provider: "openai-compatible",
+  baseUrl: remoteBaseUrl,
+  model: remoteModel,
+  contextLength,
+  credential,
+  credentialUpdatedAt,
+});
+const credentialUpdate = Object.freeze({
+  provider: credentialConfiguration.provider,
+  baseUrl: credentialConfiguration.baseUrl,
+  model: credentialConfiguration.model,
+  contextLength: credentialConfiguration.contextLength,
+  credential,
+});
+const publicConfiguration = Object.freeze({
+  ...configuration,
+  credentialSet: false,
+  credentialUpdatedAt: null,
+});
+const publicCredentialConfiguration = Object.freeze({
+  provider: credentialConfiguration.provider,
+  baseUrl: credentialConfiguration.baseUrl,
+  model: credentialConfiguration.model,
+  contextLength: credentialConfiguration.contextLength,
+  credentialSet: true,
+  credentialUpdatedAt,
 });
 const compatibilityResult = Object.freeze({
   type: "completed",
@@ -86,7 +120,7 @@ function streamEvents() {
       requestId: "request-provider-0001",
       sequence: 0,
       createdAt,
-      provider: "ollama",
+      provider: "openai-compatible",
       model: otherModel,
       skill: "referee-review",
     },
@@ -130,7 +164,7 @@ function discussionEvents() {
       requestId: "discussion-turn-provider-0001",
       sequence: 0,
       createdAt,
-      provider: "ollama",
+      provider: "openai-compatible",
       model: otherModel,
     },
     {
@@ -206,25 +240,92 @@ class FakeResponse extends EventEmitter {
 }
 
 function fakeQuery(value) {
+  return fakeExecutingQuery(async () => value);
+}
+
+function fakeExecutingQuery(work) {
   const query = {
-    exec: vi.fn(async () => value),
+    exec: vi.fn(work),
   };
   query.lean = vi.fn(() => query);
   return query;
 }
 
+function matchesRevision(record, filter) {
+  if (record == null) {
+    return false;
+  }
+  if (Object.hasOwn(filter, "revision")) {
+    return record.revision === filter.revision;
+  }
+  return filter.$or.some(({ revision }) =>
+    typeof revision === "object"
+      ? revision.$exists === false && !Object.hasOwn(record, "revision")
+      : record.revision === revision,
+  );
+}
+
 function inMemoryModel() {
   const records = new Map();
+  const hooks = {
+    beforeFindOneAndUpdate: undefined,
+  };
   const modelDependency = {
     findOne: vi.fn(({ _id }) =>
       fakeQuery(records.has(_id) ? { _id, ...records.get(_id) } : null),
     ),
-    findOneAndUpdate: vi.fn(({ _id }, update) => {
-      records.set(_id, Object.freeze({ ...update.$set }));
-      return fakeQuery({ _id, ...records.get(_id) });
+    findOneAndUpdate: vi.fn((filter, update, options = {}) =>
+      fakeExecutingQuery(async () => {
+        await hooks.beforeFindOneAndUpdate?.({ filter, update, options });
+        const { _id } = filter;
+        const current = records.get(_id);
+        if (!matchesRevision(current, filter)) {
+          if (!options.upsert) {
+            return null;
+          }
+          if (current != null) {
+            const error = new Error("duplicate provider configuration key");
+            error.code = 11000;
+            throw error;
+          }
+        }
+        const next = { ...current, ...update.$set };
+        for (const [key, increment] of Object.entries(update.$inc ?? {})) {
+          next[key] = (current?.[key] ?? 0) + increment;
+        }
+        for (const key of Object.keys(update.$unset ?? {})) {
+          delete next[key];
+        }
+        records.set(_id, Object.freeze(next));
+        return { _id, ...records.get(_id) };
+      }),
+    ),
+  };
+  return { hooks, modelDependency, records };
+}
+
+function credentialManagerFixture() {
+  const encryptedValues = new Map();
+  let sequence = 0;
+  const encryptor = {
+    encryptJson: vi.fn(async (value) => {
+      sequence += 1;
+      const encrypted = `ciphertext-${sequence}`;
+      encryptedValues.set(encrypted, structuredClone(value));
+      return encrypted;
+    }),
+    decryptToJson: vi.fn(async (encrypted) => {
+      if (!encryptedValues.has(encrypted)) {
+        throw new Error("Unknown ciphertext.");
+      }
+      return structuredClone(encryptedValues.get(encrypted));
     }),
   };
-  return { modelDependency, records };
+  return {
+    encryptedValues,
+    encryptor,
+    manager: createAiReviewerProviderCredentialManager({ encryptor }),
+  };
 }
 
 function parseNdjson(response) {
@@ -254,6 +355,14 @@ async function captureError(work) {
   throw new Error("Expected the operation to reject.");
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function providerControllerFixture({
   storedConfiguration = configuration,
   timeoutSignalFactory,
@@ -265,7 +374,7 @@ function providerControllerFixture({
   const providerService = {
     testConnection: vi.fn(async () => ({
       ok: true,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
       classification: "local",
     })),
@@ -282,15 +391,29 @@ function providerControllerFixture({
 }
 
 describe("AI reviewer provider configuration", function () {
-  it("accepts only a strict local Ollama configuration and returns a bounded public DTO", function () {
+  it("accepts strict OpenAI-compatible configuration and returns an explicit bounded public DTO", function () {
     const parsed = parseAiReviewerProviderConfig(configuration);
     expect(parsed).toEqual(configuration);
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(publicAiReviewerProviderConfig(parsed)).toEqual({
       configured: true,
-      config: configuration,
+      config: publicConfiguration,
       classification: "local",
     });
+    expect(
+      parseAiReviewerProviderConfig({
+        ...configuration,
+        provider: "ollama",
+      }),
+    ).toEqual(configuration);
+    expect(publicAiReviewerProviderConfig(credentialConfiguration)).toEqual({
+      configured: true,
+      config: publicCredentialConfiguration,
+      classification: "remote",
+    });
+    expect(
+      JSON.stringify(publicAiReviewerProviderConfig(credentialConfiguration)),
+    ).not.toContain(credential);
 
     for (const invalid of [
       null,
@@ -298,7 +421,7 @@ describe("AI reviewer provider configuration", function () {
       { provider: "openai", baseUrl, model },
       { provider: "ollama", baseUrl, model },
       { ...configuration, baseUrl: "http://192.168.1.2:11434/v1" },
-      { ...configuration, model: "implicit-latest" },
+      { ...configuration, model: "model with spaces" },
       { ...configuration, contextLength: 0 },
       { ...configuration, contextLength: -1 },
       { ...configuration, contextLength: 1.5 },
@@ -309,21 +432,18 @@ describe("AI reviewer provider configuration", function () {
     ]) {
       expect(() => parseAiReviewerProviderConfig(invalid)).toThrow();
     }
+    expect(() =>
+      parseAiReviewerProviderConfigUpdate({
+        ...configuration,
+        credentialUpdatedAt,
+      }),
+    ).toThrow();
   });
 
   it("gets and saves each user's configuration only through its _id", async function () {
-    const firstRecord = { _id: userId, ...configuration, updatedAt: createdAt };
-    const secondRecord = { _id: otherUserId, ...otherConfiguration };
-    const modelDependency = {
-      findOne: vi
-        .fn()
-        .mockReturnValueOnce(fakeQuery(firstRecord))
-        .mockReturnValueOnce(fakeQuery(secondRecord)),
-      findOneAndUpdate: vi
-        .fn()
-        .mockReturnValueOnce(fakeQuery(firstRecord))
-        .mockReturnValueOnce(fakeQuery(secondRecord)),
-    };
+    const { modelDependency, records } = inMemoryModel();
+    records.set(userId, configuration);
+    records.set(otherUserId, otherConfiguration);
     const store = createAiReviewerProviderConfigStore({
       model: modelDependency,
     });
@@ -336,10 +456,22 @@ describe("AI reviewer provider configuration", function () {
     );
     expect(
       modelDependency.findOne.mock.calls.map(([filter]) => filter),
-    ).toEqual([{ _id: userId }, { _id: otherUserId }]);
+    ).toEqual([
+      { _id: userId },
+      { _id: otherUserId },
+      { _id: userId },
+      { _id: otherUserId },
+    ]);
     expect(
-      modelDependency.findOneAndUpdate.mock.calls.map(([filter]) => filter),
-    ).toEqual([{ _id: userId }, { _id: otherUserId }]);
+      modelDependency.findOneAndUpdate.mock.calls.map(([filter]) => filter._id),
+    ).toEqual([userId, otherUserId]);
+    expect(
+      modelDependency.findOneAndUpdate.mock.calls.every(
+        ([filter]) =>
+          filter.$or[0].revision === 0 &&
+          filter.$or[1].revision.$exists === false,
+      ),
+    ).toBe(true);
   });
 
   it("treats a legacy configuration without context length as unconfigured", async function () {
@@ -357,6 +489,326 @@ describe("AI reviewer provider configuration", function () {
     expect(await store.save(userId, configuration)).toEqual(configuration);
   });
 
+  it("loads an existing credentialless Ollama record as the canonical local provider", async function () {
+    const modelDependency = {
+      findOne: vi.fn(() =>
+        fakeQuery({
+          _id: userId,
+          ...configuration,
+          provider: "ollama",
+        }),
+      ),
+    };
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+    });
+
+    expect(await store.get(userId)).toEqual(configuration);
+    expect(publicAiReviewerProviderConfig(await store.get(userId))).toEqual({
+      configured: true,
+      config: publicConfiguration,
+      classification: "local",
+    });
+  });
+
+  it("round-trips a destination-bound credential through the shared encrypted server seam", async function () {
+    const { manager, encryptor } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+
+    expect(await store.save(userId, credentialUpdate)).toEqual(
+      credentialConfiguration,
+    );
+    expect(await store.get(userId)).toEqual(credentialConfiguration);
+    expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    });
+    expect(records.get(userId)).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      model: remoteModel,
+      contextLength,
+      credentialEncrypted: "ciphertext-1",
+      credentialUpdatedAt: new Date(credentialUpdatedAt),
+    });
+    expect(JSON.stringify(records.get(userId))).not.toContain(credential);
+    expect(publicAiReviewerProviderConfig(await store.get(userId))).toEqual({
+      configured: true,
+      config: publicCredentialConfiguration,
+      classification: "remote",
+    });
+  });
+
+  it("preserves an omitted credential only for the same canonical destination", async function () {
+    const later = "2026-07-25T00:02:00.000Z";
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const times = [credentialUpdatedAt, later];
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => times.shift(),
+    });
+    await store.save(userId, credentialUpdate);
+    const encrypted = records.get(userId).credentialEncrypted;
+
+    const sameDestination = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      model: "hosted/reviewer-v2",
+      contextLength: otherContextLength,
+    };
+    expect(await store.save(userId, sameDestination)).toEqual({
+      ...sameDestination,
+      credential,
+      credentialUpdatedAt,
+    });
+    expect(records.get(userId).credentialEncrypted).toBe(encrypted);
+    expect(records.get(userId).credentialUpdatedAt).toEqual(
+      new Date(credentialUpdatedAt),
+    );
+
+    const changedDestination = {
+      ...sameDestination,
+      baseUrl: "https://other.example.com/v1",
+    };
+    expect(await store.save(userId, changedDestination)).toEqual({
+      ...changedDestination,
+      credentialUpdatedAt: later,
+    });
+    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+    expect(JSON.stringify(records.get(userId))).not.toContain(credential);
+  });
+
+  it("retries a stale credential-preserving save without breaking the destination binding", async function () {
+    const replacementCredential = "PRIVATE_REPLACEMENT_CREDENTIAL";
+    const replacementBaseUrl = "https://replacement.example.com/v1";
+    const staleModel = "hosted/stale-writer-v1";
+    const { manager } = credentialManagerFixture();
+    const { hooks, modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+    await store.save(userId, credentialUpdate);
+
+    const staleWriterEntered = deferred();
+    const releaseStaleWriter = deferred();
+    let staleWriterBlocked = false;
+    hooks.beforeFindOneAndUpdate = async ({ update }) => {
+      if (
+        !staleWriterBlocked &&
+        update.$set.baseUrl === remoteBaseUrl &&
+        update.$set.model === staleModel
+      ) {
+        staleWriterBlocked = true;
+        staleWriterEntered.resolve();
+        await releaseStaleWriter.promise;
+      }
+    };
+
+    const staleConfiguration = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      model: staleModel,
+      contextLength,
+    };
+    const staleSave = store.save(userId, staleConfiguration);
+    await staleWriterEntered.promise;
+
+    const replacement = {
+      provider: "openai-compatible",
+      baseUrl: replacementBaseUrl,
+      model: remoteModel,
+      contextLength,
+      credential: replacementCredential,
+    };
+    expect(await store.save(userId, replacement)).toEqual({
+      ...replacement,
+      credentialUpdatedAt,
+    });
+    expect(await store.get(userId)).toEqual({
+      ...replacement,
+      credentialUpdatedAt,
+    });
+
+    releaseStaleWriter.resolve();
+    const finalConfiguration = {
+      ...staleConfiguration,
+      credentialUpdatedAt,
+    };
+    expect(await staleSave).toEqual(finalConfiguration);
+    expect(await store.get(userId)).toEqual(finalConfiguration);
+    expect(records.get(userId)).toMatchObject({
+      ...staleConfiguration,
+      revision: 3,
+      credentialUpdatedAt: new Date(credentialUpdatedAt),
+    });
+    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+
+    const staleWrites = modelDependency.findOneAndUpdate.mock.calls.filter(
+      ([, update]) => update.$set.model === staleModel,
+    );
+    expect(staleWrites).toHaveLength(2);
+    expect(staleWrites[0][0]).toEqual({ _id: userId, revision: 1 });
+    expect(staleWrites[0][1]).not.toHaveProperty("$unset");
+    expect(staleWrites[1][0]).toEqual({ _id: userId, revision: 2 });
+    expect(staleWrites[1][1].$unset).toEqual({ credentialEncrypted: "" });
+  });
+
+  it("retries a duplicate-key race when two saves observe no existing record", async function () {
+    const firstWriterEntered = deferred();
+    const releaseFirstWriter = deferred();
+    const { hooks, modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+    });
+    let firstWriterBlocked = false;
+    hooks.beforeFindOneAndUpdate = async ({ update }) => {
+      if (!firstWriterBlocked && update.$set.model === model) {
+        firstWriterBlocked = true;
+        firstWriterEntered.resolve();
+        await releaseFirstWriter.promise;
+      }
+    };
+
+    const firstSave = store.save(userId, configuration);
+    await firstWriterEntered.promise;
+    expect(await store.save(userId, otherConfiguration)).toEqual(
+      otherConfiguration,
+    );
+    releaseFirstWriter.resolve();
+
+    expect(await firstSave).toEqual(configuration);
+    expect(await store.get(userId)).toEqual(configuration);
+    expect(records.get(userId)).toMatchObject({
+      ...configuration,
+      revision: 2,
+    });
+    const firstWrites = modelDependency.findOneAndUpdate.mock.calls.filter(
+      ([, update]) => update.$set.model === model,
+    );
+    expect(firstWrites).toHaveLength(2);
+    expect(firstWrites[0][0].$or).toEqual([
+      { revision: 0 },
+      { revision: { $exists: false } },
+    ]);
+    expect(firstWrites[0][2].upsert).toBe(true);
+    expect(firstWrites[1][0]).toEqual({ _id: userId, revision: 1 });
+    expect(firstWrites[1][2].upsert).toBe(false);
+  });
+
+  it("clears an explicitly removed credential without returning its value", async function () {
+    const clearedAt = "2026-07-25T00:03:00.000Z";
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const times = [credentialUpdatedAt, clearedAt];
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => times.shift(),
+    });
+    await store.save(userId, credentialUpdate);
+
+    const cleared = await store.save(userId, {
+      provider: credentialUpdate.provider,
+      baseUrl: credentialUpdate.baseUrl,
+      model: credentialUpdate.model,
+      contextLength: credentialUpdate.contextLength,
+      credential: null,
+    });
+    expect(cleared).toEqual({
+      provider: credentialUpdate.provider,
+      baseUrl: credentialUpdate.baseUrl,
+      model: credentialUpdate.model,
+      contextLength: credentialUpdate.contextLength,
+      credentialUpdatedAt: clearedAt,
+    });
+    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+    expect(JSON.stringify(cleared)).not.toContain(credential);
+  });
+
+  it("refuses a credential whose encrypted destination binding no longer matches", async function () {
+    const { manager } = credentialManagerFixture();
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+      credentialManager: manager,
+      now: () => credentialUpdatedAt,
+    });
+    await store.save(userId, credentialUpdate);
+    records.set(userId, {
+      ...records.get(userId),
+      baseUrl: "https://other.example.com/v1",
+    });
+
+    const error = await captureError(store.get(userId));
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toBe("The AI provider credential could not be read.");
+    expect(String(error)).not.toContain(credential);
+  });
+
+  it("bounds credential encryption and decryption failures without logging or echoing the value", async function () {
+    const secret = "PRIVATE_CIPHER_FAILURE_SECRET";
+    const consoleSpies = ["debug", "error", "info", "log", "warn"].map(
+      (method) => vi.spyOn(console, method).mockImplementation(() => {}),
+    );
+    try {
+      const encrypt = createAiReviewerProviderCredentialManager({
+        encryptor: {
+          encryptJson: vi.fn(async () => {
+            throw new Error(secret);
+          }),
+          decryptToJson: vi.fn(),
+        },
+      });
+      const decrypt = createAiReviewerProviderCredentialManager({
+        encryptor: {
+          encryptJson: vi.fn(),
+          decryptToJson: vi.fn(async () => {
+            throw new Error(secret);
+          }),
+        },
+      });
+
+      for (const work of [
+        () =>
+          encrypt.encrypt({
+            provider: "openai-compatible",
+            baseUrl: remoteBaseUrl,
+            credential: secret,
+          }),
+        () =>
+          decrypt.decrypt("ciphertext", {
+            provider: "openai-compatible",
+            baseUrl: remoteBaseUrl,
+          }),
+      ]) {
+        const error = await captureError(work());
+        expect(error.message).toBe(
+          "The AI provider credential could not be read.",
+        );
+        expect(String(error)).not.toContain(secret);
+        expect(error.stack).not.toContain(secret);
+        expect(error).not.toHaveProperty("cause");
+      }
+      for (const spy of consoleSpies) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+    }
+  });
+
   it("runs the exact COMPAT_OK check once, without accepting or retrying a near match", async function () {
     const generateChat = vi.fn(async () => compatibilityResult);
     const transportFactory = vi.fn(() => ({ generateChat }));
@@ -368,12 +820,13 @@ describe("AI reviewer provider configuration", function () {
       }),
     ).toEqual({
       ok: true,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
       classification: "local",
     });
     expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
       baseUrl,
+      credential: undefined,
       modelTag: model,
     });
     expect(generateChat).toHaveBeenCalledExactlyOnceWith(
@@ -400,6 +853,44 @@ describe("AI reviewer provider configuration", function () {
     expect(nearMatch).toHaveBeenCalledOnce();
   });
 
+  it("passes the credential only into connection, discussion, and review transport construction", async function () {
+    const transport = {
+      generateChat: vi.fn(async () => compatibilityResult),
+      createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
+      createAgentGateway: vi.fn(() => ({ kind: "review" })),
+    };
+    const transportFactory = vi.fn(() => transport);
+    const service = createOllamaProviderService({ transportFactory });
+
+    expect(await service.testConnection(credentialConfiguration)).toEqual({
+      ok: true,
+      provider: "openai-compatible",
+      model: remoteModel,
+      classification: "remote",
+    });
+    expect(service.createDiscussionGateway(credentialConfiguration)).toEqual({
+      kind: "discussion",
+    });
+    expect(
+      service.createAgentGateway(credentialConfiguration, {
+        readProjectFile: vi.fn(),
+      }),
+    ).toEqual({ kind: "review" });
+    expect(transportFactory).toHaveBeenCalledTimes(3);
+    for (const [options] of transportFactory.mock.calls) {
+      expect(options).toEqual({
+        baseUrl: remoteBaseUrl,
+        credential,
+        modelTag: remoteModel,
+      });
+      expect(Object.keys(options)).toEqual([
+        "baseUrl",
+        "credential",
+        "modelTag",
+      ]);
+    }
+  });
+
   it("serves bounded GET and strict PUT configuration responses", async function () {
     const { controller, store } = providerControllerFixture({
       storedConfiguration: null,
@@ -418,7 +909,7 @@ describe("AI reviewer provider configuration", function () {
     await controller.getConfiguration(httpRequest(), configuredResponse);
     expect(configuredResponse.body).toEqual({
       configured: true,
-      config: configuration,
+      config: publicConfiguration,
       classification: "local",
     });
     expect(JSON.stringify(configuredResponse.body)).not.toContain(userId);
@@ -431,9 +922,30 @@ describe("AI reviewer provider configuration", function () {
     expect(store.save).toHaveBeenCalledExactlyOnceWith(userId, configuration);
     expect(saveResponse.body).toEqual({
       configured: true,
-      config: configuration,
+      config: publicConfiguration,
       classification: "local",
     });
+
+    store.save.mockResolvedValueOnce(credentialConfiguration);
+    const credentialResponse = new FakeResponse();
+    await controller.saveConfiguration(
+      httpRequest({ body: credentialUpdate }),
+      credentialResponse,
+    );
+    expect(credentialResponse.body).toEqual({
+      configured: true,
+      config: publicCredentialConfiguration,
+      classification: "remote",
+    });
+    expect(Object.keys(credentialResponse.body.config)).toEqual([
+      "provider",
+      "baseUrl",
+      "model",
+      "contextLength",
+      "credentialSet",
+      "credentialUpdatedAt",
+    ]);
+    expect(JSON.stringify(credentialResponse.body)).not.toContain(credential);
 
     const invalidResponse = new FakeResponse();
     await controller.saveConfiguration(
@@ -444,7 +956,7 @@ describe("AI reviewer provider configuration", function () {
     expect(JSON.stringify(invalidResponse.body)).not.toContain(
       "PRIVATE_SECRET",
     );
-    expect(store.save).toHaveBeenCalledOnce();
+    expect(store.save).toHaveBeenCalledTimes(2);
   });
 
   it("tests the saved provider and returns bounded configuration errors", async function () {
@@ -458,7 +970,7 @@ describe("AI reviewer provider configuration", function () {
     );
     expect(response.body).toEqual({
       ok: true,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
       classification: "local",
     });
@@ -503,6 +1015,55 @@ describe("AI reviewer provider configuration", function () {
     });
     expect(JSON.stringify(failedResponse.body)).not.toContain(secret);
   });
+
+  it.each([
+    {
+      category: "authentication",
+      code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+      message: "The AI provider rejected its credentials.",
+      retryable: false,
+    },
+    {
+      category: "network",
+      code: "AI_PROVIDER_NETWORK_FAILED",
+      message: "The AI provider could not be reached.",
+      retryable: true,
+    },
+    {
+      category: "rate-limit",
+      code: "AI_PROVIDER_RATE_LIMITED",
+      message: "The AI provider rate limit was reached.",
+      retryable: true,
+    },
+    {
+      category: "schema",
+      code: "AI_PROVIDER_SCHEMA_INVALID",
+      message: "The AI provider returned invalid data.",
+      retryable: false,
+    },
+  ])(
+    "reports a bounded $category connection failure category",
+    async function ({ category, code, message, retryable }) {
+      const secret = `PRIVATE_${category}_PROVIDER_TEXT`;
+      const failed = providerControllerFixture();
+      failed.providerService.testConnection.mockRejectedValue(
+        new AgentGatewayError(secret, {
+          code: secret,
+          category,
+          retryable: !retryable,
+        }),
+      );
+      const response = new FakeResponse();
+
+      await failed.controller.testConnection(httpRequest(), response);
+
+      expect(response.statusCode).toBe(502);
+      expect(response.body).toEqual({
+        error: { code, category, message, retryable },
+      });
+      expect(JSON.stringify(response.body)).not.toContain(secret);
+    },
+  );
 
   it("uses the just-saved configuration for the next bounded selection stream", async function () {
     const { modelDependency, records } = inMemoryModel();
@@ -558,7 +1119,10 @@ describe("AI reviewer provider configuration", function () {
       httpRequest({ body: otherConfiguration }),
       new FakeResponse(),
     );
-    expect(records.get(userId)).toEqual(otherConfiguration);
+    expect(records.get(userId)).toEqual({
+      ...otherConfiguration,
+      revision: 1,
+    });
 
     const response = new FakeResponse();
     await configuredController.stream(
@@ -567,6 +1131,7 @@ describe("AI reviewer provider configuration", function () {
     );
     expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
       baseUrl: otherBaseUrl,
+      credential: undefined,
       modelTag: otherModel,
     });
     expect(transport.createAgentGateway).toHaveBeenCalledWith(
@@ -600,7 +1165,7 @@ describe("AI reviewer provider configuration", function () {
       }),
     };
     const controller = createConfiguredAiReviewerController({
-      configStore: { get: vi.fn(async () => otherConfiguration) },
+      configStore: { get: vi.fn(async () => credentialConfiguration) },
       providerService,
       requestScopeReader,
       now: () => createdAt,
@@ -614,11 +1179,12 @@ describe("AI reviewer provider configuration", function () {
     );
 
     expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
-      baseUrl: otherBaseUrl,
-      modelTag: otherModel,
+      baseUrl: remoteBaseUrl,
+      credential,
+      modelTag: remoteModel,
     });
     expect(transport.createDiscussionGateway).toHaveBeenCalledExactlyOnceWith({
-      contextLength: otherContextLength,
+      contextLength,
     });
     expect(requestScopeReader.read).not.toHaveBeenCalled();
     expect(gateway.stream).not.toHaveBeenCalled();
@@ -760,6 +1326,7 @@ Cite \cite{missing}`;
 
   it("returns a truthful bounded error when project context is too large", async function () {
     const privateTitle = "PRIVATE_PROJECT_TITLE_".repeat(9);
+    const failureRecorder = vi.fn();
     const requestScopeReader = createRequestScopeReader({
       loadProjectDocuments: async () =>
         Object.fromEntries(
@@ -783,6 +1350,8 @@ Cite \cite{missing}`;
       requestScopeReader,
       now: () => createdAt,
       eventId: () => "event-project-content-error",
+      elapsedNow: vi.fn().mockReturnValueOnce(300).mockReturnValue(318.9),
+      failureRecorder,
     });
 
     const response = new FakeResponse();
@@ -798,11 +1367,24 @@ Cite \cite{missing}`;
         error: {
           code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
           category: "configuration",
-          message: "The project content could not be read for review.",
+          message:
+            "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
           retryable: false,
         },
       },
     ]);
     expect(response.chunks.join("")).not.toContain(privateTitle);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: projectRequest().requestId,
+      provider: otherConfiguration.provider,
+      model: otherConfiguration.model,
+      scopeKind: "project",
+      failureCategory: "configuration",
+      failureCode: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      elapsedMs: 19,
+    });
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      privateTitle,
+    );
   });
 });

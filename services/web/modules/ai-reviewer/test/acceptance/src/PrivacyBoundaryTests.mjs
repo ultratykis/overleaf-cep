@@ -12,6 +12,7 @@ import {
   ScriptedFakeAgentGateway,
 } from "../../../app/src/AgentGateway.mjs";
 import { createAiReviewerController } from "../../../app/src/AiReviewerController.mjs";
+import { recordAiReviewerFailure } from "../../../app/src/AiReviewerFailureLogger.mjs";
 import { AgentEventSchema } from "../../../shared/contracts.mjs";
 import { createPrivacySinkProbe } from "./helpers/PrivacySinkProbe.mjs";
 
@@ -143,7 +144,7 @@ async function waitForWrites(response, count) {
 async function executeLifecycle(lifecycle) {
   const request = privacyRequest(lifecycle);
   const responseSentinel = `AI_REVIEWER_RESPONSE_SENTINEL_${lifecycle}`;
-  const secretSentinel = `AI_REVIEWER_SECRET_SENTINEL_${lifecycle}`;
+  const credentialSentinel = `AI_REVIEWER_CREDENTIAL_SENTINEL_${lifecycle}`;
   const events = lifecycleEvents(request.requestId, responseSentinel);
   const response = new FakeResponse();
   const timeout = new AbortController();
@@ -162,8 +163,8 @@ async function executeLifecycle(lifecycle) {
       async *stream() {
         yield events[0];
         yield events[1];
-        throw new AgentGatewayError(secretSentinel, {
-          code: secretSentinel,
+        throw new AgentGatewayError(credentialSentinel, {
+          code: credentialSentinel,
           category: "provider",
           retryable: false,
         });
@@ -176,6 +177,14 @@ async function executeLifecycle(lifecycle) {
     timeoutSignalFactory: () => timeout.signal,
     now: () => createdAt,
     eventId: () => `${request.requestId}-error`,
+    elapsedNow: (() => {
+      let elapsed = 0;
+      return () => {
+        elapsed += 10;
+        return elapsed;
+      };
+    })(),
+    failureRecorder: recordAiReviewerFailure,
   });
   const streaming = controller.stream(httpRequest(request), response);
 
@@ -193,7 +202,7 @@ async function executeLifecycle(lifecycle) {
     request,
     response,
     responseSentinel,
-    secretSentinel,
+    credentialSentinel,
   };
 }
 
@@ -236,16 +245,32 @@ describe("AI reviewer: module shell privacy persistence", function () {
           result.request.scope.text,
         );
         expect(result.response.chunks.join("")).not.to.include(
-          result.secretSentinel,
+          result.credentialSentinel,
         );
 
         for (const sentinel of [
           result.request.instruction,
           result.request.scope.text,
           result.responseSentinel,
-          result.secretSentinel,
+          result.credentialSentinel,
         ]) {
           expect(await privacyProbe.findSentinel(sentinel)).to.equal(null);
+        }
+        if (lifecycle === "error") {
+          expect(privacyProbe.failureRecords()).to.deep.equal([
+            {
+              level: "warn",
+              record: {
+                requestId: "privacy-error",
+                provider: "fake",
+                model: "deterministic-v1",
+                scopeKind: "document",
+                failureCategory: "provider",
+                failureCode: "AI_PROVIDER_FAILED",
+                elapsedMs: 10,
+              },
+            },
+          ]);
         }
       } finally {
         sandbox.restore();

@@ -23,4 +23,11 @@ export default createAiReviewerRouter({
   testConnection: AiReviewerController.testConnection,
   stream: AiReviewerController.stream,
   discussionStream: AiReviewerController.discussionStream,
+  getWorkspace: AiReviewerController.getWorkspace,
+  saveWorkspace: AiReviewerController.saveWorkspace,
+  getCommentProvenance: AiReviewerController.getCommentProvenance,
+  markCommentProvenance: AiReviewerController.markCommentProvenance,
+  deleteCommentProvenance: AiReviewerController.deleteCommentProvenance,
+  deleteDiscussion: AiReviewerController.deleteDiscussion,
+  deleteWorkspace: AiReviewerController.deleteWorkspace,
 });

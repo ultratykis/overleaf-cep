@@ -1,5 +1,6 @@
 import type { RailElement } from "@/features/ide-react/util/rail-types";
 import getMeta from "@/utils/meta";
+import i18next from "i18next";
 import { lazy, Suspense } from "react";
 
 type PanelModule = {
@@ -13,6 +14,10 @@ type RailEntryOptions = {
 
 const loadDefaultPanel = () => import("./ai-reviewer-panel");
 
+function translatedTitle() {
+  return i18next.t("ai_reviewer_title");
+}
+
 export function createAiReviewerRailEntry({
   enabled,
   loadPanel = loadDefaultPanel,
@@ -21,7 +26,9 @@ export function createAiReviewerRailEntry({
     return {
       key: "ai-reviewer",
       icon: "smart_toy",
-      title: "AI reviewer",
+      get title() {
+        return translatedTitle();
+      },
       component: null,
       hide: true,
     };
@@ -31,7 +38,9 @@ export function createAiReviewerRailEntry({
   return {
     key: "ai-reviewer",
     icon: "smart_toy",
-    title: "AI reviewer",
+    get title() {
+      return translatedTitle();
+    },
     component: (
       <Suspense fallback={null}>
         <LazyPanel />

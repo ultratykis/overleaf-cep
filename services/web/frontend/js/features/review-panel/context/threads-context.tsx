@@ -1,4 +1,5 @@
 import {
+  ComponentType,
   createContext,
   FC,
   useCallback,
@@ -35,13 +36,20 @@ import { useCodeMirrorViewContext } from '@/features/source-editor/components/co
 import { rangesUpdatedEffect } from '@/features/source-editor/extensions/history-ot'
 import { useEditorAnalytics } from '@/shared/hooks/use-editor-analytics'
 import { useReviewPanelViewContext } from './review-panel-view-context'
+import importOverleafModules from '../../../../macros/import-overleaf-module.macro'
 
 export type Threads = Record<ThreadId, ReviewPanelCommentThread>
 
 export const ThreadsContext = createContext<Threads | undefined>(undefined)
 
 type ThreadsActions = {
-  addComment: (pos: number, text: string, content: string) => Promise<void>
+  addComment: (
+    pos: number,
+    text: string,
+    content: string,
+    threadId?: ThreadId,
+    validateRange?: () => boolean
+  ) => Promise<ThreadId>
   resolveThread: (threadId: ThreadId) => Promise<void>
   reopenThread: (threadId: ThreadId) => Promise<void>
   deleteThread: (threadId: ThreadId) => Promise<void>
@@ -55,9 +63,49 @@ type ThreadsActions = {
   deleteOwnMessage: (threadId: ThreadId, commentId: CommentId) => Promise<void>
 }
 
+const aiReviewerCommentBridgeModules = importOverleafModules(
+  'aiReviewerCommentBridges'
+) as {
+  import: {
+    default: ComponentType<{
+      addComment: ThreadsActions['addComment']
+    }>
+  }
+  path: string
+}[]
+const AiReviewerCommentBridge =
+  aiReviewerCommentBridgeModules[0]?.import.default
+
 const ThreadsActionsContext = createContext<ThreadsActions | undefined>(
   undefined
 )
+
+function assertAiReviewerCommentRange(validateRange?: () => boolean) {
+  let valid = false
+  try {
+    valid = validateRange?.() === true
+  } catch {
+    valid = false
+  }
+  if (!valid) {
+    const error = new Error(
+      'The document changed before the comment range was attached.'
+    ) as Error & { code: string }
+    error.code = 'AI_REVIEWER_COMMENT_RANGE_STALE'
+    throw error
+  }
+}
+
+export async function postCommentMessageAfterRangeValidation(
+  postMessage: () => Promise<unknown>,
+  requestedThreadId?: ThreadId,
+  validateRange?: () => boolean
+) {
+  if (requestedThreadId !== undefined) {
+    assertAiReviewerCommentRange(validateRange)
+  }
+  await postMessage()
+}
 
 export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
   const { projectId } = useProjectContext()
@@ -272,12 +320,24 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
     }
 
     const actions = {
-      async addComment(pos: number, text: string, content: string) {
-        const threadId = RangesTracker.generateId() as ThreadId
+      async addComment(
+        pos: number,
+        text: string,
+        content: string,
+        requestedThreadId?: ThreadId,
+        validateRange?: () => boolean
+      ) {
+        const threadId =
+          requestedThreadId ?? (RangesTracker.generateId() as ThreadId)
 
-        await postJSON(`/project/${projectId}/thread/${threadId}/messages`, {
-          body: { content },
-        })
+        await postCommentMessageAfterRangeValidation(
+          () =>
+            postJSON(`/project/${projectId}/thread/${threadId}/messages`, {
+              body: { content },
+            }),
+          requestedThreadId,
+          validateRange
+        )
 
         sendEvent('rp-new-comment', { size: content.length })
 
@@ -288,6 +348,7 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
         }
 
         currentDocument.submitOp(op)
+        return threadId
       },
       async resolveThread(threadId: string, docId: string) {
         await postJSON(
@@ -345,12 +406,24 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
     if (isHistoryOT) {
       // TODO: dispatch on view instead?
       Object.assign(actions, {
-        async addComment(pos: number, text: string, content: string) {
-          const threadId = RangesTracker.generateId() as ThreadId // TODO
+        async addComment(
+          pos: number,
+          text: string,
+          content: string,
+          requestedThreadId?: ThreadId,
+          validateRange?: () => boolean
+        ) {
+          const threadId =
+            requestedThreadId ?? (RangesTracker.generateId() as ThreadId) // TODO
 
-          await postJSON(`/project/${projectId}/thread/${threadId}/messages`, {
-            body: { content },
-          })
+          await postCommentMessageAfterRangeValidation(
+            () =>
+              postJSON(`/project/${projectId}/thread/${threadId}/messages`, {
+                body: { content },
+              }),
+            requestedThreadId,
+            validateRange
+          )
 
           sendEvent('rp-new-comment', { size: content.length })
 
@@ -362,6 +435,7 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
           view.dispatch({
             effects: rangesUpdatedEffect.of(null),
           })
+          return threadId
         },
         async resolveThread(threadId: string) {
           const op = new SetCommentStateOperation(threadId, true)
@@ -406,6 +480,9 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
 
   return (
     <ThreadsActionsContext.Provider value={actions}>
+      {AiReviewerCommentBridge != null && (
+        <AiReviewerCommentBridge addComment={actions.addComment} />
+      )}
       <ThreadsContext.Provider value={data}>{children}</ThreadsContext.Provider>
     </ThreadsActionsContext.Provider>
   )

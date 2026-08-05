@@ -2,6 +2,7 @@ const { history, undo } = require("@codemirror/commands");
 const { EditorState, Transaction } = require("@codemirror/state");
 const { EditorView } = require("@codemirror/view");
 const { expect } = require("chai");
+const { t } = require("i18next");
 const { TextOperation } = require("overleaf-editor-core");
 const sinon = require("sinon");
 
@@ -94,7 +95,7 @@ function suggestion() {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt: "2026-07-24T00:00:00.000Z",
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -151,7 +152,7 @@ function multiHunkSuggestion() {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt: "2026-07-24T00:00:00.000Z",
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -188,6 +189,7 @@ async function selectedHunkIds() {
     parent,
     request: multiHunkRequest(),
     suggestion: multiHunkSuggestion(),
+    t,
   });
   const hunkIds = [...mounted.hunkIds];
   mounted.destroy();

@@ -6,6 +6,7 @@ import {
   visual,
 } from "@/features/source-editor/extensions/visual/visual";
 import { expect } from "chai";
+import i18next from "i18next";
 import sinon from "sinon";
 
 import "../../../../test/frontend/cut-log-noise";
@@ -88,7 +89,7 @@ function suggestion() {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt,
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -145,7 +146,7 @@ function multiHunkSuggestion() {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt,
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -1028,6 +1029,7 @@ describe("AI reviewer: single document selected-hunk application", function () {
       parent: previewParent,
       request: multiHunkRequest(),
       suggestion: multiHunkSuggestion(),
+      t: i18next.t,
     });
     expect(mountedPreview.hunkIds).to.have.length(2);
     return mountedPreview.hunkIds;

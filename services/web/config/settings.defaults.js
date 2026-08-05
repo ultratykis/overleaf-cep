@@ -1086,6 +1086,26 @@ module.exports = {
       ),
     ],
     contactUsModal: [],
+    aiReviewerCommentBridges: [
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/components/ai-reviewer-comment-bridge.tsx'
+            ),
+          ]
+        : []),
+    ],
+    aiReviewerCommentLabels: [
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/components/ai-assisted-comment-label.tsx'
+            ),
+          ]
+        : []),
+    ],
     sourceEditorExtensions: [
       ...(aiReviewerEnabled
         ? [

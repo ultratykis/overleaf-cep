@@ -5,9 +5,12 @@ import { z } from "zod";
 /** @import { JsonValue } from './contract-types' */
 
 const IdentifierSchema = z.string().min(1).max(200);
+const WorkspaceSubjectKeySchema = z.string().min(1).max(512);
 const ShortTextSchema = z.string().min(1).max(2_000);
 const ContentSchema = z.string().max(1_000_000);
 export const DISCUSSION_CONTEXT_TURN_LIMIT = 12;
+export const AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT = 20;
+export const AI_REVIEWER_WORKSPACE_TURN_LIMIT = 100;
 
 export const Sha256Schema = z
   .string()
@@ -133,12 +136,11 @@ export const AgentRequestSchema = z
   .strict();
 
 export const SuggestionStatusSchema = z.enum([
-  "proposed",
-  "accepted",
-  "rejected",
-  "stale",
+  "unresolved",
+  "applied",
+  "discarded",
   "conflict",
-  "failed",
+  "posted",
 ]);
 
 export const SuggestionSchema = z
@@ -175,8 +177,8 @@ export const SuggestionSchema = z
     }
   });
 
-export const ProposedSuggestionSchema = SuggestionSchema.safeExtend({
-  status: z.literal("proposed"),
+export const UnresolvedSuggestionSchema = SuggestionSchema.safeExtend({
+  status: z.literal("unresolved"),
 });
 
 const FindingBaseShape = {
@@ -237,7 +239,7 @@ export const DiscussionSubjectSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("suggestion"),
       sourceRequest: AgentRequestSchema,
-      artifact: ProposedSuggestionSchema,
+      artifact: UnresolvedSuggestionSchema,
     })
     .strict(),
   z
@@ -248,12 +250,265 @@ export const DiscussionSubjectSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const WorkspaceFindingStatusSchema = z.enum([
+  "unresolved",
+  "discarded",
+  "posted",
+]);
+
+export const WorkspaceFindingSchema = z
+  .object({
+    artifact: FindingSchema,
+    status: WorkspaceFindingStatusSchema,
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.artifact.artifactKind === "citation-finding" &&
+      entry.status === "posted"
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A citation finding cannot be posted as a comment",
+        path: ["status"],
+      });
+    }
+  });
+
+export const WorkspaceSuggestionSchema = z
+  .object({
+    artifact: SuggestionSchema,
+    conflictCode: IdentifierSchema.optional(),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (entry.conflictCode != null && entry.artifact.status !== "conflict") {
+      context.addIssue({
+        code: "custom",
+        message: "Only a conflicting suggestion may carry a conflict code",
+        path: ["conflictCode"],
+      });
+    }
+  });
+
+const WorkspaceOrderSchema = z.number().int().nonnegative();
+export const WorkspaceRevisionSchema = z.number().int().nonnegative();
+
+export const WorkspaceRunSchema = z
+  .object({
+    generation: WorkspaceOrderSchema,
+    createdOrder: WorkspaceOrderSchema,
+    request: AgentRequestSchema,
+    text: ContentSchema,
+    findings: z.array(WorkspaceFindingSchema).max(100),
+    suggestions: z.array(WorkspaceSuggestionSchema).max(100),
+  })
+  .strict();
+
+export const WorkspaceDiscussionSchema = z
+  .object({
+    id: IdentifierSchema,
+    createdOrder: WorkspaceOrderSchema,
+    subjectKey: WorkspaceSubjectKeySchema.nullable(),
+    subject: DiscussionSubjectSchema.nullable(),
+    sourceGeneration: WorkspaceOrderSchema.nullable(),
+    turns: z.array(DiscussionTurnSchema).max(AI_REVIEWER_WORKSPACE_TURN_LIMIT),
+    suggestions: z.array(WorkspaceSuggestionSchema),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((discussion, context) => {
+    const hasSubject = discussion.subject != null;
+    if (
+      hasSubject !== (discussion.subjectKey != null) ||
+      hasSubject !== (discussion.sourceGeneration != null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Workspace discussion subject bindings must be all present or all null",
+        path: ["subject"],
+      });
+    }
+    if (!hasSubject && discussion.suggestions.length > 0) {
+      context.addIssue({
+        code: "custom",
+        message: "An open discussion cannot contain suggestions",
+        path: ["suggestions"],
+      });
+    }
+  });
+
+export const AiReviewerWorkspaceSchema = z
+  .object({
+    runs: z.array(WorkspaceRunSchema),
+    discussions: z
+      .array(WorkspaceDiscussionSchema)
+      .max(AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT),
+  })
+  .strict()
+  .superRefine((workspace, context) => {
+    const runsByRequestId = new Map();
+    const runGenerations = new Set();
+    const createdOrders = new Set();
+    const discussionIds = new Set();
+    const discussionSubjectKeys = new Set();
+
+    for (const [runIndex, run] of workspace.runs.entries()) {
+      const requestId = run.request.requestId;
+      if (runsByRequestId.has(requestId)) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace run request IDs must be unique",
+          path: ["runs", runIndex, "request", "requestId"],
+        });
+      } else {
+        runsByRequestId.set(requestId, run);
+      }
+      if (runGenerations.has(run.generation)) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace run generations must be unique",
+          path: ["runs", runIndex, "generation"],
+        });
+      }
+      runGenerations.add(run.generation);
+      if (createdOrders.has(run.createdOrder)) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace timeline order must be unique",
+          path: ["runs", runIndex, "createdOrder"],
+        });
+      }
+      createdOrders.add(run.createdOrder);
+
+      for (const [findingIndex, finding] of run.findings.entries()) {
+        if (
+          finding.artifact.requestId !== requestId ||
+          finding.artifact.projectId !== run.request.projectId
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Workspace finding must belong to its run",
+            path: ["runs", runIndex, "findings", findingIndex, "artifact"],
+          });
+        }
+      }
+      for (const [suggestionIndex, suggestion] of run.suggestions.entries()) {
+        if (
+          suggestion.artifact.requestId !== requestId ||
+          suggestion.artifact.projectId !== run.request.projectId
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Workspace suggestion must belong to its run",
+            path: [
+              "runs",
+              runIndex,
+              "suggestions",
+              suggestionIndex,
+              "artifact",
+            ],
+          });
+        }
+      }
+    }
+
+    for (const [
+      discussionIndex,
+      discussion,
+    ] of workspace.discussions.entries()) {
+      if (discussionIds.has(discussion.id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace discussion IDs must be unique",
+          path: ["discussions", discussionIndex, "id"],
+        });
+      }
+      discussionIds.add(discussion.id);
+      if (discussion.subjectKey != null) {
+        if (discussionSubjectKeys.has(discussion.subjectKey)) {
+          context.addIssue({
+            code: "custom",
+            message: "Workspace discussion subjects must be unique",
+            path: ["discussions", discussionIndex, "subjectKey"],
+          });
+        }
+        discussionSubjectKeys.add(discussion.subjectKey);
+      }
+      if (createdOrders.has(discussion.createdOrder)) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace timeline order must be unique",
+          path: ["discussions", discussionIndex, "createdOrder"],
+        });
+      }
+      createdOrders.add(discussion.createdOrder);
+
+      if (discussion.subject == null) {
+        continue;
+      }
+      const sourceRequest = discussion.subject.sourceRequest;
+      const sourceRun = runsByRequestId.get(sourceRequest.requestId);
+      if (
+        discussion.subject.kind !== "scope" &&
+        (discussion.subject.artifact.requestId !== sourceRequest.requestId ||
+          discussion.subject.artifact.projectId !== sourceRequest.projectId)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace discussion subject must belong to its source run",
+          path: ["discussions", discussionIndex, "subject", "artifact"],
+        });
+      }
+      if (
+        sourceRun == null ||
+        sourceRun.generation !== discussion.sourceGeneration ||
+        JSON.stringify(sourceRun.request) !== JSON.stringify(sourceRequest)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Workspace discussion must belong to its source run",
+          path: ["discussions", discussionIndex, "subject"],
+        });
+      }
+      for (const [
+        suggestionIndex,
+        suggestion,
+      ] of discussion.suggestions.entries()) {
+        if (
+          suggestion.artifact.requestId !== sourceRequest.requestId ||
+          suggestion.artifact.projectId !== sourceRequest.projectId
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Discussion suggestion must belong to its source run",
+            path: [
+              "discussions",
+              discussionIndex,
+              "suggestions",
+              suggestionIndex,
+              "artifact",
+            ],
+          });
+        }
+      }
+    }
+  });
+
+export const AiReviewerWorkspaceSnapshotSchema = z
+  .object({
+    revision: WorkspaceRevisionSchema,
+    workspace: AiReviewerWorkspaceSchema,
+  })
+  .strict();
+
 export const DiscussionRequestSchema = z
   .object({
     requestId: IdentifierSchema,
     discussionId: IdentifierSchema,
     projectId: IdentifierSchema,
-    subject: DiscussionSubjectSchema,
+    subject: DiscussionSubjectSchema.nullable(),
     turns: z
       .array(DiscussionTurnSchema)
       .min(1)
@@ -261,19 +516,22 @@ export const DiscussionRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (request.turns.at(-1)?.role !== "user") {
+      context.addIssue({
+        code: "custom",
+        message: "Discussion context must end with the active user turn",
+        path: ["turns"],
+      });
+    }
+    if (request.subject == null) {
+      return;
+    }
     const { sourceRequest } = request.subject;
     if (sourceRequest.projectId !== request.projectId) {
       context.addIssue({
         code: "custom",
         message: "Discussion source project must match its request",
         path: ["subject", "sourceRequest", "projectId"],
-      });
-    }
-    if (request.turns.at(-1)?.role !== "user") {
-      context.addIssue({
-        code: "custom",
-        message: "Discussion context must end with the active user turn",
-        path: ["turns"],
       });
     }
     if (request.subject.kind === "scope") {
@@ -364,7 +622,7 @@ const SuggestionEventSchema = z
   .object({
     type: z.literal("suggestion"),
     ...EventBase,
-    suggestion: ProposedSuggestionSchema,
+    suggestion: UnresolvedSuggestionSchema,
   })
   .strict();
 
@@ -468,7 +726,7 @@ const DiscussionSuggestionEventSchema = z
   .object({
     type: z.literal("suggestion"),
     ...EventBase,
-    suggestion: ProposedSuggestionSchema,
+    suggestion: UnresolvedSuggestionSchema,
   })
   .strict();
 

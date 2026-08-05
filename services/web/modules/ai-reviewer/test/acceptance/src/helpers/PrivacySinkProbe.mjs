@@ -164,6 +164,23 @@ export function createPrivacySinkProbe(sandbox) {
   }));
 
   return {
+    failureRecords() {
+      return loggerSpies.flatMap(({ level, spy }) =>
+        spy
+          .getCalls()
+          .map((call) => serializeLogArguments(call.args))
+          .filter(
+            (arguments_) =>
+              arguments_[1] === "AI reviewer request failed" &&
+              arguments_[0] != null &&
+              typeof arguments_[0] === "object",
+          )
+          .map((arguments_) => ({
+            level,
+            record: arguments_[0],
+          })),
+      );
+    },
     async findSentinel(sentinel) {
       for (const { level, spy } of loggerSpies) {
         if (

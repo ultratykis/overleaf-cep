@@ -367,6 +367,51 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
     expect(JSON.stringify(result)).not.toContain("AI_REVIEWER_");
   });
 
+  it("attaches a remote credential only as the Authorization header and redacts transport failure text", async function () {
+    const remoteBaseUrl = "https://api.example.com/openai/v1";
+    const credential = "PRIVATE_REMOTE_PROVIDER_CREDENTIAL";
+    const authorizations = [];
+    const fetchImpl = vi.fn(async (_input, init) => {
+      authorizations.push(new Headers(init.headers).get("authorization"));
+      return successfulChatResponse();
+    });
+    const transport = new OllamaOpenAiTransport({
+      baseUrl: remoteBaseUrl,
+      credential,
+      modelTag,
+      fetchImpl,
+    });
+
+    const result = await transport.generateChat({
+      prompt,
+      maxOutputTokens: 32,
+    });
+
+    expect(authorizations).toEqual([`Bearer ${credential}`]);
+    expect(JSON.stringify(result)).not.toContain(credential);
+
+    const failedTransport = new OllamaOpenAiTransport({
+      baseUrl: remoteBaseUrl,
+      credential,
+      modelTag,
+      fetchImpl: vi.fn(async () => {
+        throw new Error(credential);
+      }),
+    });
+    const error = await captureError(
+      failedTransport.generateChat({
+        prompt,
+        maxOutputTokens: 32,
+      }),
+    );
+    expect(error).toMatchObject({
+      code: "AI_PROVIDER_NETWORK_FAILED",
+      category: "network",
+      retryable: true,
+    });
+    expect(String(error)).not.toContain(credential);
+  });
+
   it("uses one real provider stream with the fixed wire body and local DTOs", async function () {
     const requests = [];
     const controller = new AbortController();

@@ -223,6 +223,14 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
       model,
       contextLength: 8_192,
     };
+    const publicConfiguration = {
+      provider: "openai-compatible",
+      baseUrl,
+      model,
+      contextLength: 8_192,
+      credentialSet: false,
+      credentialUpdatedAt: null,
+    };
     const csrfHeaders = { "x-csrf-token": owner.csrfToken };
 
     const saved = await owner.doRequest("PUT", {
@@ -233,7 +241,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     expect(saved.response.statusCode).to.equal(200);
     expect(saved.body).to.deep.equal({
       configured: true,
-      config: configuration,
+      config: publicConfiguration,
       classification: "local",
     });
 
@@ -244,7 +252,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     expect(connection.response.statusCode).to.equal(200);
     expect(JSON.parse(connection.body)).to.deep.equal({
       ok: true,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
       classification: "local",
     });
@@ -285,7 +293,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     expect(events[0]).to.include({
       type: "started",
       requestId,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
     });
     expect(
@@ -327,7 +335,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
     expect(projectEvents[0]).to.include({
       type: "started",
       requestId: projectRequestId,
-      provider: "ollama",
+      provider: "openai-compatible",
       model,
     });
     expect(

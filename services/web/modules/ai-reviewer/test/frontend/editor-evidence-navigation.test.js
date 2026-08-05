@@ -11,6 +11,7 @@ require("../../../../test/frontend/cut-log-noise");
 
 const {
   createEditorEvidenceNavigationTarget,
+  createProjectEditorEvidenceNavigationTarget,
   navigateToEditorEvidence,
 } = require("../../frontend/js/services/editor-evidence-navigation");
 const {
@@ -37,6 +38,15 @@ const selectionRange = {
 const evidenceRange = {
   from: 1,
   to: 3,
+};
+const projectDocumentId = "document-project-evidence";
+const projectPath = "chapters/other.tex";
+const projectRevision = 12;
+const projectText = "Other evidence text.";
+const projectTextHash = createHash("sha256").update(projectText).digest("hex");
+const projectEvidenceRange = {
+  from: 6,
+  to: 14,
 };
 const liveViews = [];
 
@@ -301,6 +311,216 @@ function createReplacementView(fixture) {
   return replacementView;
 }
 
+function projectRequest() {
+  return {
+    requestId: "request-project-evidence-0001",
+    projectId,
+    action: "review",
+    instruction: "Review the synthetic project.",
+    skill: "referee-review",
+    scope: {
+      kind: "project",
+    },
+  };
+}
+
+function projectFinding(receivedRequest, referenceOverrides = {}) {
+  return {
+    id: "finding-project-evidence-0001",
+    requestId: receivedRequest.requestId,
+    projectId: receivedRequest.projectId,
+    artifactKind: "finding",
+    severity: "warning",
+    category: "structure",
+    title: "Inspect the other project document",
+    message: "The project evidence points to another document.",
+    evidence: [
+      {
+        path: projectPath,
+        range: {
+          ...projectEvidenceRange,
+        },
+        revision: projectRevision,
+        textHash: projectTextHash,
+        ...referenceOverrides,
+      },
+    ],
+    suggestionIds: [],
+  };
+}
+
+function createLiveDocumentFixture({
+  liveDocumentId,
+  livePath,
+  documentText,
+  revision,
+  permissions = {
+    read: true,
+    write: true,
+    trackedWrite: true,
+  },
+}) {
+  const navigationTransactions = [];
+  const documentTransactions = [];
+  const submitOp = sinon.spy();
+  const shareDocument = {
+    connection: {
+      state: "ok",
+    },
+    version: revision,
+    getVersion() {
+      return this.version;
+    },
+    submitOp,
+  };
+  const currentDocument = {
+    doc_id: liveDocumentId,
+    joined: true,
+    doc: shareDocument,
+    snapshot: documentText,
+    buffered: false,
+    realtimeTrackChanges: false,
+    getSnapshot() {
+      return this.snapshot;
+    },
+    hasBufferedOps() {
+      return this.buffered;
+    },
+    getTrackingChanges() {
+      return this.realtimeTrackChanges;
+    },
+  };
+  const view = new EditorView({
+    state: EditorState.create({
+      doc: documentText,
+      extensions: [
+        documentIdentityExtension({
+          currentDoc: {
+            currentDocument,
+          },
+        }),
+        EditorView.updateListener.of((update) => {
+          for (const transaction of update.transactions) {
+            if (
+              transaction.annotation(Transaction.userEvent) ===
+              "select.ai-reviewer.evidence"
+            ) {
+              navigationTransactions.push(transaction);
+            }
+            if (transaction.docChanged) {
+              documentTransactions.push(transaction);
+            }
+          }
+        }),
+      ],
+    }),
+  });
+  liveViews.push(view);
+  currentDocument.cm6 = {
+    view,
+  };
+  return {
+    context: {
+      view,
+      projectId,
+      currentDocumentId: liveDocumentId,
+      path: livePath,
+      currentDocument,
+      sourceMode: true,
+      connected: true,
+      permissions: {
+        ...permissions,
+      },
+      trackChanges: false,
+      wantTrackChanges: false,
+    },
+    currentDocument,
+    documentTransactions,
+    navigationTransactions,
+    shareDocument,
+    submitOp,
+    view,
+  };
+}
+
+function createProjectFixture({
+  currentProjectId = projectId,
+  permissions = {
+    read: true,
+    write: true,
+    trackedWrite: true,
+  },
+  openedText = projectText,
+  openedRevision = projectRevision,
+  referenceOverrides = {},
+  resolution = {
+    documentId: projectDocumentId,
+    path: projectPath,
+  },
+  afterOpen,
+  activateOnOpen = true,
+} = {}) {
+  const initial = createFixture({
+    permissions,
+  });
+  initial.context.projectId = currentProjectId;
+  const opened = createLiveDocumentFixture({
+    liveDocumentId: projectDocumentId,
+    livePath: projectPath,
+    documentText: openedText,
+    revision: openedRevision,
+    permissions,
+  });
+  let activeContext = initial.context;
+  const activateOpenedContext = () => {
+    activeContext = opened.context;
+    afterOpen?.(opened);
+  };
+  const getContext = sinon.spy(() => activeContext);
+  const receivedRequest = projectRequest();
+  const receivedFinding = projectFinding(receivedRequest, referenceOverrides);
+  const target = createProjectEditorEvidenceNavigationTarget({
+    request: receivedRequest,
+    finding: receivedFinding,
+    evidenceIndex: 0,
+  });
+  expect(target).not.to.equal(null);
+
+  const resolveDocument = sinon.stub().returns(resolution);
+  const openDocument = sinon.stub().callsFake(async () => {
+    if (activateOnOpen) {
+      activateOpenedContext();
+    }
+    return {
+      _id: projectDocumentId,
+    };
+  });
+  const hashText = sinon
+    .stub()
+    .resolves(createHash("sha256").update(openedText).digest("hex"));
+
+  return {
+    activateOpenedContext,
+    finding: receivedFinding,
+    getContext,
+    hashText,
+    initial,
+    openDocument,
+    opened,
+    options: {
+      target,
+      getContext,
+      signal: new AbortController().signal,
+      hashText,
+      resolveDocument,
+      openDocument,
+    },
+    request: receivedRequest,
+    resolveDocument,
+    target,
+  };
+}
+
 function navigationOptions(fixture, overrides = {}) {
   return {
     target: fixture.target,
@@ -321,10 +541,17 @@ afterEach(function () {
 describe("AI reviewer: single document evidence navigation", function () {
   it("selects the exact UTF-16 source range without changing document or realtime state", async function () {
     const fixture = createFixture();
+    const resolveDocument = sinon.spy();
+    const openDocument = sinon.spy();
     const beforeText = fixture.view.state.doc.toString();
     const beforeSnapshot = fixture.currentDocument.getSnapshot();
 
-    const result = await navigateToEditorEvidence(navigationOptions(fixture));
+    const result = await navigateToEditorEvidence(
+      navigationOptions(fixture, {
+        resolveDocument,
+        openDocument,
+      }),
+    );
 
     expect(result).to.deep.equal({
       status: "navigated",
@@ -342,6 +569,8 @@ describe("AI reviewer: single document evidence navigation", function () {
     expect(fixture.view.state.doc.toString()).to.equal(beforeText);
     expect(fixture.currentDocument.getSnapshot()).to.equal(beforeSnapshot);
     expect(fixture.submitOp.called).to.equal(false);
+    expect(resolveDocument.called).to.equal(false);
+    expect(openDocument.called).to.equal(false);
   });
 
   it("uses source offsets in an actual Visual editor without requiring write or editable state", async function () {
@@ -1109,6 +1338,246 @@ describe("AI reviewer: single document evidence navigation", function () {
     expect(getContext.called).to.equal(false);
     expect(hashText.called).to.equal(false);
     expect(fixture.navigationTransactions).to.have.length(0);
+  });
+});
+
+describe("AI reviewer: cross-file project evidence navigation", function () {
+  it("opens an exact current-project document and selects its verified range without editing", async function () {
+    const fixture = createProjectFixture();
+    const initialText = fixture.initial.view.state.doc.toString();
+    const openedText = fixture.opened.view.state.doc.toString();
+
+    const result = await navigateToEditorEvidence(fixture.options);
+
+    expect(result).to.deep.equal({
+      status: "navigated",
+    });
+    expect(fixture.target).to.deep.include({
+      kind: "project",
+      requestId: fixture.request.requestId,
+      findingId: fixture.finding.id,
+      projectId,
+      path: projectPath,
+      revision: projectRevision,
+      textHash: projectTextHash,
+    });
+    expect(fixture.resolveDocument.calledOnceWithExactly(projectPath)).to.equal(
+      true,
+    );
+    expect(
+      fixture.openDocument.calledOnceWithExactly(projectDocumentId),
+    ).to.equal(true);
+    sinon.assert.callOrder(
+      fixture.resolveDocument,
+      fixture.openDocument,
+      fixture.hashText,
+    );
+    expect(fixture.opened.view.state.selection.ranges).to.have.length(1);
+    expect(fixture.opened.view.state.selection.main.from).to.equal(
+      projectEvidenceRange.from,
+    );
+    expect(fixture.opened.view.state.selection.main.to).to.equal(
+      projectEvidenceRange.to,
+    );
+    expect(
+      fixture.opened.view.state.sliceDoc(
+        projectEvidenceRange.from,
+        projectEvidenceRange.to,
+      ),
+    ).to.equal("evidence");
+    expect(fixture.opened.navigationTransactions).to.have.length(1);
+    expect(fixture.opened.navigationTransactions[0].docChanged).to.equal(false);
+    expect(fixture.opened.documentTransactions).to.have.length(0);
+    expect(fixture.initial.documentTransactions).to.have.length(0);
+    expect(fixture.initial.view.state.doc.toString()).to.equal(initialText);
+    expect(fixture.opened.view.state.doc.toString()).to.equal(openedText);
+    expect(fixture.initial.submitOp.called).to.equal(false);
+    expect(fixture.opened.submitOp.called).to.equal(false);
+  });
+
+  it("waits for the resolved document after an unrelated editor-ready signal", async function () {
+    const fixture = createProjectFixture({
+      activateOnOpen: false,
+    });
+    let settled = false;
+    const navigation = navigateToEditorEvidence(fixture.options).finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fixture.openDocument.calledOnce).to.equal(true);
+
+    window.dispatchEvent(new Event("editor:scroll-position-restored"));
+    await new Promise((resolve) => setTimeout(resolve));
+    expect(settled).to.equal(false);
+
+    fixture.activateOpenedContext();
+    window.dispatchEvent(new Event("editor:scroll-position-restored"));
+
+    expect(await navigation).to.deep.equal({
+      status: "navigated",
+    });
+    expect(fixture.opened.navigationTransactions).to.have.length(1);
+  });
+
+  it("keeps the target file open without selecting when its captured state no longer matches", async function () {
+    const fixture = createProjectFixture({
+      openedText: "Other changed! text.",
+      openedRevision: projectRevision + 1,
+    });
+    const initialSelection = fixture.opened.view.state.selection.toJSON();
+
+    const result = await navigateToEditorEvidence(fixture.options);
+
+    expect(result).to.deep.equal({
+      status: "opened",
+    });
+    expect(
+      fixture.openDocument.calledOnceWithExactly(projectDocumentId),
+    ).to.equal(true);
+    expect(fixture.getContext()).to.equal(fixture.opened.context);
+    expect(fixture.opened.view.state.selection.toJSON()).to.deep.equal(
+      initialSelection,
+    );
+    expect(fixture.opened.navigationTransactions).to.have.length(0);
+    expect(fixture.opened.documentTransactions).to.have.length(0);
+    expect(fixture.opened.submitOp.called).to.equal(false);
+    expect(fixture.hashText.called).to.equal(false);
+  });
+
+  it("opens range-only project evidence without selecting an unverified range", async function () {
+    const fixture = createProjectFixture({
+      referenceOverrides: {
+        revision: undefined,
+        textHash: undefined,
+      },
+    });
+
+    const result = await navigateToEditorEvidence(fixture.options);
+
+    expect(result).to.deep.equal({
+      status: "opened",
+    });
+    expect(fixture.target).not.to.have.property("revision");
+    expect(fixture.target).not.to.have.property("textHash");
+    expect(
+      fixture.openDocument.calledOnceWithExactly(projectDocumentId),
+    ).to.equal(true);
+    expect(fixture.hashText.called).to.equal(false);
+    expect(fixture.opened.navigationTransactions).to.have.length(0);
+  });
+
+  const preOpenRefusals = [
+    {
+      name: "another live project",
+      code: "AI_EVIDENCE_PROJECT_MISMATCH",
+      options: {
+        currentProjectId: "project-other",
+      },
+    },
+    {
+      name: "a user without project read permission",
+      code: "AI_EVIDENCE_PERMISSION_DENIED",
+      options: {
+        permissions: {
+          read: false,
+          write: false,
+          trackedWrite: false,
+        },
+      },
+    },
+  ];
+
+  for (const refusal of preOpenRefusals) {
+    it(`refuses ${refusal.name} before resolving or opening a document`, async function () {
+      const fixture = createProjectFixture(refusal.options);
+
+      const result = await navigateToEditorEvidence(fixture.options);
+
+      expect(result).to.deep.equal({
+        status: "conflict",
+        code: refusal.code,
+      });
+      expect(fixture.resolveDocument.called).to.equal(false);
+      expect(fixture.openDocument.called).to.equal(false);
+      expect(fixture.opened.navigationTransactions).to.have.length(0);
+    });
+  }
+
+  const postOpenRefusals = [
+    {
+      name: "a project switch while the document opens",
+      code: "AI_EVIDENCE_PROJECT_MISMATCH",
+      mutate(opened) {
+        opened.context.projectId = "project-other";
+      },
+    },
+    {
+      name: "read permission revoked while the document opens",
+      code: "AI_EVIDENCE_PERMISSION_DENIED",
+      mutate(opened) {
+        opened.context.permissions.read = false;
+      },
+    },
+  ];
+
+  for (const refusal of postOpenRefusals) {
+    it(`refuses ${refusal.name} without selecting`, async function () {
+      const fixture = createProjectFixture({
+        afterOpen: refusal.mutate,
+      });
+
+      const result = await navigateToEditorEvidence(fixture.options);
+
+      expect(result).to.deep.equal({
+        status: "conflict",
+        code: refusal.code,
+      });
+      expect(fixture.resolveDocument.calledOnce).to.equal(true);
+      expect(fixture.openDocument.calledOnce).to.equal(true);
+      expect(fixture.hashText.called).to.equal(false);
+      expect(fixture.opened.navigationTransactions).to.have.length(0);
+    });
+  }
+
+  it("refuses a path that does not resolve to an exact document in the current project", async function () {
+    const fixture = createProjectFixture({
+      resolution: null,
+    });
+
+    const result = await navigateToEditorEvidence(fixture.options);
+
+    expect(result).to.deep.equal({
+      status: "conflict",
+      code: "AI_EVIDENCE_PATH_MISMATCH",
+    });
+    expect(fixture.resolveDocument.calledOnceWithExactly(projectPath)).to.equal(
+      true,
+    );
+    expect(fixture.openDocument.called).to.equal(false);
+    expect(fixture.opened.navigationTransactions).to.have.length(0);
+  });
+
+  it("rejects a forged outside-project path before reading live context", async function () {
+    const fixture = createProjectFixture();
+    const getContext = sinon.spy(fixture.getContext);
+
+    const result = await navigateToEditorEvidence({
+      ...fixture.options,
+      target: {
+        ...fixture.target,
+        path: "../outside.tex",
+      },
+      getContext,
+    });
+
+    expect(result).to.deep.equal({
+      status: "conflict",
+      code: "AI_EVIDENCE_REFERENCE_INVALID",
+    });
+    expect(getContext.called).to.equal(false);
+    expect(fixture.resolveDocument.called).to.equal(false);
+    expect(fixture.openDocument.called).to.equal(false);
   });
 });
 

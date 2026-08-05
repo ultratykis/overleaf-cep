@@ -1,6 +1,12 @@
 import { readFile } from "node:fs/promises";
 
-import { describe, expect, it } from "vitest";
+import logger from "@overleaf/logger";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  AI_REVIEWER_FAILURE_LOG_MESSAGE,
+  recordAiReviewerFailure,
+} from "../../../app/src/AiReviewerFailureLogger.mjs";
 
 const serverContentBoundary = [
   "../../../app/src/AgentGateway.mjs",
@@ -45,6 +51,51 @@ describe("AI reviewer: module shell privacy boundary", function () {
       "sessionStorage",
     ]) {
       expect(browserSource).not.toContain(forbiddenBrowserSink);
+    }
+  });
+
+  it("keeps distinctive manuscript text and a credential outside the host failure log", function () {
+    const manuscriptSentinel = "DISTINCTIVE_MANUSCRIPT_LOG_SENTINEL";
+    const credentialSentinel = "DISTINCTIVE_CREDENTIAL_LOG_SENTINEL";
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      recordAiReviewerFailure({
+        requestId: "privacy-request",
+        provider: "openai-compatible",
+        model: "safe-model",
+        scopeKind: "document",
+        failureCategory: "schema",
+        failureCode: "AI_PROVIDER_SCHEMA_INVALID",
+        elapsedMs: 42,
+        manuscript: manuscriptSentinel,
+        credential: credentialSentinel,
+      });
+
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: "privacy-request",
+          provider: "openai-compatible",
+          model: "safe-model",
+          scopeKind: "document",
+          failureCategory: "schema",
+          failureCode: "AI_PROVIDER_SCHEMA_INVALID",
+          elapsedMs: 42,
+        },
+        AI_REVIEWER_FAILURE_LOG_MESSAGE,
+      );
+      expect(Object.keys(warn.mock.calls[0][0]).sort()).toEqual([
+        "elapsedMs",
+        "failureCategory",
+        "failureCode",
+        "model",
+        "provider",
+        "requestId",
+        "scopeKind",
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(manuscriptSentinel);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(credentialSentinel);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

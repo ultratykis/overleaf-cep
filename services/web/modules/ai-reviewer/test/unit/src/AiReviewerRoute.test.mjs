@@ -204,7 +204,7 @@ function suggestionEvent(documentId = "document-0001") {
       model: "deterministic-v1",
       skill: "referee-review",
       createdAt,
-      status: "proposed",
+      status: "unresolved",
     },
   };
 }
@@ -227,14 +227,16 @@ function toolCallEvent(arguments_) {
 const publicProviderError = {
   code: "AI_PROVIDER_ERROR",
   category: "provider",
-  message: "The AI provider request failed.",
+  message:
+    "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
   retryable: true,
 };
 
 const publicProtocolError = {
   code: "AI_STREAM_PROTOCOL_ERROR",
   category: "schema",
-  message: "The AI provider returned invalid stream data.",
+  message:
+    "AI Reviewer could not use the model response. Try narrowing the review scope, switching to a more capable model, or checking the AI Reviewer settings.",
   retryable: false,
 };
 
@@ -357,15 +359,24 @@ describe("AI reviewer: module shell authenticated route", function () {
     const testConnection = vi.fn();
     const stream = vi.fn();
     const discussionStream = vi.fn();
+    const getWorkspace = vi.fn();
+    const saveWorkspace = vi.fn();
+    const getCommentProvenance = vi.fn();
+    const markCommentProvenance = vi.fn();
+    const deleteCommentProvenance = vi.fn();
+    const deleteDiscussion = vi.fn();
+    const deleteWorkspace = vi.fn();
     const requireLogin = vi.fn(() => login);
     const get = vi.fn();
     const post = vi.fn();
     const put = vi.fn();
-    const webRouter = { get, post, put };
+    const remove = vi.fn();
+    const webRouter = { get, post, put, delete: remove };
     const anotherRouter = {
       get: vi.fn(),
       post: vi.fn(),
       put: vi.fn(),
+      delete: vi.fn(),
     };
     const router = createAiReviewerRouter({
       authenticationController: { requireLogin },
@@ -379,6 +390,13 @@ describe("AI reviewer: module shell authenticated route", function () {
       testConnection,
       stream,
       discussionStream,
+      getWorkspace,
+      saveWorkspace,
+      getCommentProvenance,
+      markCommentProvenance,
+      deleteCommentProvenance,
+      deleteDiscussion,
+      deleteWorkspace,
     });
 
     router.apply(webRouter);
@@ -386,7 +404,8 @@ describe("AI reviewer: module shell authenticated route", function () {
     router.apply(anotherRouter);
 
     expect(requireLogin).toHaveBeenCalledTimes(2);
-    expect(get).toHaveBeenCalledExactlyOnceWith(
+    expect(get).toHaveBeenNthCalledWith(
+      1,
       "/project/:project_id/ai-reviewer/config",
       login,
       rateLimit,
@@ -394,13 +413,50 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       getConfiguration,
     );
-    expect(put).toHaveBeenCalledExactlyOnceWith(
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      "/project/:project_id/ai-reviewer/workspace",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      getWorkspace,
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      3,
+      "/project/:project_id/ai-reviewer/comment-provenance",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      getCommentProvenance,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      1,
       "/project/:project_id/ai-reviewer/config",
       login,
       rateLimit,
       blockRestricted,
       ensureCanRead,
       saveConfiguration,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      2,
+      "/project/:project_id/ai-reviewer/workspace",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      saveWorkspace,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      3,
+      "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      markCommentProvenance,
     );
     expect(post).toHaveBeenNthCalledWith(
       1,
@@ -429,12 +485,41 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       discussionStream,
     );
-    expect(anotherRouter.get).toHaveBeenCalledOnce();
-    expect(anotherRouter.put).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenNthCalledWith(
+      1,
+      "/project/:project_id/ai-reviewer/workspace/discussions/:discussion_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteDiscussion,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      2,
+      "/project/:project_id/ai-reviewer/workspace",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteWorkspace,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      3,
+      "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteCommentProvenance,
+    );
+    expect(anotherRouter.get).toHaveBeenCalledTimes(3);
+    expect(anotherRouter.put).toHaveBeenCalledTimes(3);
     expect(anotherRouter.post).toHaveBeenCalledTimes(3);
+    expect(anotherRouter.delete).toHaveBeenCalledTimes(3);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
     expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);
+    expect(anotherRouter.delete.mock.calls).toEqual(remove.mock.calls);
   });
 
   it("streams validated fake-provider events as NDJSON", async function () {
@@ -458,6 +543,182 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(parseNdjson(response)).toEqual(events());
     expect(gateway.calls).toEqual([request()]);
   });
+
+  it.each([
+    {
+      label: "abort",
+      category: "aborted",
+      internalCode: "AI_REQUEST_ABORTED",
+      publicError: {
+        code: "AI_REQUEST_ABORTED",
+        category: "aborted",
+        message:
+          "The AI reviewer request was cancelled. Run it again if you still need the result.",
+        retryable: false,
+      },
+    },
+    {
+      label: "authentication failure",
+      category: "authentication",
+      internalCode: "AI_PROVIDER_AUTHENTICATION_FAILED",
+      publicError: {
+        code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+        category: "authentication",
+        message:
+          "The AI provider rejected the credentials. Check the credential in AI Reviewer settings, then try again.",
+        retryable: false,
+      },
+    },
+    {
+      label: "configuration failure",
+      category: "configuration",
+      internalCode: "AI_PROVIDER_NOT_CONFIGURED",
+      publicError: {
+        code: "AI_PROVIDER_NOT_CONFIGURED",
+        category: "configuration",
+        message:
+          "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
+        retryable: false,
+      },
+    },
+    {
+      label: "network failure",
+      category: "network",
+      internalCode: "AI_PROVIDER_NETWORK_FAILED",
+      publicError: {
+        code: "AI_PROVIDER_NETWORK_ERROR",
+        category: "network",
+        message:
+          "AI Reviewer could not reach the provider. Check the provider endpoint and network connection, then try again.",
+        retryable: true,
+      },
+    },
+    {
+      label: "provider failure",
+      category: "provider",
+      internalCode: "AI_PROVIDER_REQUEST_FAILED",
+      publicError: {
+        code: "AI_PROVIDER_ERROR",
+        category: "provider",
+        message:
+          "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
+        retryable: true,
+      },
+    },
+    {
+      label: "rate limit",
+      category: "rate-limit",
+      internalCode: "AI_PROVIDER_RATE_LIMITED",
+      publicError: {
+        code: "AI_PROVIDER_RATE_LIMITED",
+        category: "rate-limit",
+        message:
+          "The AI provider rate limit was reached. Wait a little, then try again.",
+        retryable: true,
+      },
+    },
+    {
+      label: "structured-output schema rejection",
+      category: "schema",
+      internalCode: "AI_PROVIDER_SCHEMA_INVALID",
+      publicError: {
+        code: "AI_STREAM_PROTOCOL_ERROR",
+        category: "schema",
+        message:
+          "AI Reviewer could not use the model response. Try narrowing the review scope, switching to a more capable model, or checking the AI Reviewer settings.",
+        retryable: false,
+      },
+    },
+    {
+      label: "timeout",
+      category: "timeout",
+      internalCode: "AI_REQUEST_TIMEOUT",
+      publicError: {
+        code: "AI_REQUEST_TIMEOUT",
+        category: "timeout",
+        message:
+          "The AI reviewer request timed out. Try again or narrow the review scope.",
+        retryable: true,
+      },
+    },
+    {
+      label: "unknown failure",
+      category: "unknown",
+      internalCode: null,
+      publicError: {
+        code: "AI_PROVIDER_ERROR",
+        category: "unknown",
+        message:
+          "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
+        retryable: true,
+      },
+    },
+  ])(
+    "records classified metadata and preserves the four-field public payload for $label",
+    async function ({ category, internalCode, publicError }) {
+      const privateMessage = `PRIVATE_${category}_FAILURE_DETAIL`;
+      const gateway = {
+        async *stream() {
+          yield events()[0];
+          if (internalCode == null) {
+            throw new Error(privateMessage);
+          }
+          throw new AgentGatewayError(privateMessage, {
+            code: internalCode,
+            category,
+            retryable: false,
+          });
+        },
+      };
+      const failureRecorder = vi.fn();
+      const elapsedNow = vi
+        .fn()
+        .mockReturnValueOnce(100)
+        .mockReturnValue(137.6);
+      const controller = createAiReviewerController({
+        gatewayFactory: () => gateway,
+        now: () => createdAt,
+        eventId: () => "event-error",
+        elapsedNow,
+        failureRecorder,
+      });
+      const response = new FakeResponse();
+
+      await controller.stream(httpRequest(), response);
+
+      const terminalEvent = parseNdjson(response).at(-1);
+      expect(terminalEvent).toMatchObject({
+        type: "error",
+        eventId: "event-error",
+        requestId: "request-0001",
+        sequence: 1,
+        createdAt,
+        error: publicError,
+      });
+      if (terminalEvent?.type !== "error") {
+        throw new Error("Expected a terminal error event.");
+      }
+      expect(Object.keys(terminalEvent.error).sort()).toEqual([
+        "category",
+        "code",
+        "message",
+        "retryable",
+      ]);
+      expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+        requestId: "request-0001",
+        provider: "fake",
+        model: "deterministic-v1",
+        scopeKind: "project",
+        failureCategory: category,
+        failureCode: internalCode ?? "AI_PROVIDER_ERROR",
+        elapsedMs: 38,
+      });
+      expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+        privateMessage,
+      );
+      expect(response.chunks.join("")).not.toContain(privateMessage);
+    },
+  );
 
   it("streams discussion events through the discussion gateway path", async function () {
     const reviewStream = vi.fn();
@@ -491,6 +752,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       request: discussionRequest(),
       httpRequest: rawHttpRequest,
       signal: expect.any(AbortSignal),
+      setFailureProvider: expect.any(Function),
     });
     expect(streamDiscussion).toHaveBeenCalledExactlyOnceWith(
       discussionRequest(),
@@ -583,7 +845,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_REQUEST_TIMEOUT",
           category: "timeout",
-          message: "The AI reviewer request timed out.",
+          message:
+            "The AI reviewer request timed out. Try again or narrow the review scope.",
           retryable: true,
         },
       },
@@ -607,7 +870,8 @@ describe("AI reviewer: module shell authenticated route", function () {
           error: {
             code: "AI_REQUEST_TIMEOUT",
             category: "timeout",
-            message: "The AI reviewer request timed out.",
+            message:
+              "The AI reviewer request timed out. Try again or narrow the review scope.",
             retryable: true,
           },
         },
@@ -783,7 +1047,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_REQUEST_TIMEOUT",
           category: "timeout",
-          message: "The AI reviewer request timed out.",
+          message:
+            "The AI reviewer request timed out. Try again or narrow the review scope.",
           retryable: true,
         },
       },
@@ -1027,6 +1292,7 @@ describe("AI reviewer: module shell authenticated route", function () {
 
   it("normalizes a secret-bearing provider error event", async function () {
     const secretSentinel = "PRIVATE_PROVIDER_SECRET";
+    const failureRecorder = vi.fn();
     const gateway = {
       async *stream() {
         yield {
@@ -1048,6 +1314,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       gatewayFactory: () => gateway,
       now: () => createdAt,
       eventId: () => "event-error",
+      elapsedNow: vi.fn().mockReturnValueOnce(200).mockReturnValue(212.2),
+      failureRecorder,
     });
     const response = new FakeResponse();
 
@@ -1064,10 +1332,23 @@ describe("AI reviewer: module shell authenticated route", function () {
       },
     ]);
     expect(response.chunks.join("")).not.toContain(secretSentinel);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: "request-0001",
+      provider: null,
+      model: null,
+      scopeKind: "project",
+      failureCategory: "provider",
+      failureCode: "AI_PROVIDER_FAILED",
+      elapsedMs: 12,
+    });
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      secretSentinel,
+    );
   });
 
   it("cancels the gateway when the browser closes the stream", async function () {
     const never = new Promise(() => {});
+    const failureRecorder = vi.fn();
     const gateway = new ScriptedFakeAgentGateway({
       events: events(),
       beforeEvent: ({ index }) => (index === 1 ? never : undefined),
@@ -1076,6 +1357,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       gatewayFactory: () => gateway,
       now: () => createdAt,
       eventId: () => "event-error",
+      elapsedNow: vi.fn().mockReturnValueOnce(50).mockReturnValue(59.7),
+      failureRecorder,
     });
     const response = new FakeResponse();
     const firstWrite = new Promise((resolve) =>
@@ -1091,6 +1374,15 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(gateway.emittedEventCount).toBe(1);
     expect(response.chunks).toHaveLength(1);
     expect(response.writableEnded).toBe(false);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: "request-0001",
+      provider: "fake",
+      model: "deterministic-v1",
+      scopeKind: "project",
+      failureCategory: "aborted",
+      failureCode: "AI_REQUEST_ABORTED",
+      elapsedMs: 10,
+    });
   });
 
   it("settles a browser disconnect even when the gateway ignores cancellation", async function () {
@@ -1142,7 +1434,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_REQUEST_TIMEOUT",
           category: "timeout",
-          message: "The AI reviewer request timed out.",
+          message:
+            "The AI reviewer request timed out. Try again or narrow the review scope.",
           retryable: true,
         },
       },
@@ -1177,7 +1470,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_REQUEST_TIMEOUT",
           category: "timeout",
-          message: "The AI reviewer request timed out.",
+          message:
+            "The AI reviewer request timed out. Try again or narrow the review scope.",
           retryable: true,
         },
       },
@@ -1262,7 +1556,8 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_PROVIDER_ERROR",
           category: "unknown",
-          message: "The AI provider request failed.",
+          message:
+            "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
           retryable: true,
         },
       },
@@ -1271,13 +1566,20 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(gatewayFactory).toHaveBeenCalledTimes(2);
   });
 
-  it("redacts an unknown failure and serves the next request", async function () {
+  it("keeps distinctive manuscript text and a credential out of a failure record and public response", async function () {
     const manuscriptSentinel = "PRIVATE_MANUSCRIPT_SENTINEL";
-    const secretSentinel = "PRIVATE_PROVIDER_SECRET";
+    const credentialSentinel = "PRIVATE_PROVIDER_CREDENTIAL";
+    const failingRequest = {
+      ...documentRequest(),
+      scope: {
+        ...documentRequest().scope,
+        text: manuscriptSentinel,
+      },
+    };
     const failingGateway = {
       async *stream() {
         yield* [];
-        throw new Error(`${manuscriptSentinel}:${secretSentinel}`);
+        throw new Error(credentialSentinel);
       },
     };
     const succeedingGateway = new ScriptedFakeAgentGateway({
@@ -1287,15 +1589,22 @@ describe("AI reviewer: module shell authenticated route", function () {
       .fn()
       .mockReturnValueOnce(failingGateway)
       .mockReturnValueOnce(succeedingGateway);
+    const failureRecorder = vi.fn();
     const controller = createAiReviewerController({
       gatewayFactory,
       now: () => createdAt,
       eventId: () => "event-error",
+      elapsedNow: vi
+        .fn()
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(25)
+        .mockReturnValue(50),
+      failureRecorder,
     });
     const failedResponse = new FakeResponse();
     const successfulResponse = new FakeResponse();
 
-    await controller.stream(httpRequest(), failedResponse);
+    await controller.stream(httpRequest(failingRequest), failedResponse);
     await controller.stream(httpRequest(), successfulResponse);
 
     expect(parseNdjson(failedResponse)).toEqual([
@@ -1308,13 +1617,29 @@ describe("AI reviewer: module shell authenticated route", function () {
         error: {
           code: "AI_PROVIDER_ERROR",
           category: "unknown",
-          message: "The AI provider request failed.",
+          message:
+            "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
           retryable: true,
         },
       },
     ]);
     expect(failedResponse.chunks.join("")).not.toContain(manuscriptSentinel);
-    expect(failedResponse.chunks.join("")).not.toContain(secretSentinel);
+    expect(failedResponse.chunks.join("")).not.toContain(credentialSentinel);
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: "request-0001",
+      provider: null,
+      model: null,
+      scopeKind: "document",
+      failureCategory: "unknown",
+      failureCode: "AI_PROVIDER_ERROR",
+      elapsedMs: 25,
+    });
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      manuscriptSentinel,
+    );
+    expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+      credentialSentinel,
+    );
     expect(parseNdjson(successfulResponse)).toEqual(events());
     expect(gatewayFactory).toHaveBeenCalledTimes(2);
   });

@@ -69,7 +69,7 @@ function suggestion(overrides = {}) {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt,
-    status: "proposed",
+    status: "unresolved",
     ...overrides,
   };
 }
@@ -95,7 +95,7 @@ describe("AI reviewer: single document", function () {
       suggestion: suggestion(),
     });
 
-    expect(prepared.status).to.equal("proposed");
+    expect(prepared.status).to.equal("unresolved");
     expect(source.text).to.equal(baseText);
 
     const result = preflightSingleDocumentSuggestion({

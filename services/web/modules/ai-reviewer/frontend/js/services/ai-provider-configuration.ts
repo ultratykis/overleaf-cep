@@ -6,48 +6,72 @@ import {
 } from "@/infrastructure/fetch-json";
 
 export type AiProviderConfiguration = {
-  provider: "ollama";
+  provider: "openai-compatible";
   baseUrl: string;
   model: string;
   contextLength: number;
+  credentialSet: boolean;
+  credentialUpdatedAt: string | null;
+};
+
+export type AiProviderConfigurationWrite = {
+  provider: "openai-compatible";
+  baseUrl: string;
+  model: string;
+  contextLength: number;
+  credential?: string | null;
 };
 
 export type AiProviderConfigurationResponse = {
   configured: boolean;
   config: AiProviderConfiguration | null;
-  classification: "local" | null;
+  classification: "local" | "remote" | null;
 };
 
 export type AiProviderConnectionResponse = {
   ok: true;
-  provider: "ollama";
+  provider: "openai-compatible";
   model: string;
-  classification: "local";
+  classification: "local" | "remote";
 };
 
-const errorMessages = {
-  AI_PROVIDER_NETWORK_FAILED:
-    "Ollama is unavailable. Start Ollama and try the connection again.",
-  AI_PROVIDER_NOT_CONFIGURED:
-    "No AI provider is configured. Save the provider settings first.",
-  AI_REQUEST_TIMEOUT: "Ollama did not respond in time. Try the request again.",
-  AI_PROVIDER_ERROR:
-    "The AI provider request failed. Check Ollama and try again.",
-} as const;
+const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
+  "AI_PROVIDER_AUTHENTICATION_ERROR",
+  "AI_PROVIDER_NETWORK_FAILED",
+  "AI_PROVIDER_NOT_CONFIGURED",
+  "AI_PROVIDER_RATE_LIMITED",
+  "AI_PROVIDER_SCHEMA_INVALID",
+  "AI_REQUEST_TIMEOUT",
+  "AI_PROVIDER_ERROR",
+]);
 
-type ErrorCode = keyof typeof errorMessages;
+export type AiProviderConfigurationClientErrorCode =
+  | "AI_PROVIDER_AUTHENTICATION_ERROR"
+  | "AI_PROVIDER_NETWORK_FAILED"
+  | "AI_PROVIDER_NOT_CONFIGURED"
+  | "AI_PROVIDER_RATE_LIMITED"
+  | "AI_PROVIDER_SCHEMA_INVALID"
+  | "AI_REQUEST_TIMEOUT"
+  | "AI_PROVIDER_ERROR";
 
-export class AiProviderConfigurationClientError extends Error {}
+export class AiProviderConfigurationClientError extends Error {
+  constructor(public readonly code: AiProviderConfigurationClientErrorCode) {
+    super(code);
+    this.name = "AiProviderConfigurationClientError";
+  }
+}
 
 function toClientError(error: unknown) {
   const code =
     error instanceof FetchError && typeof error.data?.error?.code === "string"
       ? error.data.error.code
       : "AI_PROVIDER_ERROR";
-  const safeCode = Object.hasOwn(errorMessages, code)
-    ? (code as ErrorCode)
+  const safeCode = errorCodes.has(
+    code as AiProviderConfigurationClientErrorCode,
+  )
+    ? (code as AiProviderConfigurationClientErrorCode)
     : "AI_PROVIDER_ERROR";
-  return new AiProviderConfigurationClientError(errorMessages[safeCode]);
+  return new AiProviderConfigurationClientError(safeCode);
 }
 
 async function request<T>(
@@ -78,15 +102,18 @@ export function getAiProviderConfiguration(
 
 export function saveAiProviderConfiguration(
   projectId: string,
-  config: AiProviderConfiguration,
+  config: AiProviderConfigurationWrite,
   signal: AbortSignal,
 ) {
-  const body = {
+  const body: AiProviderConfigurationWrite = {
     provider: config.provider,
     baseUrl: config.baseUrl,
     model: config.model,
     contextLength: config.contextLength,
   };
+  if (config.credential !== undefined) {
+    body.credential = config.credential;
+  }
   return request(signal, () =>
     putJSON<AiProviderConfigurationResponse>(
       `/project/${projectId}/ai-reviewer/config`,

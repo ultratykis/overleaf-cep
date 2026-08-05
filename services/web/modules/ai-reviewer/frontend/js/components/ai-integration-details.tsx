@@ -12,6 +12,7 @@ import {
   OLModalTitle,
 } from "@/shared/components/ol/ol-modal";
 import OLNotification from "@/shared/components/ol/ol-notification";
+import type { TFunction } from "i18next";
 import {
   type FormEvent,
   useCallback,
@@ -19,11 +20,14 @@ import {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   AiProviderConfigurationClientError,
   type AiProviderConfiguration,
+  type AiProviderConfigurationClientErrorCode,
   type AiProviderConfigurationResponse,
+  type AiProviderConfigurationWrite,
   getAiProviderConfiguration,
   saveAiProviderConfiguration,
   testAiProviderConnection,
@@ -31,10 +35,20 @@ import {
 
 type OperationKind = "save" | "test";
 type Operation = { generation: number; controller: AbortController };
-type Notice = { type: "success" | "error"; content: string };
-type ConfigurationDraft = Omit<AiProviderConfiguration, "contextLength"> & {
+type Notice =
+  | { type: "success"; kind: "connectionSuccessful" }
+  | {
+      type: "error";
+      kind: "generic" | AiProviderConfigurationClientErrorCode;
+    };
+type ConfigurationDraft = {
+  provider: AiProviderConfiguration["provider"];
+  baseUrl: string;
+  model: string;
   contextLength: string;
+  credential: string;
 };
+type ConfigurationField = "baseUrl" | "model" | "contextLength" | "credential";
 
 type Props = {
   projectId: string;
@@ -44,20 +58,20 @@ type Props = {
   testConnection: typeof testAiProviderConnection;
 };
 
-const genericError = "Something went wrong. Check the settings and try again.";
-
 const emptyConfiguration: ConfigurationDraft = {
-  provider: "ollama",
+  provider: "openai-compatible",
   baseUrl: "",
   model: "",
   contextLength: "",
+  credential: "",
 };
 
-const fields = [
-  ["baseUrl", "Base URL"],
-  ["model", "Model"],
-  ["contextLength", "Context length (tokens)"],
-] as const;
+const fields: ConfigurationField[] = [
+  "baseUrl",
+  "model",
+  "contextLength",
+  "credential",
+];
 
 function draftFromConfiguration(
   configuration: AiProviderConfiguration,
@@ -67,17 +81,58 @@ function draftFromConfiguration(
     baseUrl: configuration.baseUrl,
     model: configuration.model,
     contextLength: String(configuration.contextLength),
+    credential: "",
   };
 }
 
+function fieldLabel(field: ConfigurationField, t: TFunction): string {
+  switch (field) {
+    case "baseUrl":
+      return t("ai_reviewer_provider_base_url");
+    case "model":
+      return t("ai_reviewer_provider_model");
+    case "contextLength":
+      return t("ai_reviewer_provider_context_length");
+    case "credential":
+      return t("ai_reviewer_provider_credential");
+  }
+}
+
+function genericErrorNotice(): Notice {
+  return { type: "error", kind: "generic" };
+}
+
 function errorNotice(error: unknown): Notice {
-  return {
-    type: "error",
-    content:
-      error instanceof AiProviderConfigurationClientError
-        ? error.message
-        : genericError,
-  };
+  if (!(error instanceof AiProviderConfigurationClientError)) {
+    return genericErrorNotice();
+  }
+
+  return { type: "error", kind: error.code };
+}
+
+function noticeContent(notice: Notice, t: TFunction): string {
+  if (notice.type === "success") {
+    return t("ai_reviewer_provider_connection_successful");
+  }
+
+  switch (notice.kind) {
+    case "AI_PROVIDER_AUTHENTICATION_ERROR":
+      return t("ai_reviewer_error_provider_credentials_rejected");
+    case "AI_PROVIDER_NETWORK_FAILED":
+      return t("ai_reviewer_provider_network_failed");
+    case "AI_PROVIDER_NOT_CONFIGURED":
+      return t("ai_reviewer_provider_not_configured");
+    case "AI_PROVIDER_RATE_LIMITED":
+      return t("ai_reviewer_error_provider_rate_limited");
+    case "AI_PROVIDER_SCHEMA_INVALID":
+      return t("ai_reviewer_error_provider_invalid_stream");
+    case "AI_REQUEST_TIMEOUT":
+      return t("ai_reviewer_provider_request_timeout");
+    case "AI_PROVIDER_ERROR":
+      return t("ai_reviewer_provider_request_failed");
+    case "generic":
+      return t("ai_reviewer_provider_generic_error");
+  }
 }
 
 export function AiIntegrationDetailsView({
@@ -87,9 +142,13 @@ export function AiIntegrationDetailsView({
   saveConfiguration,
   testConnection,
 }: Props) {
+  const { t } = useTranslation();
   const [saved, setSaved] = useState<
     AiProviderConfiguration | null | undefined
   >();
+  const [classification, setClassification] = useState<
+    "local" | "remote" | null
+  >(null);
   const [draft, setDraft] = useState({ ...emptyConfiguration });
   const [busy, setBusy] = useState<OperationKind | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -134,9 +193,12 @@ export function AiIntegrationDetailsView({
             baseUrl: response.config.baseUrl,
             model: response.config.model,
             contextLength: response.config.contextLength,
+            credentialSet: response.config.credentialSet,
+            credentialUpdatedAt: response.config.credentialUpdatedAt,
           }
         : null;
       setSaved(next);
+      setClassification(response.classification);
       setDraft(next ? draftFromConfiguration(next) : { ...emptyConfiguration });
       setBusy(null);
       setNotice(null);
@@ -147,6 +209,7 @@ export function AiIntegrationDetailsView({
   useEffect(() => {
     const operation = begin();
     setSaved(undefined);
+    setClassification(null);
     setDraft({ ...emptyConfiguration });
     setBusy(null);
     setNotice(null);
@@ -165,7 +228,9 @@ export function AiIntegrationDetailsView({
   const dirty =
     saved?.baseUrl !== draft.baseUrl ||
     saved?.model !== draft.model ||
-    (saved == null ? "" : String(saved.contextLength)) !== draft.contextLength;
+    (saved == null ? "" : String(saved.contextLength)) !==
+      draft.contextLength ||
+    draft.credential !== "";
   const parsedContextLength = Number(draft.contextLength);
   const valid =
     draft.baseUrl.trim() !== "" &&
@@ -176,10 +241,7 @@ export function AiIntegrationDetailsView({
   const canSave = saved !== undefined && busy === null && dirty && valid;
   const canTest = saved != null && busy === null && !dirty;
 
-  const updateDraft = (
-    field: "baseUrl" | "model" | "contextLength",
-    value: string,
-  ) => {
+  const updateDraft = (field: ConfigurationField, value: string) => {
     if (busy) cancel();
     setDraft((current) => ({ ...current, [field]: value }));
     setBusy(null);
@@ -208,12 +270,15 @@ export function AiIntegrationDetailsView({
   const handleSave = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!canSave) return;
-    const requested: AiProviderConfiguration = {
+    const requested: AiProviderConfigurationWrite = {
       provider: draft.provider,
       baseUrl: draft.baseUrl,
       model: draft.model,
       contextLength: parsedContextLength,
     };
+    if (draft.credential !== "") {
+      requested.credential = draft.credential;
+    }
     void run("save", (signal) =>
       saveConfiguration(projectId, requested, signal),
     ).then((response) => {
@@ -222,7 +287,7 @@ export function AiIntegrationDetailsView({
         applyResponse(response);
       } else {
         setBusy(null);
-        setNotice({ type: "error", content: genericError });
+        setNotice(genericErrorNotice());
       }
     });
   };
@@ -233,7 +298,10 @@ export function AiIntegrationDetailsView({
       (response) => {
         if (!response) return;
         setBusy(null);
-        setNotice({ type: "success", content: "Connection successful" });
+        setNotice({
+          type: "success",
+          kind: "connectionSuccessful",
+        });
       },
     );
   };
@@ -245,32 +313,72 @@ export function AiIntegrationDetailsView({
 
   return (
     <OLModal show onHide={handleHide}>
-      <OLModalHeader closeButton closeLabel="Close">
-        <OLModalTitle>AI reviewer</OLModalTitle>
+      <OLModalHeader
+        closeButton
+        closeLabel={t("ai_reviewer_provider_settings_close")}
+      >
+        <OLModalTitle>{t("ai_reviewer_title")}</OLModalTitle>
       </OLModalHeader>
       <OLForm onSubmit={handleSave}>
         <OLModalBody>
-          <p className="mb-0">Provider: Ollama</p>
-          {fields.map(([field, label]) => (
+          <p className="mb-0">{t("ai_reviewer_provider_openai_compatible")}</p>
+          {fields.map((field) => (
             <OLFormGroup
               key={field}
               controlId={`ai-reviewer-${field}`}
               className="mt-3"
             >
-              <OLFormLabel>{label}</OLFormLabel>
+              <OLFormLabel>{fieldLabel(field, t)}</OLFormLabel>
               <OLFormControl
-                type={field === "contextLength" ? "number" : "text"}
+                type={
+                  field === "contextLength"
+                    ? "number"
+                    : field === "credential"
+                      ? "password"
+                      : "text"
+                }
                 min={field === "contextLength" ? 1 : undefined}
                 step={field === "contextLength" ? 1 : undefined}
                 value={draft[field]}
                 onChange={(event) => updateDraft(field, event.target.value)}
                 disabled={saved === undefined}
-                autoComplete="off"
+                autoComplete={field === "credential" ? "new-password" : "off"}
               />
             </OLFormGroup>
           ))}
-          {saved && <p className="mt-3 mb-0">Local</p>}
-          {notice && <OLNotification {...notice} />}
+          {saved && (
+            <div className="mt-3 text-break">
+              {classification && (
+                <p className="mb-0">
+                  {classification === "local"
+                    ? t("ai_reviewer_provider_local")
+                    : t("ai_reviewer_provider_remote")}
+                </p>
+              )}
+              <p className="mt-1 mb-0">
+                {saved.credentialSet
+                  ? t("ai_reviewer_provider_credential_set")
+                  : t("ai_reviewer_provider_credential_not_set")}
+              </p>
+              {saved.credentialUpdatedAt && (
+                <time
+                  className="d-block mt-1"
+                  dateTime={saved.credentialUpdatedAt}
+                  title={saved.credentialUpdatedAt}
+                >
+                  {t("ai_reviewer_last_updated", {
+                    updatedAt: saved.credentialUpdatedAt,
+                  })}
+                </time>
+              )}
+            </div>
+          )}
+          {notice && (
+            <OLNotification
+              type={notice.type}
+              content={noticeContent(notice, t)}
+            />
+          )}
         </OLModalBody>
         <OLModalFooter>
           <OLButton
@@ -279,10 +387,10 @@ export function AiIntegrationDetailsView({
             onClick={handleTest}
             disabled={!canTest}
           >
-            Test connection
+            {t("ai_reviewer_provider_test_connection")}
           </OLButton>
           <OLButton type="submit" variant="primary" disabled={!canSave}>
-            Save
+            {t("ai_reviewer_provider_save")}
           </OLButton>
         </OLModalFooter>
       </OLForm>

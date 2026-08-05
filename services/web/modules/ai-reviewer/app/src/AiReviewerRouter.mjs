@@ -15,6 +15,13 @@
  *   testConnection: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
  *   discussionStream: (...args: any[]) => unknown,
+ *   getWorkspace: (...args: any[]) => unknown,
+ *   saveWorkspace: (...args: any[]) => unknown,
+ *   getCommentProvenance: (...args: any[]) => unknown,
+ *   markCommentProvenance: (...args: any[]) => unknown,
+ *   deleteCommentProvenance: (...args: any[]) => unknown,
+ *   deleteDiscussion: (...args: any[]) => unknown,
+ *   deleteWorkspace: (...args: any[]) => unknown,
  * }} dependencies
  */
 export function createAiReviewerRouter({
@@ -26,6 +33,13 @@ export function createAiReviewerRouter({
   testConnection,
   stream,
   discussionStream,
+  getWorkspace,
+  saveWorkspace,
+  getCommentProvenance,
+  markCommentProvenance,
+  deleteCommentProvenance,
+  deleteDiscussion,
+  deleteWorkspace,
 }) {
   const appliedRouters = new WeakSet();
 
@@ -35,6 +49,7 @@ export function createAiReviewerRouter({
      *   get: (...args: any[]) => unknown,
      *   put: (...args: any[]) => unknown,
      *   post: (...args: any[]) => unknown,
+     *   delete: (...args: any[]) => unknown,
      * }} webRouter
      */
     apply(webRouter) {
@@ -56,10 +71,30 @@ export function createAiReviewerRouter({
         ...commonMiddleware,
         getConfiguration,
       );
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/workspace",
+        ...commonMiddleware,
+        getWorkspace,
+      );
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/comment-provenance",
+        ...commonMiddleware,
+        getCommentProvenance,
+      );
       webRouter.put(
         "/project/:project_id/ai-reviewer/config",
         ...commonMiddleware,
         saveConfiguration,
+      );
+      webRouter.put(
+        "/project/:project_id/ai-reviewer/workspace",
+        ...commonMiddleware,
+        saveWorkspace,
+      );
+      webRouter.put(
+        "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
+        ...commonMiddleware,
+        markCommentProvenance,
       );
       webRouter.post(
         "/project/:project_id/ai-reviewer/connection-test",
@@ -75,6 +110,21 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/discussion-stream",
         ...commonMiddleware,
         discussionStream,
+      );
+      webRouter.delete(
+        "/project/:project_id/ai-reviewer/workspace/discussions/:discussion_id",
+        ...commonMiddleware,
+        deleteDiscussion,
+      );
+      webRouter.delete(
+        "/project/:project_id/ai-reviewer/workspace",
+        ...commonMiddleware,
+        deleteWorkspace,
+      );
+      webRouter.delete(
+        "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
+        ...commonMiddleware,
+        deleteCommentProvenance,
       );
     },
   };

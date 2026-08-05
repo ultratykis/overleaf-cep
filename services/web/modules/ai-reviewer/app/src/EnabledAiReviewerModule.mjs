@@ -2,6 +2,8 @@
 
 /** @import { WebModule } from '../../../../types/web-module' */
 
+import hooks from "./AiReviewerCleanupHooks.mjs";
+
 /**
  * Startup remains inert. The authenticated router creates provider state only
  * when a user explicitly starts a request.
@@ -29,6 +31,7 @@ const router = {
 
 /** @type {WebModule} */
 const EnabledAiReviewerModule = {
+  hooks,
   router,
   start,
 };

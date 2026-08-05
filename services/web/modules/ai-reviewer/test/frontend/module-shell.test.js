@@ -6,6 +6,7 @@ const {
 } = require("@testing-library/react");
 const { expect } = require("chai");
 const React = require("react");
+const { useTranslation } = require("react-i18next");
 const sinon = require("sinon");
 
 const {
@@ -92,6 +93,18 @@ function responseForEvents() {
 }
 
 describe("AI reviewer: module shell", function () {
+  it("renders a missing translation key instead of a blank label", function () {
+    const missingKey = "ai_reviewer_intentionally_missing_translation";
+    const MissingTranslation = () => {
+      const { t } = useTranslation();
+      return React.createElement("span", null, t(missingKey));
+    };
+
+    render(React.createElement(MissingTranslation));
+
+    expect(screen.getByText(missingKey).textContent).to.equal(missingKey);
+  });
+
   it("parses a typed incremental NDJSON stream with authenticated fetch headers", async function () {
     const fetchImpl = sinon.stub().resolves(responseForEvents());
     const received = [];

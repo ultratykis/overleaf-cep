@@ -2,6 +2,7 @@
 
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { parseAiReviewerProviderConfig } from "./AiReviewerProviderConfig.mjs";
+import { parseOpenAiCompatibleBaseUrl } from "./OllamaEndpointPolicy.mjs";
 import { OllamaOpenAiTransport } from "./OllamaOpenAiTransport.mjs";
 
 /** @param {AbortSignal | undefined} signal */
@@ -26,7 +27,7 @@ function assertCompatible(result) {
     typeof value.usage !== "object"
   ) {
     throw new AgentGatewayError(
-      "The Ollama provider failed the compatibility check.",
+      "The OpenAI-compatible provider failed the compatibility check.",
       {
         code: "AI_PROVIDER_COMPATIBILITY_FAILED",
         category: "provider",
@@ -40,8 +41,9 @@ function assertCompatible(result) {
 export function createOllamaProviderService(dependencies = {}) {
   const transportFactory =
     dependencies.transportFactory ??
-    ((/** @type {{ baseUrl: string, modelTag: string }} */ options) =>
-      new OllamaOpenAiTransport(options));
+    ((
+      /** @type {{ baseUrl: string, credential?: string, modelTag: string }} */ options,
+    ) => new OllamaOpenAiTransport(options));
   return {
     /**
      * @param {unknown} input
@@ -52,6 +54,7 @@ export function createOllamaProviderService(dependencies = {}) {
       const config = parseAiReviewerProviderConfig(input);
       const transport = transportFactory({
         baseUrl: config.baseUrl,
+        credential: config.credential ?? undefined,
         modelTag: config.model,
       });
       const result = await transport.generateChat(
@@ -64,9 +67,10 @@ export function createOllamaProviderService(dependencies = {}) {
       assertCompatible(result);
       return Object.freeze({
         ok: true,
-        provider: "ollama",
+        provider: "openai-compatible",
         model: config.model,
-        classification: "local",
+        classification: parseOpenAiCompatibleBaseUrl(config.baseUrl)
+          .classification,
       });
     },
 
@@ -77,6 +81,7 @@ export function createOllamaProviderService(dependencies = {}) {
       const config = parseAiReviewerProviderConfig(input);
       return transportFactory({
         baseUrl: config.baseUrl,
+        credential: config.credential ?? undefined,
         modelTag: config.model,
       }).createDiscussionGateway({
         contextLength: config.contextLength,
@@ -102,6 +107,7 @@ export function createOllamaProviderService(dependencies = {}) {
       }
       return transportFactory({
         baseUrl: config.baseUrl,
+        credential: config.credential ?? undefined,
         modelTag: config.model,
       }).createAgentGateway({
         contextLength: config.contextLength,

@@ -162,7 +162,7 @@ function suggestionEvent({
       model: "deterministic-v1",
       skill: "line-edit",
       createdAt,
-      status: "proposed",
+      status: "unresolved",
       ...suggestionOverrides,
     },
     ...eventOverrides,
@@ -353,6 +353,12 @@ function expectStreamError(
     category,
     retryable,
   });
+  expect(Object.keys(error.details).sort()).to.deep.equal([
+    "category",
+    "code",
+    "message",
+    "retryable",
+  ]);
 }
 
 async function runStream({

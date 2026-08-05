@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT,
+  AI_REVIEWER_WORKSPACE_TURN_LIMIT,
   AgentEventSchema,
   AgentRequestSchema,
+  AiReviewerWorkspaceSchema,
   DISCUSSION_CONTEXT_TURN_LIMIT,
   DiscussionEventSchema,
   DiscussionRequestSchema,
   FindingSchema,
   SuggestionSchema,
+  SuggestionStatusSchema,
+  WorkspaceFindingSchema,
+  WorkspaceFindingStatusSchema,
 } from "../../../shared/contracts.mjs";
 
 const hash = "a".repeat(64);
@@ -57,7 +63,7 @@ function suggestion() {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt,
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -100,6 +106,50 @@ function discussionRequest(overrides = {}) {
   };
 }
 
+function workspace() {
+  const request = selectionRequest();
+  return {
+    runs: [
+      {
+        generation: 1,
+        createdOrder: 1,
+        request,
+        text: "A stored review summary.",
+        findings: [
+          {
+            artifact: finding(),
+            status: "unresolved",
+          },
+        ],
+        suggestions: [
+          {
+            artifact: suggestion(),
+          },
+        ],
+      },
+    ],
+    discussions: [
+      {
+        id: "discussion-0001",
+        createdOrder: 2,
+        subjectKey: "1:finding:finding-0001",
+        subject: {
+          kind: "finding",
+          sourceRequest: request,
+          artifact: finding(),
+        },
+        sourceGeneration: 1,
+        turns: [
+          { role: "user", text: "Explain this finding." },
+          { role: "assistant", text: "A stored explanation." },
+        ],
+        suggestions: [],
+        updatedAt: createdAt,
+      },
+    ],
+  };
+}
+
 describe("AI reviewer: runtime contracts", function () {
   it("accepts a strict selection request", function () {
     expect(AgentRequestSchema.parse(selectionRequest())).toEqual(
@@ -129,6 +179,24 @@ describe("AI reviewer: runtime contracts", function () {
     expect(SuggestionSchema.safeParse(invalid).success).toBe(false);
   });
 
+  it("uses the exact persisted suggestion status vocabulary", function () {
+    expect(SuggestionStatusSchema.options).toEqual([
+      "unresolved",
+      "applied",
+      "discarded",
+      "conflict",
+      "posted",
+    ]);
+  });
+
+  it("uses the exact persisted finding status vocabulary", function () {
+    expect(WorkspaceFindingStatusSchema.options).toEqual([
+      "unresolved",
+      "discarded",
+      "posted",
+    ]);
+  });
+
   it("requires evidence to carry a verifiable anchor", function () {
     const invalid = suggestion();
     invalid.evidence = [{ path: "chapters/introduction.tex" }];
@@ -145,6 +213,23 @@ describe("AI reviewer: runtime contracts", function () {
 
     expect(FindingSchema.parse(ordinary)).toEqual(ordinary);
     expect(FindingSchema.parse(citation)).toEqual(citation);
+  });
+
+  it("allows only ordinary findings to carry the posted status", function () {
+    const ordinary = {
+      artifact: finding(),
+      status: "posted",
+    };
+    const citation = {
+      artifact: finding({
+        artifactKind: "citation-finding",
+        proposedText: "Add a synthetic bibliography entry.",
+      }),
+      status: "posted",
+    };
+
+    expect(WorkspaceFindingSchema.parse(ordinary)).toEqual(ordinary);
+    expect(WorkspaceFindingSchema.safeParse(citation).success).toBe(false);
   });
 
   it.each([
@@ -220,10 +305,10 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AgentEventSchema.safeParse(event).success).toBe(false);
   });
 
-  it("allows only proposed suggestions in provider events", function () {
-    const accepted = {
+  it("allows only unresolved suggestions in provider events", function () {
+    const applied = {
       ...suggestion(),
-      status: "accepted",
+      status: "applied",
     };
     const event = {
       type: "suggestion",
@@ -231,10 +316,10 @@ describe("AI reviewer: runtime contracts", function () {
       requestId: "request-0001",
       sequence: 1,
       createdAt,
-      suggestion: accepted,
+      suggestion: applied,
     };
 
-    expect(SuggestionSchema.safeParse(accepted).success).toBe(true);
+    expect(SuggestionSchema.safeParse(applied).success).toBe(true);
     expect(AgentEventSchema.safeParse(event).success).toBe(false);
   });
 
@@ -258,7 +343,7 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AgentEventSchema.parse(event)).toEqual(event);
   });
 
-  it("accepts only subject-bound discussions with bounded recent turns", function () {
+  it("accepts subject-bound and open discussions with bounded recent turns", function () {
     const turns = Array.from(
       { length: DISCUSSION_CONTEXT_TURN_LIMIT },
       (_, index) => ({
@@ -269,6 +354,15 @@ describe("AI reviewer: runtime contracts", function () {
     const request = discussionRequest({ turns });
 
     expect(DiscussionRequestSchema.parse(request)).toEqual(request);
+    expect(
+      DiscussionRequestSchema.parse({
+        ...request,
+        subject: null,
+      }),
+    ).toEqual({
+      ...request,
+      subject: null,
+    });
     expect(
       DiscussionRequestSchema.safeParse({
         ...request,
@@ -339,6 +433,144 @@ describe("AI reviewer: runtime contracts", function () {
         },
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts a strict persisted review workspace", function () {
+    const stored = workspace();
+
+    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+  });
+
+  it("accepts posted ordinary findings and suggestions in a workspace", function () {
+    const stored = workspace();
+    stored.runs[0].findings[0].status = "posted";
+    stored.runs[0].suggestions[0].artifact.status = "posted";
+
+    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+  });
+
+  it("accepts an open persisted discussion without a source run", function () {
+    const firstDiscussion = {
+      id: "open-discussion-0001",
+      createdOrder: 1,
+      subjectKey: null,
+      subject: null,
+      sourceGeneration: null,
+      turns: [
+        { role: "user", text: "What should I clarify?" },
+        { role: "assistant", text: "Clarify the central claim." },
+      ],
+      suggestions: [],
+      updatedAt: createdAt,
+    };
+    const stored = {
+      runs: [],
+      discussions: [
+        firstDiscussion,
+        {
+          ...firstDiscussion,
+          id: "open-discussion-0002",
+          createdOrder: 2,
+          turns: [{ role: "user", text: "A separate open question." }],
+        },
+      ],
+    };
+
+    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+  });
+
+  it("keeps open discussion bindings null and rejects open suggestions", function () {
+    const openDiscussion = {
+      id: "open-discussion-invalid",
+      createdOrder: 1,
+      subjectKey: null,
+      subject: null,
+      sourceGeneration: null,
+      turns: [{ role: "user", text: "A general question." }],
+      suggestions: [],
+      updatedAt: createdAt,
+    };
+
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        runs: [],
+        discussions: [
+          {
+            ...openDiscussion,
+            subjectKey: "open-discussion-invalid",
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        runs: [],
+        discussions: [
+          {
+            ...openDiscussion,
+            suggestions: [{ artifact: suggestion() }],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds persisted artifacts and discussions to their source run", function () {
+    const crossProjectArtifact = workspace();
+    crossProjectArtifact.runs[0].findings[0].artifact.projectId =
+      "another-project";
+    const missingSourceRun = workspace();
+    missingSourceRun.discussions[0].subject.sourceRequest.requestId =
+      "another-request";
+    const crossRequestSubject = workspace();
+    crossRequestSubject.discussions[0].subject.artifact.requestId =
+      "another-request";
+
+    expect(
+      AiReviewerWorkspaceSchema.safeParse(crossProjectArtifact).success,
+    ).toBe(false);
+    expect(AiReviewerWorkspaceSchema.safeParse(missingSourceRun).success).toBe(
+      false,
+    );
+    expect(
+      AiReviewerWorkspaceSchema.safeParse(crossRequestSubject).success,
+    ).toBe(false);
+  });
+
+  it("bounds stored discussions without dropping an older discussion", function () {
+    const stored = workspace();
+    stored.discussions = Array.from(
+      { length: AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT + 1 },
+      (_, index) => ({
+        ...stored.discussions[0],
+        id: `discussion-${index}`,
+        createdOrder: index + 2,
+        subjectKey: `subject-${index}`,
+      }),
+    );
+
+    const parsed = AiReviewerWorkspaceSchema.safeParse(stored);
+
+    expect(parsed.success).toBe(false);
+    expect(stored.discussions).toHaveLength(
+      AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT + 1,
+    );
+  });
+
+  it("bounds stored turns separately from model discussion context", function () {
+    const stored = workspace();
+    stored.discussions[0].turns = Array.from(
+      { length: AI_REVIEWER_WORKSPACE_TURN_LIMIT + 1 },
+      (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: `Stored turn ${index}`,
+      }),
+    );
+
+    expect(AiReviewerWorkspaceSchema.safeParse(stored).success).toBe(false);
+    expect(AI_REVIEWER_WORKSPACE_TURN_LIMIT).toBeGreaterThan(
+      DISCUSSION_CONTEXT_TURN_LIMIT,
+    );
   });
 
   it("accepts discussion events whose envelope is distinct from a source suggestion", function () {

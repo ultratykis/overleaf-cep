@@ -506,6 +506,13 @@ function assertDiscussionEventForRequest(
     return;
   }
 
+  if (request.subject == null) {
+    throw protocolError(
+      "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+      "An open discussion cannot return edit suggestions.",
+    );
+  }
+
   const sourceRequest = request.subject.sourceRequest;
   if (sourceRequest.scope.kind === "project") {
     throw protocolError(

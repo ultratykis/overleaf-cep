@@ -6,9 +6,14 @@ import { DiscussionRequestSchema } from "../../shared/contracts.mjs";
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
+import { createAiReviewerCommentProvenanceController } from "./AiReviewerCommentProvenanceController.mjs";
+import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProvenanceStore.mjs";
 import { createAiReviewerController } from "./AiReviewerController.mjs";
+import { recordAiReviewerFailure } from "./AiReviewerFailureLogger.mjs";
 import { createAiReviewerProviderConfigStore } from "./AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
+import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
+import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
 import { createOllamaProviderService } from "./OllamaProviderService.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
 import {
@@ -50,6 +55,8 @@ export function createConfiguredAiReviewerController({
   timeoutSignalFactory,
   now,
   eventId,
+  elapsedNow,
+  failureRecorder,
 }) {
   return createAiReviewerController({
     async gatewayFactory(context) {
@@ -67,6 +74,7 @@ export function createConfiguredAiReviewerController({
           retryable: false,
         });
       }
+      context.setFailureProvider(configuration.provider, configuration.model);
       if (DiscussionRequestSchema.safeParse(context.request).success) {
         return providerService.createDiscussionGateway(configuration);
       }
@@ -84,6 +92,8 @@ export function createConfiguredAiReviewerController({
     timeoutSignalFactory,
     now,
     eventId,
+    elapsedNow,
+    failureRecorder,
   });
 }
 
@@ -153,6 +163,15 @@ const configuredController = createConfiguredAiReviewerController({
   configStore,
   providerService,
   requestScopeReader,
+  failureRecorder: recordAiReviewerFailure,
+});
+const workspaceStore = createAiReviewerWorkspaceStore();
+const workspaceController = createAiReviewerWorkspaceController({
+  workspaceStore,
+});
+const provenanceStore = createAiReviewerCommentProvenanceStore();
+const provenanceController = createAiReviewerCommentProvenanceController({
+  provenanceStore,
 });
 
 export default {
@@ -161,4 +180,13 @@ export default {
   testConnection: expressify(providerController.testConnection),
   stream: expressify(configuredController.stream),
   discussionStream: expressify(configuredController.discussionStream),
+  getWorkspace: expressify(workspaceController.getWorkspace),
+  saveWorkspace: expressify(workspaceController.saveWorkspace),
+  getCommentProvenance: expressify(provenanceController.getCommentProvenance),
+  markCommentProvenance: expressify(provenanceController.markCommentProvenance),
+  deleteCommentProvenance: expressify(
+    provenanceController.deleteCommentProvenance,
+  ),
+  deleteDiscussion: expressify(workspaceController.deleteDiscussion),
+  deleteWorkspace: expressify(workspaceController.deleteWorkspace),
 };

@@ -1,4 +1,10 @@
-import { memo, useCallback, useState } from 'react'
+import {
+  ComponentType,
+  memo,
+  PropsWithChildren,
+  useCallback,
+  useState,
+} from 'react'
 import { Change, CommentOperation } from '../../../../../types/change'
 import { ReviewPanelMessage } from './review-panel-message'
 import { useTranslation } from 'react-i18next'
@@ -12,6 +18,17 @@ import {
 } from '../../../../../types/review-panel/review-panel'
 import { usePermissionsContext } from '@/features/ide-react/context/permissions-context'
 import { isFormSubmitKeypressEvent } from '@/features/review-panel/utils/form-events'
+import importOverleafModules from '../../../../macros/import-overleaf-module.macro'
+
+const aiReviewerCommentLabelModules = importOverleafModules(
+  'aiReviewerCommentLabels'
+) as {
+  import: {
+    default: ComponentType<PropsWithChildren<{ commentId: ThreadId }>>
+  }
+  path: string
+}[]
+const AiAssistedCommentLabel = aiReviewerCommentLabelModules[0]?.import.default
 
 export const ReviewPanelCommentContent = memo<{
   comment: Change<CommentOperation>
@@ -93,26 +110,35 @@ export const ReviewPanelCommentContent = memo<{
       >
         {thread.messages.map((message, i) => {
           const isReply = i !== 0
+          const renderedMessage = (
+            <ReviewPanelMessage
+              message={message}
+              isReply={isReply}
+              hasReplies={!isReply && thread.messages.length > 1}
+              onResolve={onResolve}
+              hasActiveContent={hasActiveContent}
+              onEdit={onEdit}
+              onDelete={() =>
+                isReply
+                  ? onDeleteMessage?.(message.id)
+                  : onDeleteThread?.(comment.op.t)
+              }
+              isThreadResolved={isResolved}
+            />
+          )
 
           return (
             <div key={message.id} className="review-panel-comment-wrapper">
               {isReply && (
                 <div className="review-panel-comment-reply-divider" />
               )}
-              <ReviewPanelMessage
-                message={message}
-                isReply={isReply}
-                hasReplies={!isReply && thread.messages.length > 1}
-                onResolve={onResolve}
-                hasActiveContent={hasActiveContent}
-                onEdit={onEdit}
-                onDelete={() =>
-                  isReply
-                    ? onDeleteMessage?.(message.id)
-                    : onDeleteThread?.(comment.op.t)
-                }
-                isThreadResolved={isResolved}
-              />
+              {!isReply && AiAssistedCommentLabel != null ? (
+                <AiAssistedCommentLabel commentId={comment.op.t}>
+                  {renderedMessage}
+                </AiAssistedCommentLabel>
+              ) : (
+                renderedMessage
+              )}
             </div>
           )
         })}

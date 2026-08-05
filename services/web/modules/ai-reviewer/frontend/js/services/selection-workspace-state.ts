@@ -2,7 +2,8 @@ import type {
   AgentEvent,
   AgentRequest,
   Finding,
-  ProposedSuggestion,
+  UnresolvedSuggestion,
+  WorkspaceRun,
 } from "../../../shared/contract-types";
 import type {
   EditorSelectionSession,
@@ -29,13 +30,14 @@ export type SelectionSuggestionDecision =
       code: EditorSuggestionApplicationConflictCode;
     };
 
-export type FindingArtifactStatus = "unresolved" | "discarded";
+export type FindingArtifactStatus = "unresolved" | "discarded" | "posted";
 
 export type SuggestionArtifactStatus =
   | "unresolved"
   | "applied"
   | "discarded"
-  | "conflict";
+  | "conflict"
+  | "posted";
 
 export type SelectionWorkspaceState = {
   status: SelectionWorkspaceStatus;
@@ -47,7 +49,7 @@ export type SelectionWorkspaceState = {
   session: EditorSelectionSession | null;
   text: string;
   findings: Finding[];
-  suggestions: ProposedSuggestion[];
+  suggestions: UnresolvedSuggestion[];
   findingStatuses: Readonly<Record<string, FindingArtifactStatus | undefined>>;
   suggestionStatuses: Readonly<
     Record<string, SuggestionArtifactStatus | undefined>
@@ -80,6 +82,10 @@ export type SelectionWorkspaceAction =
       session: EditorSelectionSession;
     })
   | (BoundAction & {
+      type: "rebind-session";
+      session: EditorSelectionSession;
+    })
+  | (BoundAction & {
       type: "event";
       event: AgentEvent;
     })
@@ -96,7 +102,15 @@ export type SelectionWorkspaceAction =
       findingId: string;
     })
   | (BoundAction & {
+      type: "post-finding";
+      findingId: string;
+    })
+  | (BoundAction & {
       type: "discard-suggestion";
+      suggestionId: string;
+    })
+  | (BoundAction & {
+      type: "post-suggestion";
       suggestionId: string;
     })
   | (BoundAction & {
@@ -110,6 +124,17 @@ export type SelectionWorkspaceAction =
       type: "error";
       error: string;
     });
+
+export type ReviewWorkspaceAction =
+  | SelectionWorkspaceAction
+  | {
+      type: "hydrate";
+      runs: readonly WorkspaceRun[];
+    }
+  | {
+      type: "retain-runs";
+      generations: readonly number[];
+    };
 
 export const initialSelectionWorkspaceState: SelectionWorkspaceState = {
   status: "idle",
@@ -173,6 +198,20 @@ export function reduceSelectionWorkspaceState(
       status: "streaming",
       scopeKind: action.session.request.scope.kind,
       request: action.session.request,
+      session: action.session,
+    };
+  }
+
+  if (action.type === "rebind-session") {
+    if (
+      state.status !== "completed" ||
+      state.request == null ||
+      action.session.request !== state.request
+    ) {
+      return state;
+    }
+    return {
+      ...state,
       session: action.session,
     };
   }
@@ -308,6 +347,28 @@ export function reduceSelectionWorkspaceState(
     };
   }
 
+  if (action.type === "post-finding") {
+    const finding = state.findings.find(
+      (candidate) => candidate.id === action.findingId,
+    );
+    if (
+      state.status !== "completed" ||
+      finding == null ||
+      finding.artifactKind !== "finding" ||
+      finding.requestId !== state.requestId ||
+      state.findingStatuses[action.findingId] !== "unresolved"
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      findingStatuses: {
+        ...state.findingStatuses,
+        [action.findingId]: "posted",
+      },
+    };
+  }
+
   if (action.type === "discard-suggestion") {
     const suggestion = state.suggestions.find(
       (candidate) => candidate.id === action.suggestionId,
@@ -330,6 +391,27 @@ export function reduceSelectionWorkspaceState(
       suggestionConflictCodes: {
         ...state.suggestionConflictCodes,
         [action.suggestionId]: undefined,
+      },
+    };
+  }
+
+  if (action.type === "post-suggestion") {
+    const suggestion = state.suggestions.find(
+      (candidate) => candidate.id === action.suggestionId,
+    );
+    if (
+      state.status !== "completed" ||
+      suggestion == null ||
+      suggestion.requestId !== state.requestId ||
+      state.suggestionStatuses[action.suggestionId] !== "unresolved"
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      suggestionStatuses: {
+        ...state.suggestionStatuses,
+        [action.suggestionId]: "posted",
       },
     };
   }
@@ -368,10 +450,56 @@ export const initialReviewWorkspaceState: ReviewWorkspaceState = {
   runs: [],
 };
 
+function hydrateWorkspaceRun(run: WorkspaceRun): SelectionWorkspaceState {
+  return {
+    status: "completed",
+    generation: run.generation,
+    createdOrder: run.createdOrder,
+    requestId: run.request.requestId,
+    scopeKind: run.request.scope.kind,
+    request: run.request,
+    session: null,
+    text: run.text,
+    findings: run.findings.map((entry) => entry.artifact),
+    suggestions: run.suggestions.map((entry) => ({
+      ...entry.artifact,
+      status: "unresolved",
+    })),
+    findingStatuses: Object.fromEntries(
+      run.findings.map((entry) => [entry.artifact.id, entry.status]),
+    ),
+    suggestionStatuses: Object.fromEntries(
+      run.suggestions.map((entry) => [
+        entry.artifact.id,
+        entry.artifact.status,
+      ]),
+    ),
+    suggestionConflictCodes: Object.fromEntries(
+      run.suggestions
+        .filter((entry) => entry.conflictCode != null)
+        .map((entry) => [entry.artifact.id, entry.conflictCode]),
+    ),
+    conflict: null,
+    error: null,
+  };
+}
+
 export function reduceReviewWorkspaceState(
   state: ReviewWorkspaceState,
-  action: SelectionWorkspaceAction,
+  action: ReviewWorkspaceAction,
 ): ReviewWorkspaceState {
+  if (action.type === "hydrate") {
+    return {
+      runs: action.runs.map(hydrateWorkspaceRun),
+    };
+  }
+  if (action.type === "retain-runs") {
+    const retainedGenerations = new Set(action.generations);
+    const runs = state.runs.filter((run) =>
+      retainedGenerations.has(run.generation),
+    );
+    return runs.length === state.runs.length ? state : { runs };
+  }
   if (action.type === "begin") {
     return {
       runs: [

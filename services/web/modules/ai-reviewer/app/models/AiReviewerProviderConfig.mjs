@@ -10,6 +10,18 @@ export const AiReviewerProviderConfigSchema = new mongoose.Schema(
     provider: { type: String, required: true },
     baseUrl: { type: String, required: true },
     model: { type: String, required: true },
+    credentialEncrypted: { type: String },
+    credentialUpdatedAt: { type: Date },
+    revision: {
+      type: Number,
+      required: true,
+      default: 0,
+      min: 0,
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "revision must be a non-negative safe integer.",
+      },
+    },
     contextLength: {
       type: Number,
       required: true,

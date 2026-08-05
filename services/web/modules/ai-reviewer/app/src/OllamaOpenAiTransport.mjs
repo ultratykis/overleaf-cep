@@ -10,10 +10,11 @@ import {
   classifySdkError,
 } from "./AiSdkAgentGateway.mjs";
 import {
-  OLLAMA_FETCH_REDIRECT,
-  parseOllamaModelTag,
-  parseOllamaOpenAiBaseUrl,
+  OPENAI_COMPATIBLE_FETCH_REDIRECT,
+  parseOpenAiCompatibleBaseUrl,
+  parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
+import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
 
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
 const MAX_NONSTREAM_CONTENT_PARTS = 512;
@@ -178,7 +179,7 @@ function requestUrl(input) {
   }
   throw localTransportError(
     new AgentGatewayError(
-      "The Ollama request URL is outside the configured local endpoint.",
+      "The request URL is outside the configured OpenAI-compatible endpoint.",
       {
         code: "AI_OLLAMA_REQUEST_URL_NOT_ALLOWED",
         category: "configuration",
@@ -191,7 +192,7 @@ function requestUrl(input) {
 function requestUrlNotAllowed() {
   return localTransportError(
     new AgentGatewayError(
-      "The Ollama request URL is outside the configured local endpoint.",
+      "The request URL is outside the configured OpenAI-compatible endpoint.",
       {
         code: "AI_OLLAMA_REQUEST_URL_NOT_ALLOWED",
         category: "configuration",
@@ -203,11 +204,14 @@ function requestUrlNotAllowed() {
 
 function redirectRejected() {
   return localTransportError(
-    new AgentGatewayError("The Ollama provider redirect was rejected.", {
-      code: "AI_PROVIDER_REDIRECT_REJECTED",
-      category: "provider",
-      retryable: false,
-    }),
+    new AgentGatewayError(
+      "The OpenAI-compatible provider redirect was rejected.",
+      {
+        code: "AI_PROVIDER_REDIRECT_REJECTED",
+        category: "provider",
+        retryable: false,
+      },
+    ),
   );
 }
 
@@ -2145,7 +2149,7 @@ function createGuardedFetch({ baseUrl, fetchImpl }) {
    * @param {Parameters<typeof fetch>[1]} [init]
    */
   return async function guardedOllamaFetch(input, init) {
-    const currentEndpoint = parseOllamaOpenAiBaseUrl(baseUrl);
+    const currentEndpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
     if (
       `${currentEndpoint.baseUrl}/chat/completions` !== allowedRequestUrl ||
       requestUrl(input) !== allowedRequestUrl
@@ -2157,7 +2161,7 @@ function createGuardedFetch({ baseUrl, fetchImpl }) {
     try {
       response = await fetchImpl(input, {
         ...init,
-        redirect: OLLAMA_FETCH_REDIRECT,
+        redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
       });
     } catch (error) {
       observeInvalidNativePromise(error);
@@ -2198,6 +2202,7 @@ export class OllamaOpenAiTransport {
   /**
    * @param {{
    *   baseUrl: unknown,
+   *   credential?: unknown,
    *   modelTag: unknown,
    *   fetchImpl?: typeof fetch,
    *   createProvider?: typeof createOpenAI,
@@ -2205,12 +2210,17 @@ export class OllamaOpenAiTransport {
    */
   constructor({
     baseUrl,
+    credential,
     modelTag,
     fetchImpl = globalThis.fetch,
     createProvider = createOpenAI,
   }) {
-    const endpoint = parseOllamaOpenAiBaseUrl(baseUrl);
-    const parsedModelTag = parseOllamaModelTag(modelTag);
+    const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+    const parsedCredential =
+      credential == null
+        ? "ollama"
+        : parseAiReviewerProviderCredential(credential);
+    const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
     if (typeof fetchImpl !== "function") {
       throw new TypeError("fetchImpl must be a function.");
     }
@@ -2220,13 +2230,13 @@ export class OllamaOpenAiTransport {
 
     const provider = runProviderConstruction(() =>
       createProvider({
-        apiKey: "ollama",
+        apiKey: parsedCredential,
         baseURL: endpoint.baseUrl,
         fetch: createGuardedFetch({
           baseUrl: endpoint.baseUrl,
           fetchImpl,
         }),
-        name: "ollama",
+        name: "openai-compatible",
       }),
     );
     observeInvalidNativePromise(provider);
@@ -2277,7 +2287,7 @@ export class OllamaOpenAiTransport {
       typeof doStream !== "function"
     ) {
       throw new TypeError(
-        "The Ollama provider must return a concrete Chat Completions model.",
+        "The OpenAI-compatible provider must return a concrete Chat Completions model.",
       );
     }
 
@@ -2797,7 +2807,7 @@ export class OllamaOpenAiTransport {
   createDiscussionGateway({ contextLength, now, createId }) {
     return new AiSdkAgentGateway({
       model: this.#languageModel,
-      provider: "ollama",
+      provider: "openai-compatible",
       modelId: this.#modelTag,
       contextLength,
       readProjectFile() {
@@ -2837,7 +2847,7 @@ export class OllamaOpenAiTransport {
   }) {
     return new AiSdkAgentGateway({
       model: this.#languageModel,
-      provider: "ollama",
+      provider: "openai-compatible",
       modelId: this.#modelTag,
       contextLength,
       readProjectFile,

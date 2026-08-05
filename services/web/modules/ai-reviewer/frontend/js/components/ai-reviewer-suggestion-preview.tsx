@@ -1,6 +1,10 @@
+import type { TFunction } from "i18next";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
-import type { ProposedSuggestion } from "../../../shared/contract-types";
+import OLButton from "@/shared/components/ol/ol-button";
+
+import type { UnresolvedSuggestion } from "../../../shared/contract-types";
 import type {
   EditorSelectionSession,
   EditorSelectionSessionContext,
@@ -44,16 +48,26 @@ type PreviewLease = {
   applicationController: AbortController | null;
 };
 
-const statusLabels: Record<PreviewStatus, string> = {
-  mounting: "Preparing suggestion preview",
-  ready: "Suggestion preview ready",
-  applying: "Applying selected changes",
-  applied: "Selected changes applied",
-  discarded: "Suggestion discarded",
-  conflict: "Suggestion conflict",
-  cancelled: "Suggestion application cancelled",
-  error: "Suggestion preview error",
-};
+function statusLabel(t: TFunction<"translation">, status: PreviewStatus) {
+  switch (status) {
+    case "mounting":
+      return t("ai_reviewer_suggestion_status_preparing_preview");
+    case "ready":
+      return t("ai_reviewer_suggestion_status_preview_ready");
+    case "applying":
+      return t("ai_reviewer_suggestion_status_applying_selected_changes");
+    case "applied":
+      return t("ai_reviewer_suggestion_status_selected_changes_applied");
+    case "discarded":
+      return t("ai_reviewer_suggestion_status_discarded");
+    case "conflict":
+      return t("ai_reviewer_suggestion_status_conflict");
+    case "cancelled":
+      return t("ai_reviewer_suggestion_status_application_cancelled");
+    case "error":
+      return t("ai_reviewer_suggestion_status_preview_error");
+  }
+}
 
 function cancellationReason(message: string) {
   return new DOMException(message, "AbortError");
@@ -110,20 +124,25 @@ function decisionStatus(decision: SelectionSuggestionDecision): PreviewStatus {
   return decision.status;
 }
 
-function decisionMessage(decision: SelectionSuggestionDecision) {
+function decisionMessage(
+  t: TFunction<"translation">,
+  decision: SelectionSuggestionDecision,
+) {
   if (decision.status === "conflict") {
-    return `The suggestion could not be applied: ${decision.code}`;
+    return t("ai_reviewer_suggestion_could_not_be_applied", {
+      code: decision.code,
+    });
   }
   if (decision.status === "applied") {
-    return "The selected changes were applied through the editor.";
+    return t("ai_reviewer_selected_changes_applied_through_editor");
   }
   if (decision.status === "discarded") {
-    return "The suggestion was discarded without changing the document.";
+    return t("ai_reviewer_suggestion_discarded_without_changes");
   }
   if (decision.status === "cancelled") {
-    return "The suggestion application was cancelled.";
+    return t("ai_reviewer_suggestion_application_was_cancelled");
   }
-  return "The suggestion preview could not be completed.";
+  return t("ai_reviewer_suggestion_preview_could_not_be_completed");
 }
 
 export function AiReviewerSuggestionPreview({
@@ -136,13 +155,14 @@ export function AiReviewerSuggestionPreview({
   onDecision,
 }: {
   session: EditorSelectionSession;
-  suggestion: ProposedSuggestion;
+  suggestion: UnresolvedSuggestion;
   getContext: () => EditorSelectionSessionContext;
   mountPreview?: MountSuggestionPreview;
   applySuggestion?: ApplySelectionSuggestion;
   registerLease?: RegisterSuggestionPreviewLease;
   onDecision?: (decision: SelectionSuggestionDecision) => void;
 }) {
+  const { t } = useTranslation();
   const previewParent = useRef<HTMLDivElement | null>(null);
   const lease = useRef<PreviewLease | null>(null);
   const onDecisionRef = useRef(onDecision);
@@ -177,7 +197,7 @@ export function AiReviewerSuggestionPreview({
     (
       candidate: PreviewLease,
       decision: SelectionSuggestionDecision,
-      nextMessage = decisionMessage(decision),
+      nextMessage = decisionMessage(t, decision),
     ) => {
       if (
         candidate.disposed ||
@@ -198,7 +218,7 @@ export function AiReviewerSuggestionPreview({
       setMessage(nextMessage);
       onDecisionRef.current?.(decision);
     },
-    [],
+    [t],
   );
 
   useEffect(() => {
@@ -235,7 +255,7 @@ export function AiReviewerSuggestionPreview({
         {
           status: "error",
         },
-        "The suggestion preview lifecycle could not be registered.",
+        t("ai_reviewer_suggestion_preview_lifecycle_registration_failed"),
       );
     }
 
@@ -245,7 +265,7 @@ export function AiReviewerSuggestionPreview({
         {
           status: "error",
         },
-        "The detached preview returned an invalid hunk selection.",
+        t("ai_reviewer_suggestion_preview_invalid_hunk_selection"),
       );
     };
 
@@ -296,6 +316,7 @@ export function AiReviewerSuggestionPreview({
           request: session.request,
           suggestion,
           onSelectionChange,
+          t,
         }),
       );
     } catch {
@@ -304,7 +325,7 @@ export function AiReviewerSuggestionPreview({
         {
           status: "error",
         },
-        "The detached suggestion preview could not be mounted.",
+        t("ai_reviewer_suggestion_preview_mount_failed"),
       );
       mounting = Promise.reject(
         new Error("The detached suggestion preview could not be mounted."),
@@ -347,7 +368,7 @@ export function AiReviewerSuggestionPreview({
             {
               status: "error",
             },
-            "The detached suggestion preview returned an invalid plan.",
+            t("ai_reviewer_suggestion_preview_invalid_plan"),
           );
         }
       },
@@ -357,7 +378,7 @@ export function AiReviewerSuggestionPreview({
           {
             status: "error",
           },
-          "The detached suggestion preview could not be mounted.",
+          t("ai_reviewer_suggestion_preview_mount_failed"),
         );
       },
     );
@@ -372,7 +393,15 @@ export function AiReviewerSuggestionPreview({
         cancellationReason("The suggestion preview was closed."),
       );
     };
-  }, [disposeLease, finish, mountPreview, registerLease, session, suggestion]);
+  }, [
+    disposeLease,
+    finish,
+    mountPreview,
+    registerLease,
+    session,
+    suggestion,
+    t,
+  ]);
 
   const applySelected = useCallback(() => {
     const candidate = lease.current;
@@ -429,7 +458,7 @@ export function AiReviewerSuggestionPreview({
             {
               status: "error",
             },
-            "The selected suggestion plan produced no applicable change.",
+            t("ai_reviewer_suggestion_no_applicable_change"),
           );
           return;
         }
@@ -464,7 +493,7 @@ export function AiReviewerSuggestionPreview({
           status: "error",
         });
       });
-  }, [applySuggestion, finish, getContext, session, suggestion]);
+  }, [applySuggestion, finish, getContext, session, suggestion, t]);
 
   const discard = useCallback(() => {
     const candidate = lease.current;
@@ -512,47 +541,58 @@ export function AiReviewerSuggestionPreview({
     status === "error";
 
   return (
-    <section aria-label="Suggestion preview" className="mt-2">
-      <p aria-live="polite">{statusLabels[status]}</p>
+    <section
+      aria-label={t("ai_reviewer_suggestion_preview")}
+      className="ai-reviewer-suggestion-preview"
+    >
+      <p aria-live="polite">{statusLabel(t, status)}</p>
       <fieldset disabled={status !== "ready"}>
-        <legend className="visually-hidden">Detached suggestion diff</legend>
-        <div ref={previewParent} />
+        <legend className="visually-hidden">
+          {t("ai_reviewer_detached_suggestion_diff")}
+        </legend>
+        <div
+          ref={previewParent}
+          className="ai-reviewer-suggestion-preview-diff"
+        />
       </fieldset>
-      <div className="d-flex flex-wrap gap-2 mt-2">
-        <button
+      <div className="ai-reviewer-panel-actions">
+        <OLButton
           type="button"
-          className="btn btn-primary"
+          variant="secondary"
+          size="sm"
           disabled={status !== "ready" || selectedHunkIds.length === 0}
           onClick={applySelected}
         >
-          Apply selected changes
-        </button>
-        <button
+          {t("ai_reviewer_apply_selected_changes")}
+        </OLButton>
+        <OLButton
           type="button"
-          className="btn btn-secondary"
+          variant="ghost"
+          size="sm"
           disabled={status === "applying" || terminal}
           onClick={discard}
         >
-          Discard suggestion
-        </button>
+          {t("ai_reviewer_discard_suggestion")}
+        </OLButton>
         {status === "applying" && (
-          <button
+          <OLButton
             type="button"
-            className="btn btn-secondary"
+            variant="ghost"
+            size="sm"
             onClick={cancelApplication}
           >
-            Cancel application
-          </button>
+            {t("ai_reviewer_cancel_application")}
+          </OLButton>
         )}
       </div>
       {message != null && (
         <div
           className={
             status === "conflict"
-              ? "alert alert-warning mt-2"
+              ? "alert alert-warning ai-reviewer-panel-notice"
               : status === "error"
-                ? "alert alert-danger mt-2"
-                : "alert alert-info mt-2"
+                ? "alert alert-danger ai-reviewer-panel-notice"
+                : "alert alert-info ai-reviewer-panel-notice"
           }
           role="status"
         >

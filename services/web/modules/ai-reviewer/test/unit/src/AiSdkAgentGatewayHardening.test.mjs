@@ -3108,7 +3108,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         skill: "line-edit",
         provider: "fixture-provider",
         model: "fixture-model",
-        status: "proposed",
+        status: "unresolved",
       },
     });
   });

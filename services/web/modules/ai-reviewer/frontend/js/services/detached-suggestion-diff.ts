@@ -1,8 +1,9 @@
 import { Chunk, MergeView, type DiffConfig } from "@codemirror/merge";
 import { ChangeSet, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import type { TFunction } from "i18next";
 
-import type { ProposedSuggestion } from "../../../shared/contract-types";
+import type { UnresolvedSuggestion } from "../../../shared/contract-types";
 import { prepareSingleDocumentSuggestion } from "./single-document-suggestions";
 
 const DIFF_CONFIG = Object.freeze({
@@ -25,7 +26,7 @@ type LocalChangeSpec = {
 };
 
 type SuggestionDiffPlan = {
-  suggestion: ProposedSuggestion;
+  suggestion: UnresolvedSuggestion;
   chunks: readonly Chunk[];
   hunks: readonly PlannedHunk[];
 };
@@ -35,6 +36,7 @@ type MountDetachedSuggestionDiffOptions = {
   request: unknown;
   suggestion: unknown;
   onSelectionChange?: (selectedHunkIds: readonly string[]) => void;
+  t: TFunction<"translation">;
 };
 
 type CompileSelectedSuggestionHunksOptions = {
@@ -217,7 +219,7 @@ function assertCompletePlan(
   }
 }
 
-function suggestionPlanIdentity(suggestion: ProposedSuggestion) {
+function suggestionPlanIdentity(suggestion: UnresolvedSuggestion) {
   return JSON.stringify([
     "ai-suggestion-diff-plan-v1",
     suggestion.id,
@@ -235,7 +237,7 @@ function suggestionPlanIdentity(suggestion: ProposedSuggestion) {
 }
 
 async function buildPreparedPlan(
-  suggestion: ProposedSuggestion,
+  suggestion: UnresolvedSuggestion,
 ): Promise<SuggestionDiffPlan> {
   const originalDocument = EditorState.create({
     doc: suggestion.original,
@@ -296,7 +298,7 @@ async function buildPlan({
 function sameChunks(
   expected: readonly Chunk[],
   rendered: readonly Chunk[],
-  suggestion: ProposedSuggestion,
+  suggestion: UnresolvedSuggestion,
 ) {
   if (expected.length !== rendered.length) {
     return false;
@@ -363,6 +365,7 @@ export async function mountDetachedSuggestionDiff({
   request,
   suggestion,
   onSelectionChange,
+  t,
 }: MountDetachedSuggestionDiffOptions): Promise<MountedDetachedSuggestionDiff> {
   const plan = await buildPlan({
     request,
@@ -376,7 +379,7 @@ export async function mountDetachedSuggestionDiff({
   const controls = ownerDocument.createElement("fieldset");
   controls.className = "ai-reviewer-detached-diff-hunks";
   const legend = ownerDocument.createElement("legend");
-  legend.textContent = "Select proposed changes";
+  legend.textContent = t("ai_reviewer_select_proposed_changes");
   controls.appendChild(legend);
   container.append(preview, controls);
 
@@ -440,7 +443,9 @@ export async function mountDetachedSuggestionDiff({
       checkbox.dataset.aiReviewerHunkId = hunk.id;
       checkbox.setAttribute(
         "aria-label",
-        `Select proposed change ${hunk.ordinal + 1}`,
+        t("ai_reviewer_select_proposed_change_n", {
+          number: hunk.ordinal + 1,
+        }),
       );
       const onChange = () => {
         if (destroyed) {
@@ -459,7 +464,9 @@ export async function mountDetachedSuggestionDiff({
       );
       label.append(
         checkbox,
-        ownerDocument.createTextNode(`Change ${hunk.ordinal + 1}`),
+        ownerDocument.createTextNode(
+          t("ai_reviewer_change_n", { number: hunk.ordinal + 1 }),
+        ),
       );
       controls.appendChild(label);
     }

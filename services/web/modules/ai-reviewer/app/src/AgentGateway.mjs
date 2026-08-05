@@ -330,7 +330,7 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
  */
 export function assertDiscussionSubjectForRequest(request) {
   const { subject } = request;
-  if (subject.kind === "scope") {
+  if (subject == null || subject.kind === "scope") {
     return;
   }
   const { sourceRequest } = subject;
@@ -401,6 +401,16 @@ export function assertDiscussionEventForRequest(
     return;
   }
 
+  if (request.subject == null) {
+    throw new AgentGatewayError(
+      "An open discussion cannot return edit suggestions.",
+      {
+        code: "AI_TOOL_NOT_ALLOWED",
+        category: "schema",
+        retryable: false,
+      },
+    );
+  }
   const { sourceRequest } = request.subject;
   assertAgentEventForRequest(
     sourceRequest,

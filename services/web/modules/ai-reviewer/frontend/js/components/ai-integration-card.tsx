@@ -2,6 +2,7 @@ import IntegrationCard from "@/features/integrations-panel/integration-card";
 import MaterialIcon from "@/shared/components/material-icon";
 import getMeta from "@/utils/meta";
 import { lazy, Suspense, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 type DetailsModule = {
   default: React.ComponentType<{ onHide: () => void }>;
@@ -18,6 +19,7 @@ export function AiIntegrationCard({
   enabled,
   loadDetails = loadDefaultDetails,
 }: AiIntegrationCardProps) {
+  const { t } = useTranslation();
   const [showDetails, setShowDetails] = useState(false);
   const Details = useMemo(() => lazy(loadDetails), [loadDetails]);
 
@@ -28,8 +30,8 @@ export function AiIntegrationCard({
   return (
     <>
       <IntegrationCard
-        title="AI reviewer"
-        description="Review this LaTeX project through the local Overleaf backend."
+        title={t("ai_reviewer_title")}
+        description={t("ai_reviewer_integration_description")}
         icon={<MaterialIcon type="smart_toy" />}
         showPaywallBadge={false}
         onClick={() => setShowDetails(true)}

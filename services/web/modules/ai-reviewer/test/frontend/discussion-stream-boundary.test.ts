@@ -8,7 +8,7 @@ import {
 import type {
   DiscussionEvent,
   DiscussionRequest,
-  ProposedSuggestion,
+  UnresolvedSuggestion,
 } from "../../shared/contract-types";
 
 const createdAt = "2026-07-25T00:00:00.000Z";
@@ -45,7 +45,17 @@ function discussionRequest(): DiscussionRequest {
   };
 }
 
-function suggestion(overrides: Partial<ProposedSuggestion> = {}) {
+function openDiscussionRequest(): DiscussionRequest {
+  return {
+    requestId: "open-discussion-stream-0001",
+    discussionId: "open-discussion-0001",
+    projectId: "project-0001",
+    subject: null,
+    turns: [{ role: "user", text: "How should I approach this paragraph?" }],
+  };
+}
+
+function suggestion(overrides: Partial<UnresolvedSuggestion> = {}) {
   return {
     id: "discussion-suggestion-0001",
     requestId: "source-request-0001",
@@ -76,7 +86,7 @@ function suggestion(overrides: Partial<ProposedSuggestion> = {}) {
     model: "deterministic-v1",
     skill: "line-edit",
     createdAt,
-    status: "proposed" as const,
+    status: "unresolved" as const,
     ...overrides,
   };
 }
@@ -119,6 +129,52 @@ function discussionEvents(emittedSuggestion = suggestion()): DiscussionEvent[] {
   ];
 }
 
+function openDiscussionEvents({
+  includeSuggestion = false,
+}: {
+  includeSuggestion?: boolean;
+} = {}): DiscussionEvent[] {
+  const requestId = "open-discussion-stream-0001";
+  const events: DiscussionEvent[] = [
+    {
+      type: "started",
+      eventId: "open-discussion-event-0001",
+      requestId,
+      sequence: 0,
+      createdAt,
+      provider: "fake",
+      model: "deterministic-v1",
+    },
+    {
+      type: "text.delta",
+      eventId: "open-discussion-event-0002",
+      requestId,
+      sequence: 1,
+      createdAt,
+      delta: "Start by identifying the paragraph's central claim.",
+    },
+  ];
+  if (includeSuggestion) {
+    events.push({
+      type: "suggestion",
+      eventId: "open-discussion-event-0003",
+      requestId,
+      sequence: 2,
+      createdAt,
+      suggestion: suggestion(),
+    });
+  }
+  events.push({
+    type: "completed",
+    eventId: "open-discussion-event-0004",
+    requestId,
+    sequence: includeSuggestion ? 3 : 2,
+    createdAt,
+    finishReason: "stop",
+  });
+  return events;
+}
+
 function responseForEvents(events: DiscussionEvent[]) {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
@@ -149,6 +205,40 @@ async function captureError(operation: Promise<unknown>) {
 }
 
 describe("AI reviewer: discussion stream boundary", function () {
+  it("uses the shared authenticated transport for an open discussion", async function () {
+    const request = openDiscussionRequest();
+    const events = openDiscussionEvents();
+    const fetchImpl = sinon
+      .stub()
+      .resolves(responseForEvents(events)) as unknown as typeof fetch;
+    const received: DiscussionEvent[] = [];
+
+    await streamDiscussionEvents({
+      projectId: request.projectId,
+      request,
+      signal: new AbortController().signal,
+      csrfToken: "synthetic-csrf",
+      fetchImpl,
+      onEvent: (event) => received.push(event),
+    });
+
+    expect(received).to.deep.equal(events);
+    expect(fetchImpl).to.have.property("calledOnce", true);
+    const [url, options] = (fetchImpl as unknown as sinon.SinonStub).firstCall
+      .args;
+    expect(url).to.equal("/project/project-0001/ai-reviewer/discussion-stream");
+    expect(options).to.deep.include({
+      method: "POST",
+      credentials: "same-origin",
+      body: JSON.stringify(request),
+    });
+    expect(options.headers).to.deep.equal({
+      "Content-Type": "application/json",
+      "X-Csrf-Token": "synthetic-csrf",
+      Accept: "application/x-ndjson, application/json",
+    });
+  });
+
   it("uses the shared authenticated transport and delivers a source-bound suggestion", async function () {
     const request = discussionRequest();
     const events = discussionEvents();
@@ -212,6 +302,74 @@ describe("AI reviewer: discussion stream boundary", function () {
         fetchImpl: sinon
           .stub()
           .resolves(responseForEvents(events)) as unknown as typeof fetch,
+        onEvent: (event) => received.push(event),
+      }),
+    );
+
+    expect(error).to.be.instanceOf(AgentStreamError);
+    expect((error as AgentStreamError).details).to.deep.include({
+      code: "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+    expect(received.map((event) => event.type)).to.deep.equal([
+      "started",
+      "text.delta",
+    ]);
+  });
+
+  it("rejects a discussion suggestion with a stale full-text hash before callback delivery", async function () {
+    const request = discussionRequest();
+    const staleTextHash = "b".repeat(64);
+    const events = discussionEvents(
+      suggestion({
+        baseTextHash: staleTextHash,
+      }),
+    );
+    const received: DiscussionEvent[] = [];
+
+    const error = await captureError(
+      streamDiscussionEvents({
+        projectId: request.projectId,
+        request,
+        signal: new AbortController().signal,
+        csrfToken: "synthetic-csrf",
+        fetchImpl: sinon
+          .stub()
+          .resolves(responseForEvents(events)) as unknown as typeof fetch,
+        onEvent: (event) => received.push(event),
+      }),
+    );
+
+    expect(error).to.be.instanceOf(AgentStreamError);
+    expect((error as AgentStreamError).details).to.deep.include({
+      code: "AI_DISCUSSION_EVENT_SCOPE_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+    expect(received.map((event) => event.type)).to.deep.equal([
+      "started",
+      "text.delta",
+    ]);
+  });
+
+  it("rejects an unbound open-discussion suggestion before callback delivery", async function () {
+    const request = openDiscussionRequest();
+    const received: DiscussionEvent[] = [];
+
+    const error = await captureError(
+      streamDiscussionEvents({
+        projectId: request.projectId,
+        request,
+        signal: new AbortController().signal,
+        csrfToken: "synthetic-csrf",
+        fetchImpl: sinon
+          .stub()
+          .resolves(
+            responseForEvents(
+              openDiscussionEvents({ includeSuggestion: true }),
+            ),
+          ) as unknown as typeof fetch,
         onEvent: (event) => received.push(event),
       }),
     );

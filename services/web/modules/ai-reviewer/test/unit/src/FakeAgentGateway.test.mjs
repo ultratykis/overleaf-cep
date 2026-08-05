@@ -123,7 +123,7 @@ function suggestionEvent(overrides = {}) {
       model: "deterministic-v1",
       skill: "line-edit",
       createdAt,
-      status: "proposed",
+      status: "unresolved",
       ...overrides,
     },
   };

@@ -4,6 +4,7 @@ import { EditorView } from "@codemirror/view";
 
 import {
   AgentRequestSchema,
+  EvidenceReferenceSchema,
   FindingSchema,
 } from "../../../shared/contracts.mjs";
 import type { Finding } from "../../../shared/contract-types";
@@ -15,7 +16,7 @@ import type {
   EditorSelectionShareDocument,
 } from "./editor-selection-session";
 
-export type EditorEvidenceNavigationTarget = Readonly<{
+export type EditorDocumentEvidenceNavigationTarget = Readonly<{
   requestId: string;
   findingId: string;
   projectId: string;
@@ -35,6 +36,24 @@ export type EditorEvidenceNavigationTarget = Readonly<{
   shareDocument: EditorSelectionShareDocument;
 }>;
 
+export type EditorProjectEvidenceNavigationTarget = Readonly<{
+  kind: "project";
+  requestId: string;
+  findingId: string;
+  projectId: string;
+  path: string;
+  range: Readonly<{
+    from: number;
+    to: number;
+  }>;
+  revision?: number;
+  textHash?: string;
+}>;
+
+export type EditorEvidenceNavigationTarget =
+  | EditorDocumentEvidenceNavigationTarget
+  | EditorProjectEvidenceNavigationTarget;
+
 export type EditorEvidenceNavigationConflictCode =
   | "AI_EVIDENCE_DOCUMENT_MISMATCH"
   | "AI_EVIDENCE_EDITOR_UNAVAILABLE"
@@ -50,6 +69,9 @@ export type EditorEvidenceNavigationResult =
       status: "navigated";
     }
   | {
+      status: "opened";
+    }
+  | {
       status: "conflict";
       code: EditorEvidenceNavigationConflictCode;
     }
@@ -61,11 +83,26 @@ export type EditorEvidenceNavigationResult =
       code: "AI_EVIDENCE_HASH_FAILED" | "AI_EVIDENCE_NAVIGATION_FAILED";
     };
 
+export type EditorEvidenceDocumentResolution = Readonly<{
+  documentId: string;
+  path: string;
+}>;
+
+export type ResolveEditorEvidenceDocument = (
+  path: string,
+) => EditorEvidenceDocumentResolution | null;
+
+export type OpenEditorEvidenceDocument = (
+  documentId: string,
+) => Promise<unknown>;
+
 export type NavigateToEditorEvidenceOptions = {
   target: EditorEvidenceNavigationTarget;
   getContext: () => EditorSelectionSessionContext;
   signal: AbortSignal;
   hashText?: (text: string) => Promise<string>;
+  resolveDocument?: ResolveEditorEvidenceDocument;
+  openDocument?: OpenEditorEvidenceDocument;
 };
 
 type LiveEvidenceContext = {
@@ -102,7 +139,21 @@ type HashOutcome =
       status: "error";
     };
 
+type OpenDocumentOutcome =
+  | {
+      status: "ready";
+      value: unknown;
+    }
+  | {
+      status: "cancelled";
+    }
+  | {
+      status: "error";
+    };
+
 const sha256Pattern = /^[a-f0-9]{64}$/;
+const editorReadyTimeoutMilliseconds = 6_000;
+const editorReadyPollMilliseconds = 50;
 
 function conflict(
   code: EditorEvidenceNavigationConflictCode,
@@ -209,9 +260,9 @@ function evidenceRangeStartsInVisualPreamble({
   return preambleEnd == null || range.from < preambleEnd;
 }
 
-function validTarget(
+function validDocumentTarget(
   target: unknown,
-): target is EditorEvidenceNavigationTarget {
+): target is EditorDocumentEvidenceNavigationTarget {
   return (
     typeof target === "object" &&
     target != null &&
@@ -250,11 +301,68 @@ function validTarget(
   );
 }
 
+function validProjectTarget(
+  target: unknown,
+): target is EditorProjectEvidenceNavigationTarget {
+  if (
+    typeof target !== "object" ||
+    target == null ||
+    !("kind" in target) ||
+    target.kind !== "project" ||
+    !("requestId" in target) ||
+    typeof target.requestId !== "string" ||
+    target.requestId.length === 0 ||
+    !("findingId" in target) ||
+    typeof target.findingId !== "string" ||
+    target.findingId.length === 0 ||
+    !("projectId" in target) ||
+    typeof target.projectId !== "string" ||
+    target.projectId.length === 0 ||
+    !("path" in target) ||
+    typeof target.path !== "string" ||
+    !("range" in target) ||
+    !validRange(target.range)
+  ) {
+    return false;
+  }
+
+  const revision =
+    "revision" in target && target.revision !== undefined
+      ? target.revision
+      : undefined;
+  const textHash =
+    "textHash" in target && target.textHash !== undefined
+      ? target.textHash
+      : undefined;
+  return EvidenceReferenceSchema.safeParse({
+    path: target.path,
+    range: target.range,
+    revision,
+    textHash,
+  }).success;
+}
+
 function snapshotTarget(
   target: unknown,
 ): EditorEvidenceNavigationTarget | null {
   try {
-    if (!validTarget(target)) {
+    if (validProjectTarget(target)) {
+      const snapshot = Object.freeze({
+        kind: "project" as const,
+        requestId: target.requestId,
+        findingId: target.findingId,
+        projectId: target.projectId,
+        path: target.path,
+        range: Object.freeze({
+          from: target.range.from,
+          to: target.range.to,
+        }),
+        ...(target.revision === undefined ? {} : { revision: target.revision }),
+        ...(target.textHash === undefined ? {} : { textHash: target.textHash }),
+      });
+      return validProjectTarget(snapshot) ? snapshot : null;
+    }
+    if (!validDocumentTarget(target)) {
       return null;
     }
     const snapshot = Object.freeze({
@@ -276,7 +384,7 @@ function snapshotTarget(
       currentDocument: target.currentDocument,
       shareDocument: target.shareDocument,
     });
-    return validTarget(snapshot) ? snapshot : null;
+    return validDocumentTarget(snapshot) ? snapshot : null;
   } catch {
     return null;
   }
@@ -290,7 +398,7 @@ export function createEditorEvidenceNavigationTarget({
   session: EditorSelectionSession;
   finding: Finding;
   evidenceIndex: number;
-}): EditorEvidenceNavigationTarget | null {
+}): EditorDocumentEvidenceNavigationTarget | null {
   try {
     const parsedRequest = AgentRequestSchema.safeParse(session.request);
     const parsedFinding = FindingSchema.safeParse(finding);
@@ -360,8 +468,63 @@ export function createEditorEvidenceNavigationTarget({
   }
 }
 
+export function createProjectEditorEvidenceNavigationTarget({
+  request,
+  finding,
+  evidenceIndex,
+}: {
+  request: unknown;
+  finding: Finding;
+  evidenceIndex: number;
+}): EditorProjectEvidenceNavigationTarget | null {
+  try {
+    const parsedRequest = AgentRequestSchema.safeParse(request);
+    const parsedFinding = FindingSchema.safeParse(finding);
+    if (
+      !parsedRequest.success ||
+      !parsedFinding.success ||
+      parsedRequest.data.scope.kind !== "project" ||
+      !Number.isSafeInteger(evidenceIndex) ||
+      evidenceIndex < 0
+    ) {
+      return null;
+    }
+
+    const acceptedRequest = parsedRequest.data;
+    const acceptedFinding = parsedFinding.data;
+    const reference = acceptedFinding.evidence[evidenceIndex];
+    if (
+      reference?.range == null ||
+      acceptedFinding.requestId !== acceptedRequest.requestId ||
+      acceptedFinding.projectId !== acceptedRequest.projectId
+    ) {
+      return null;
+    }
+
+    return Object.freeze({
+      kind: "project",
+      requestId: acceptedRequest.requestId,
+      findingId: acceptedFinding.id,
+      projectId: acceptedRequest.projectId,
+      path: reference.path,
+      range: Object.freeze({
+        from: reference.range.from,
+        to: reference.range.to,
+      }),
+      ...(reference.revision === undefined
+        ? {}
+        : { revision: reference.revision }),
+      ...(reference.textHash === undefined
+        ? {}
+        : { textHash: reference.textHash }),
+    });
+  } catch {
+    return null;
+  }
+}
+
 function captureLiveEvidenceContextUnsafe(
-  target: EditorEvidenceNavigationTarget,
+  target: EditorDocumentEvidenceNavigationTarget,
   getContext: () => EditorSelectionSessionContext,
 ): LiveEvidenceContextResult {
   const context = getContext();
@@ -515,11 +678,195 @@ function captureLiveEvidenceContextUnsafe(
 }
 
 function captureLiveEvidenceContext(
-  target: EditorEvidenceNavigationTarget,
+  target: EditorDocumentEvidenceNavigationTarget,
   getContext: () => EditorSelectionSessionContext,
 ): LiveEvidenceContextResult {
   try {
     return captureLiveEvidenceContextUnsafe(target, getContext);
+  } catch {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+}
+
+function captureProjectEvidencePreflightUnsafe(
+  target: EditorProjectEvidenceNavigationTarget,
+  getContext: () => EditorSelectionSessionContext,
+):
+  | {
+      status: "ready";
+      currentDocumentId: string | null;
+    }
+  | {
+      status: "conflict";
+      code: EditorEvidenceNavigationConflictCode;
+    } {
+  const context = getContext();
+  if (context.projectId !== target.projectId) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_PROJECT_MISMATCH",
+    };
+  }
+  if (context.permissions?.read !== true) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_PERMISSION_DENIED",
+    };
+  }
+  return {
+    status: "ready",
+    currentDocumentId: context.currentDocumentId,
+  };
+}
+
+function captureProjectEvidencePreflight(
+  target: EditorProjectEvidenceNavigationTarget,
+  getContext: () => EditorSelectionSessionContext,
+): ReturnType<typeof captureProjectEvidencePreflightUnsafe> {
+  try {
+    return captureProjectEvidencePreflightUnsafe(target, getContext);
+  } catch {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+}
+
+function captureOpenedProjectEvidenceContextUnsafe(
+  target: EditorProjectEvidenceNavigationTarget,
+  document: EditorEvidenceDocumentResolution,
+  getContext: () => EditorSelectionSessionContext,
+): LiveEvidenceContextResult {
+  const context = getContext();
+  if (context.projectId !== target.projectId) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_PROJECT_MISMATCH",
+    };
+  }
+  if (context.permissions?.read !== true) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_PERMISSION_DENIED",
+    };
+  }
+
+  const view = context.view;
+  if (view == null) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_EDITOR_UNAVAILABLE",
+    };
+  }
+  const currentDocument = context.currentDocument;
+  if (
+    context.currentDocumentId !== document.documentId ||
+    currentDocument == null ||
+    currentDocument.doc_id !== document.documentId
+  ) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_DOCUMENT_MISMATCH",
+    };
+  }
+  if (context.path !== target.path || document.path !== target.path) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_PATH_MISMATCH",
+    };
+  }
+
+  const sourceMode = context.sourceMode;
+  if (typeof sourceMode !== "boolean") {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+  const identity = view.state.facet(aiReviewerDocumentIdentity);
+  if (
+    identity == null ||
+    identity.documentId !== document.documentId ||
+    identity.currentDocument !== currentDocument ||
+    currentDocument.cm6?.view !== view
+  ) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_DOCUMENT_MISMATCH",
+    };
+  }
+  if (!context.connected || !currentDocument.joined) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+
+  const shareDocument = currentDocument.doc;
+  if (shareDocument == null || shareDocument.connection?.state !== "ok") {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+
+  const revisionBefore = shareDocument.getVersion();
+  const text = currentDocument.getSnapshot();
+  const hasBufferedOps = currentDocument.hasBufferedOps();
+  const revisionAfter = shareDocument.getVersion();
+  if (
+    !Number.isSafeInteger(revisionBefore) ||
+    revisionBefore < 0 ||
+    revisionAfter !== revisionBefore ||
+    typeof text !== "string" ||
+    hasBufferedOps !== false ||
+    currentDocument.doc !== shareDocument
+  ) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+
+  const editorText = view.state.doc.toString();
+  if (editorText !== text) {
+    return {
+      status: "conflict",
+      code: "AI_EVIDENCE_STATE_STALE",
+    };
+  }
+
+  return {
+    status: "ready",
+    snapshot: {
+      view,
+      currentDocument,
+      shareDocument,
+      projectId: context.projectId,
+      currentDocumentId: context.currentDocumentId,
+      path: context.path,
+      sourceMode,
+      revision: revisionBefore,
+      text: editorText,
+    },
+  };
+}
+
+function captureOpenedProjectEvidenceContext(
+  target: EditorProjectEvidenceNavigationTarget,
+  document: EditorEvidenceDocumentResolution,
+  getContext: () => EditorSelectionSessionContext,
+): LiveEvidenceContextResult {
+  try {
+    return captureOpenedProjectEvidenceContextUnsafe(
+      target,
+      document,
+      getContext,
+    );
   } catch {
     return {
       status: "conflict",
@@ -601,11 +948,342 @@ async function hashWithCancellation({
   }
 }
 
+async function openDocumentWithCancellation({
+  documentId,
+  openDocument,
+  signal,
+}: {
+  documentId: string;
+  openDocument: OpenEditorEvidenceDocument;
+  signal: AbortSignal;
+}): Promise<OpenDocumentOutcome> {
+  if (signal.aborted) {
+    return {
+      status: "cancelled",
+    };
+  }
+
+  let removeAbortListener = () => {};
+  const aborted = new Promise<OpenDocumentOutcome>((resolve) => {
+    const onAbort = () => {
+      resolve({
+        status: "cancelled",
+      });
+    };
+    signal.addEventListener("abort", onAbort, {
+      once: true,
+    });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  const opened = Promise.resolve()
+    .then(() => openDocument(documentId))
+    .then(
+      (value): OpenDocumentOutcome => ({
+        status: "ready",
+        value,
+      }),
+      (): OpenDocumentOutcome => ({
+        status: "error",
+      }),
+    );
+
+  try {
+    return await Promise.race([opened, aborted]);
+  } finally {
+    removeAbortListener();
+  }
+}
+
+function waitForEditorReadyTurn(
+  signal: AbortSignal,
+  delay: number,
+): Promise<"ready" | "cancelled"> {
+  if (signal.aborted) {
+    return Promise.resolve("cancelled");
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (result: "ready" | "cancelled") => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer != null) {
+        clearTimeout(timer);
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("editor:scroll-position-restored", onReady);
+      }
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onReady = () => finish("ready");
+    const onAbort = () => finish("cancelled");
+    if (typeof window !== "undefined") {
+      window.addEventListener("editor:scroll-position-restored", onReady, {
+        once: true,
+      });
+    }
+    signal.addEventListener("abort", onAbort, {
+      once: true,
+    });
+    timer = setTimeout(() => finish("ready"), delay);
+  });
+}
+
+async function waitForOpenedProjectEvidenceContext({
+  target,
+  document,
+  getContext,
+  signal,
+  initialContext,
+}: {
+  target: EditorProjectEvidenceNavigationTarget;
+  document: EditorEvidenceDocumentResolution;
+  getContext: () => EditorSelectionSessionContext;
+  signal: AbortSignal;
+  initialContext: LiveEvidenceContextResult;
+}): Promise<LiveEvidenceContextResult | null> {
+  let context = initialContext;
+  const deadline = Date.now() + editorReadyTimeoutMilliseconds;
+  while (
+    context.status === "conflict" &&
+    context.code !== "AI_EVIDENCE_PERMISSION_DENIED" &&
+    context.code !== "AI_EVIDENCE_PROJECT_MISMATCH" &&
+    Date.now() < deadline
+  ) {
+    const ready = await waitForEditorReadyTurn(
+      signal,
+      Math.min(editorReadyPollMilliseconds, Math.max(0, deadline - Date.now())),
+    );
+    if (ready === "cancelled" || signal.aborted) {
+      return null;
+    }
+    context = captureOpenedProjectEvidenceContext(target, document, getContext);
+  }
+  return context;
+}
+
+function selectEvidenceRange(
+  view: EditorView,
+  range: Readonly<{ from: number; to: number }>,
+): EditorEvidenceNavigationResult {
+  const selection = EditorSelection.range(range.from, range.to);
+  try {
+    view.dispatch({
+      selection,
+      effects: EditorView.scrollIntoView(selection, {
+        y: "center",
+      }),
+      annotations: Transaction.userEvent.of("select.ai-reviewer.evidence"),
+    });
+    const appliedSelection = view.state.selection;
+    if (
+      appliedSelection.ranges.length === 1 &&
+      appliedSelection.main.anchor === range.from &&
+      appliedSelection.main.head === range.to
+    ) {
+      return {
+        status: "navigated",
+      };
+    }
+  } catch {
+    return {
+      status: "error",
+      code: "AI_EVIDENCE_NAVIGATION_FAILED",
+    };
+  }
+
+  return {
+    status: "error",
+    code: "AI_EVIDENCE_NAVIGATION_FAILED",
+  };
+}
+
+async function navigateToProjectEditorEvidence({
+  target,
+  getContext,
+  signal,
+  hashText,
+  resolveDocument,
+  openDocument,
+}: {
+  target: EditorProjectEvidenceNavigationTarget;
+  getContext: () => EditorSelectionSessionContext;
+  signal: AbortSignal;
+  hashText: (text: string) => Promise<string>;
+  resolveDocument?: ResolveEditorEvidenceDocument;
+  openDocument?: OpenEditorEvidenceDocument;
+}): Promise<EditorEvidenceNavigationResult> {
+  if (resolveDocument == null || openDocument == null) {
+    return conflict("AI_EVIDENCE_EDITOR_UNAVAILABLE");
+  }
+
+  const initialContext = captureProjectEvidencePreflight(target, getContext);
+  if (initialContext.status === "conflict") {
+    return initialContext;
+  }
+  if (signal.aborted) {
+    return {
+      status: "cancelled",
+    };
+  }
+
+  let document: EditorEvidenceDocumentResolution | null;
+  try {
+    document = resolveDocument(target.path);
+  } catch {
+    return {
+      status: "error",
+      code: "AI_EVIDENCE_NAVIGATION_FAILED",
+    };
+  }
+  if (
+    document == null ||
+    typeof document.documentId !== "string" ||
+    document.documentId.length === 0 ||
+    document.path !== target.path
+  ) {
+    return conflict("AI_EVIDENCE_PATH_MISMATCH");
+  }
+
+  const beforeOpen = captureProjectEvidencePreflight(target, getContext);
+  if (beforeOpen.status === "conflict") {
+    return beforeOpen;
+  }
+  if (signal.aborted) {
+    return {
+      status: "cancelled",
+    };
+  }
+
+  const opened = await openDocumentWithCancellation({
+    documentId: document.documentId,
+    openDocument,
+    signal,
+  });
+  if (opened.status === "cancelled" || signal.aborted) {
+    return {
+      status: "cancelled",
+    };
+  }
+  if (opened.status === "error") {
+    return {
+      status: "error",
+      code: "AI_EVIDENCE_NAVIGATION_FAILED",
+    };
+  }
+
+  let openedContext = captureOpenedProjectEvidenceContext(
+    target,
+    document,
+    getContext,
+  );
+  if (
+    openedContext.status === "conflict" &&
+    beforeOpen.currentDocumentId !== document.documentId &&
+    opened.value != null &&
+    openedContext.code !== "AI_EVIDENCE_PERMISSION_DENIED" &&
+    openedContext.code !== "AI_EVIDENCE_PROJECT_MISMATCH"
+  ) {
+    const readyContext = await waitForOpenedProjectEvidenceContext({
+      target,
+      document,
+      getContext,
+      signal,
+      initialContext: openedContext,
+    });
+    if (readyContext == null || signal.aborted) {
+      return {
+        status: "cancelled",
+      };
+    }
+    openedContext = readyContext;
+  }
+
+  if (openedContext.status === "conflict") {
+    return openedContext;
+  }
+
+  const before = openedContext.snapshot;
+  if (
+    (target.revision === undefined && target.textHash === undefined) ||
+    target.range.to > before.text.length ||
+    (target.revision !== undefined && target.revision !== before.revision)
+  ) {
+    return {
+      status: "opened",
+    };
+  }
+
+  let verified = before;
+  if (target.textHash !== undefined) {
+    const hash = await hashWithCancellation({
+      text: before.text,
+      hashText,
+      signal,
+    });
+    if (hash.status === "cancelled" || signal.aborted) {
+      return {
+        status: "cancelled",
+      };
+    }
+    if (hash.status === "error") {
+      return {
+        status: "error",
+        code: "AI_EVIDENCE_HASH_FAILED",
+      };
+    }
+
+    const after = captureOpenedProjectEvidenceContext(
+      target,
+      document,
+      getContext,
+    );
+    if (after.status === "conflict") {
+      return after;
+    }
+    if (!equalLiveEvidenceContext(before, after.snapshot)) {
+      return conflict("AI_EVIDENCE_STATE_STALE");
+    }
+    if (hash.value !== target.textHash) {
+      return {
+        status: "opened",
+      };
+    }
+    verified = after.snapshot;
+  }
+
+  if (evidenceRangeHasAtomicEndpoint(verified.view, target.range)) {
+    return conflict("AI_EVIDENCE_RANGE_INVALID");
+  }
+  if (
+    evidenceRangeStartsInVisualPreamble({
+      view: verified.view,
+      sourceMode: verified.sourceMode,
+      range: target.range,
+    })
+  ) {
+    return conflict("AI_EVIDENCE_RANGE_INVALID");
+  }
+  if (signal.aborted) {
+    return {
+      status: "cancelled",
+    };
+  }
+
+  return selectEvidenceRange(verified.view, target.range);
+}
+
 export async function navigateToEditorEvidence({
   target,
   getContext,
   signal,
   hashText = sha256Text,
+  resolveDocument,
+  openDocument,
 }: NavigateToEditorEvidenceOptions): Promise<EditorEvidenceNavigationResult> {
   if (signal.aborted) {
     return {
@@ -615,6 +1293,16 @@ export async function navigateToEditorEvidence({
   const targetSnapshot = snapshotTarget(target);
   if (targetSnapshot == null) {
     return conflict("AI_EVIDENCE_REFERENCE_INVALID");
+  }
+  if (validProjectTarget(targetSnapshot)) {
+    return navigateToProjectEditorEvidence({
+      target: targetSnapshot,
+      getContext,
+      signal,
+      hashText,
+      resolveDocument,
+      openDocument,
+    });
   }
 
   const before = captureLiveEvidenceContext(targetSnapshot, getContext);
@@ -655,37 +1343,5 @@ export async function navigateToEditorEvidence({
     };
   }
 
-  const selection = EditorSelection.range(
-    targetSnapshot.range.from,
-    targetSnapshot.range.to,
-  );
-  try {
-    after.snapshot.view.dispatch({
-      selection,
-      effects: EditorView.scrollIntoView(selection, {
-        y: "center",
-      }),
-      annotations: Transaction.userEvent.of("select.ai-reviewer.evidence"),
-    });
-    const appliedSelection = after.snapshot.view.state.selection;
-    if (
-      appliedSelection.ranges.length === 1 &&
-      appliedSelection.main.anchor === targetSnapshot.range.from &&
-      appliedSelection.main.head === targetSnapshot.range.to
-    ) {
-      return {
-        status: "navigated",
-      };
-    }
-  } catch {
-    return {
-      status: "error",
-      code: "AI_EVIDENCE_NAVIGATION_FAILED",
-    };
-  }
-
-  return {
-    status: "error",
-    code: "AI_EVIDENCE_NAVIGATION_FAILED",
-  };
+  return selectEvidenceRange(after.snapshot.view, targetSnapshot.range);
 }

@@ -2,6 +2,7 @@ import { Chunk, MergeView } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { expect } from "chai";
+import i18next from "i18next";
 import sinon from "sinon";
 
 import {
@@ -106,7 +107,7 @@ function createSuggestionCase({
       model: "deterministic-v1",
       skill: "line-edit",
       createdAt: "2026-07-24T00:00:00.000Z",
-      status: "proposed",
+      status: "unresolved",
     },
     fullText: `${prefix}${original}${suffix}`,
     expectedText: `${prefix}${replacement}${suffix}`,
@@ -152,6 +153,7 @@ describe("AI reviewer: single document detached diff", function () {
       request: testCase.request,
       suggestion: testCase.suggestion,
       onSelectionChange,
+      t: i18next.t,
     });
     mountedDiffs.push(mounted);
     return {
@@ -729,6 +731,7 @@ describe("AI reviewer: single document detached diff", function () {
         parent,
         request: testCase.request,
         suggestion: malformedSuggestion,
+        t: i18next.t,
       }),
     );
 
@@ -771,6 +774,7 @@ describe("AI reviewer: single document detached diff", function () {
         parent,
         request: testCase.request,
         suggestion: testCase.suggestion,
+        t: i18next.t,
       }),
     );
 

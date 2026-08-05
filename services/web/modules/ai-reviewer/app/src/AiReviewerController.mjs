@@ -31,65 +31,111 @@ import {
 
 /** @typedef {AgentRequest | DiscussionRequest} StreamRequest */
 /** @typedef {AgentEvent | DiscussionEvent} StreamEvent */
+/** @typedef {AgentError["category"]} FailureCategory */
+/** @typedef {'selection' | 'document' | 'project' | 'none'} FailureScopeKind */
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const FALLBACK_ERROR_EVENT_ID = "ai-error";
 const FALLBACK_ERROR_CREATED_AT = "1970-01-01T00:00:00.000Z";
+
+/** @type {Readonly<Record<FailureCategory, string>>} */
+const DEFAULT_FAILURE_CODES = Object.freeze({
+  aborted: "AI_REQUEST_ABORTED",
+  authentication: "AI_PROVIDER_AUTHENTICATION_FAILED",
+  configuration: "AI_PROVIDER_CONFIGURATION_INVALID",
+  network: "AI_PROVIDER_NETWORK_FAILED",
+  provider: "AI_PROVIDER_FAILED",
+  "rate-limit": "AI_PROVIDER_RATE_LIMITED",
+  schema: "AI_STREAM_PROTOCOL_ERROR",
+  timeout: "AI_REQUEST_TIMEOUT",
+  unknown: "AI_PROVIDER_ERROR",
+});
+
+/** @type {ReadonlyMap<string, FailureCategory>} */
+const SAFE_FAILURE_CODE_CATEGORIES = new Map([
+  ["AI_PROVIDER_SCHEMA_INVALID", "schema"],
+  ["AI_PROVIDER_NETWORK_FAILED", "network"],
+  ["AI_PROVIDER_RETRY_EXHAUSTED", "network"],
+  ["AI_PROVIDER_AUTHENTICATION_FAILED", "authentication"],
+  ["AI_PROVIDER_NOT_CONFIGURED", "configuration"],
+  ["AI_PROVIDER_CONFIGURATION_INVALID", "configuration"],
+  ["AI_OPENAI_COMPATIBLE_ENDPOINT_NOT_ALLOWED", "configuration"],
+  ["AI_OLLAMA_REQUEST_URL_NOT_ALLOWED", "configuration"],
+  ["AI_PROJECT_CONTENT_NOT_AVAILABLE", "configuration"],
+  ["AI_SDK_TELEMETRY_UNSAFE", "configuration"],
+  ["AI_PROVIDER_RATE_LIMITED", "rate-limit"],
+  ["AI_REQUEST_TIMEOUT", "timeout"],
+  ["AI_REQUEST_ABORTED", "aborted"],
+  ["AI_PROVIDER_FAILED", "provider"],
+  ["AI_PROVIDER_REQUEST_FAILED", "provider"],
+  ["AI_PROVIDER_FINISH_INVALID", "provider"],
+  ["AI_PROVIDER_COMPATIBILITY_FAILED", "provider"],
+  ["AI_PROVIDER_REDIRECT_REJECTED", "provider"],
+]);
 
 /** @type {Readonly<Record<AgentError["category"], AgentError>>} */
 const PUBLIC_ERRORS = Object.freeze({
   aborted: Object.freeze({
     code: "AI_REQUEST_ABORTED",
     category: "aborted",
-    message: "The AI reviewer request was cancelled.",
+    message:
+      "The AI reviewer request was cancelled. Run it again if you still need the result.",
     retryable: false,
   }),
   authentication: Object.freeze({
     code: "AI_PROVIDER_AUTHENTICATION_ERROR",
     category: "authentication",
-    message: "The AI provider rejected its credentials.",
+    message:
+      "The AI provider rejected the credentials. Check the credential in AI Reviewer settings, then try again.",
     retryable: false,
   }),
   configuration: Object.freeze({
     code: "AI_PROVIDER_NOT_CONFIGURED",
     category: "configuration",
-    message: "No AI provider is configured.",
+    message:
+      "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
     retryable: false,
   }),
   network: Object.freeze({
     code: "AI_PROVIDER_NETWORK_ERROR",
     category: "network",
-    message: "The AI provider could not be reached.",
+    message:
+      "AI Reviewer could not reach the provider. Check the provider endpoint and network connection, then try again.",
     retryable: true,
   }),
   provider: Object.freeze({
     code: "AI_PROVIDER_ERROR",
     category: "provider",
-    message: "The AI provider request failed.",
+    message:
+      "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
     retryable: true,
   }),
   "rate-limit": Object.freeze({
     code: "AI_PROVIDER_RATE_LIMITED",
     category: "rate-limit",
-    message: "The AI provider rate limit was reached.",
+    message:
+      "The AI provider rate limit was reached. Wait a little, then try again.",
     retryable: true,
   }),
   schema: Object.freeze({
     code: "AI_STREAM_PROTOCOL_ERROR",
     category: "schema",
-    message: "The AI provider returned invalid stream data.",
+    message:
+      "AI Reviewer could not use the model response. Try narrowing the review scope, switching to a more capable model, or checking the AI Reviewer settings.",
     retryable: false,
   }),
   timeout: Object.freeze({
     code: "AI_REQUEST_TIMEOUT",
     category: "timeout",
-    message: "The AI reviewer request timed out.",
+    message:
+      "The AI reviewer request timed out. Try again or narrow the review scope.",
     retryable: true,
   }),
   unknown: Object.freeze({
     code: "AI_PROVIDER_ERROR",
     category: "unknown",
-    message: "The AI provider request failed.",
+    message:
+      "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
     retryable: true,
   }),
 });
@@ -97,7 +143,8 @@ const PUBLIC_ERRORS = Object.freeze({
 const PUBLIC_PROJECT_CONTENT_ERROR = Object.freeze({
   code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
   category: "configuration",
-  message: "The project content could not be read for review.",
+  message:
+    "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
   retryable: false,
 });
 
@@ -122,6 +169,130 @@ function publicErrorForCategory(category) {
     default:
       return { ...PUBLIC_ERRORS.unknown };
   }
+}
+
+/**
+ * @param {unknown} category
+ * @returns {FailureCategory}
+ */
+function failureCategory(category) {
+  switch (category) {
+    case "aborted":
+    case "authentication":
+    case "configuration":
+    case "network":
+    case "provider":
+    case "rate-limit":
+    case "schema":
+    case "timeout":
+      return category;
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * Preserve only module-owned diagnostic codes whose category also matches.
+ * Provider-supplied codes and messages are otherwise reduced to a fixed
+ * classification.
+ *
+ * @param {FailureCategory} category
+ * @param {unknown} error
+ */
+function failureCode(category, error) {
+  let code;
+  try {
+    code =
+      error != null && typeof error === "object"
+        ? /** @type {{ code?: unknown }} */ (error).code
+        : undefined;
+  } catch {
+    code = undefined;
+  }
+  return typeof code === "string" &&
+    SAFE_FAILURE_CODE_CATEGORIES.get(code) === category
+    ? code
+    : DEFAULT_FAILURE_CODES[category];
+}
+
+/**
+ * @param {unknown} error
+ * @param {{ disconnectSignal: AbortSignal, timeoutSignal: AbortSignal }} signals
+ * @returns {{ category: FailureCategory, code: string }}
+ */
+function classifyFailure(error, { disconnectSignal, timeoutSignal }) {
+  if (timeoutSignal.aborted) {
+    return {
+      category: "timeout",
+      code: DEFAULT_FAILURE_CODES.timeout,
+    };
+  }
+  if (disconnectSignal.aborted) {
+    return {
+      category: "aborted",
+      code: DEFAULT_FAILURE_CODES.aborted,
+    };
+  }
+  if (error instanceof ZodError) {
+    return {
+      category: "schema",
+      code: DEFAULT_FAILURE_CODES.schema,
+    };
+  }
+  if (error instanceof AgentGatewayError) {
+    const category = failureCategory(error.category);
+    return {
+      category,
+      code: failureCode(category, error),
+    };
+  }
+  return {
+    category: "unknown",
+    code: DEFAULT_FAILURE_CODES.unknown,
+  };
+}
+
+/**
+ * @param {AgentError} error
+ * @returns {{ category: FailureCategory, code: string }}
+ */
+function classifyTerminalError(error) {
+  const category = failureCategory(error.category);
+  return {
+    category,
+    code: failureCode(category, error),
+  };
+}
+
+/**
+ * @param {StreamRequest} request
+ * @returns {FailureScopeKind}
+ */
+function failureScopeKind(request) {
+  if ("scope" in request) {
+    return request.scope.kind;
+  }
+  return request.subject?.sourceRequest.scope.kind ?? "none";
+}
+
+/**
+ * @param {() => number} elapsedNow
+ */
+function readElapsedNow(elapsedNow) {
+  try {
+    const value = elapsedNow();
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * @param {number} startedAt
+ * @param {() => number} elapsedNow
+ */
+function elapsedMilliseconds(startedAt, elapsedNow) {
+  return Math.max(0, Math.round(readElapsedNow(elapsedNow) - startedAt));
 }
 
 /**
@@ -262,7 +433,7 @@ function redactStreamEventError(event) {
 function validateReviewStreamEvent(rawEvent, request, sequence) {
   const event = AgentEventSchema.parse(rawEvent);
   assertAgentEventForRequest(request, event, sequence);
-  return redactStreamEventError(event);
+  return event;
 }
 
 /**
@@ -274,7 +445,7 @@ function validateReviewStreamEvent(rawEvent, request, sequence) {
 function validateDiscussionStreamEvent(rawEvent, request, sequence) {
   const event = DiscussionEventSchema.parse(rawEvent);
   assertDiscussionEventForRequest(request, event, sequence);
-  return redactStreamEventError(event);
+  return event;
 }
 
 /**
@@ -380,10 +551,24 @@ async function allowAbortPropagation(work) {
  *     request: StreamRequest,
  *     httpRequest: Request,
  *     signal: AbortSignal,
+ *     setFailureProvider: (
+ *       provider: string | null,
+ *       model: string | null,
+ *     ) => void,
  *   }) => AgentGateway | PromiseLike<AgentGateway>,
  *   timeoutSignalFactory?: () => AbortSignal,
  *   now?: () => string,
  *   eventId?: () => string,
+ *   elapsedNow?: () => number,
+ *   failureRecorder?: (record: {
+ *     requestId: string,
+ *     provider: string | null,
+ *     model: string | null,
+ *     scopeKind: FailureScopeKind,
+ *     failureCategory: FailureCategory,
+ *     failureCode: string,
+ *     elapsedMs: number,
+ *   }) => void,
  * }} dependencies
  */
 export function createAiReviewerController({
@@ -391,9 +576,17 @@ export function createAiReviewerController({
   timeoutSignalFactory = () => AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   now = () => new Date().toISOString(),
   eventId = randomUUID,
+  elapsedNow = () => performance.now(),
+  failureRecorder = () => {},
 }) {
   if (typeof gatewayFactory !== "function") {
     throw new TypeError("gatewayFactory must be a function.");
+  }
+  if (typeof elapsedNow !== "function") {
+    throw new TypeError("elapsedNow must be a function.");
+  }
+  if (typeof failureRecorder !== "function") {
+    throw new TypeError("failureRecorder must be a function.");
   }
 
   /**
@@ -439,6 +632,51 @@ export function createAiReviewerController({
     }
 
     const activeRequest = /** @type {StreamRequest} */ (parsedRequest.data);
+    const startedAt = readElapsedNow(elapsedNow);
+    /** @type {string | null} */
+    let failureProvider = null;
+    /** @type {string | null} */
+    let failureModel = null;
+    let failureRecorded = false;
+    /**
+     * @param {string | null} provider
+     * @param {string | null} model
+     */
+    const setFailureProvider = (provider, model) => {
+      failureProvider =
+        typeof provider === "string" &&
+        provider.length > 0 &&
+        provider.length <= 512
+          ? provider
+          : null;
+      failureModel =
+        typeof model === "string" && model.length > 0 && model.length <= 512
+          ? model
+          : null;
+    };
+    /**
+     * @param {{ category: FailureCategory, code: string }} failure
+     */
+    const recordFailure = (failure) => {
+      if (failureRecorded) {
+        return;
+      }
+      failureRecorded = true;
+      try {
+        failureRecorder({
+          requestId: activeRequest.requestId,
+          provider: failureProvider,
+          model: failureModel,
+          scopeKind: failureScopeKind(activeRequest),
+          failureCategory: failure.category,
+          failureCode: failure.code,
+          elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
+        });
+      } catch {
+        // Logging cannot replace the bounded public failure response.
+      }
+    };
+
     response.status(200);
     response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
     response.setHeader("cache-control", "no-store");
@@ -479,6 +717,7 @@ export function createAiReviewerController({
             request: activeRequest,
             httpRequest: request,
             signal,
+            setFailureProvider,
           }),
         ),
         signal,
@@ -516,11 +755,17 @@ export function createAiReviewerController({
           throw abortErrorForSignal(signal);
         }
 
-        const event = protocol.validateEvent(
+        const validatedEvent = protocol.validateEvent(
           step.value,
           activeRequest,
           nextSequence,
         );
+        if (validatedEvent.type === "started") {
+          setFailureProvider(validatedEvent.provider, validatedEvent.model);
+        } else if (validatedEvent.type === "error") {
+          recordFailure(classifyTerminalError(validatedEvent.error));
+        }
+        const event = redactStreamEventError(validatedEvent);
         const terminal = isTerminalEvent(event);
         const capacity = writeEvent(response, event, signal);
         nextSequence += 1;
@@ -540,6 +785,12 @@ export function createAiReviewerController({
         }
       }
     } catch (error) {
+      recordFailure(
+        classifyFailure(error, {
+          disconnectSignal: disconnectController.signal,
+          timeoutSignal,
+        }),
+      );
       if (
         response.destroyed ||
         response.writableEnded ||

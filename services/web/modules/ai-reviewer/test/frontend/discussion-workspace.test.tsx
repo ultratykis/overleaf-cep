@@ -23,7 +23,7 @@ import type {
   AgentRequest,
   DiscussionEvent,
   Finding,
-  ProposedSuggestion,
+  UnresolvedSuggestion,
 } from "../../shared/contract-types";
 
 const createdAt = "2026-07-25T00:00:00.000Z";
@@ -111,7 +111,7 @@ function sourceFinding(request: AgentRequest): Finding {
   };
 }
 
-function discussionSuggestion(request: AgentRequest): ProposedSuggestion {
+function discussionSuggestion(request: AgentRequest): UnresolvedSuggestion {
   return {
     id: "discussion-suggestion",
     requestId: request.requestId,
@@ -142,7 +142,7 @@ function discussionSuggestion(request: AgentRequest): ProposedSuggestion {
     model: "deterministic-v1",
     skill: "referee-review",
     createdAt,
-    status: "proposed",
+    status: "unresolved",
   };
 }
 
@@ -259,8 +259,104 @@ async function sendDiscussionMessage(text: string) {
   });
 }
 
-describe("AI reviewer: subject-bound discussion workspace", function () {
-  it("navigates through a pinned required subject, sends only 12 recent turns, escapes model text, and returns to one collapsed row", async function () {
+describe("AI reviewer: discussion workspace", function () {
+  it("starts an open discussion from the list input, sends only 12 recent turns, and returns to one collapsed row with no subject", async function () {
+    let responseNumber = 0;
+    const streamDiscussionRequest = sinon
+      .stub()
+      .callsFake(async (call: DiscussionStreamCall) => {
+        responseNumber += 1;
+        const { requestId } = call.request;
+        call.onEvent(
+          discussionEvent(requestId, 0, {
+            type: "started",
+            provider: "fake",
+            model: "deterministic-v1",
+          }),
+        );
+        call.onEvent(
+          discussionEvent(requestId, 1, {
+            type: "text.delta",
+            delta: `Open discussion reply ${responseNumber}`,
+          }),
+        );
+        call.onEvent(
+          discussionEvent(requestId, 2, {
+            type: "completed",
+            finishReason: "stop",
+          }),
+        );
+      });
+    let requestNumber = 0;
+
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        createDiscussionId={() => "open-discussion-0001"}
+        createDiscussionRequestId={() =>
+          `open-discussion-request-${++requestNumber}`
+        }
+        now={() => createdAt}
+        streamDiscussionRequest={streamDiscussionRequest}
+      />,
+    );
+
+    expect(screen.getByLabelText("Review list")).to.exist;
+    await sendDiscussionMessage("Open discussion message 1");
+    const discussion = await screen.findByRole("region", {
+      name: "AI reviewer discussion",
+    });
+    const subject = within(discussion).getByTestId("discussion-subject");
+    expect(subject.textContent).to.equal("No subject");
+    expect(within(discussion).queryByRole("button", { name: "Run review" })).not
+      .to.exist;
+
+    for (let index = 2; index <= 13; index += 1) {
+      await sendDiscussionMessage(`Open discussion message ${index}`);
+    }
+
+    expect(streamDiscussionRequest.callCount).to.equal(13);
+    for (const call of streamDiscussionRequest.getCalls()) {
+      expect(call.args[0].request).to.include({
+        discussionId: "open-discussion-0001",
+        projectId,
+        subject: null,
+      });
+      expect(call.args[0].request.turns.length).to.be.at.most(
+        DISCUSSION_CONTEXT_TURN_LIMIT,
+      );
+      expect(
+        DiscussionRequestSchema.safeParse(call.args[0].request).success,
+      ).to.equal(true);
+    }
+    const finalRequest = streamDiscussionRequest.lastCall.args[0].request;
+    expect(finalRequest.turns).to.have.length(DISCUSSION_CONTEXT_TURN_LIMIT);
+    expect(finalRequest.turns[0]).to.deep.equal({
+      role: "assistant",
+      text: "Open discussion reply 7",
+    });
+    expect(finalRequest.turns.at(-1)).to.deep.equal({
+      role: "user",
+      text: "Open discussion message 13",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to review list" }),
+    );
+    const summary = await screen.findByRole("article", {
+      name: "Discussion summary",
+    });
+    expect(within(summary).getByRole("button", { name: "No subject" })).to
+      .exist;
+    expect(
+      screen.getAllByRole("article", {
+        name: "Discussion summary",
+      }),
+    ).to.have.length(1);
+    expect(screen.queryByLabelText("Discussion turns")).not.to.exist;
+  });
+
+  it("navigates through a pinned subject, sends only 12 recent turns, escapes model text, and returns to one collapsed row", async function () {
     const maliciousModelText =
       '<img src=x onerror="globalThis.pwned=true"><a href="https://attacker.invalid/">click</a>';
     let responseNumber = 0;
@@ -307,9 +403,13 @@ describe("AI reviewer: subject-bound discussion workspace", function () {
       "Finding: Ambiguous discussion phrase",
     );
     expect(subjectHeader).not.to.equal(null);
-    expect(subjectHeader?.classList.contains("flex-shrink-0")).to.equal(true);
+    expect(
+      subjectHeader?.classList.contains("ai-reviewer-discussion-header"),
+    ).to.equal(true);
     expect(subjectHeader?.nextElementSibling).to.equal(turns);
-    expect(turns.classList.contains("overflow-auto")).to.equal(true);
+    expect(turns.classList.contains("ai-reviewer-discussion-turns")).to.equal(
+      true,
+    );
     expect(within(discussion).queryByRole("button", { name: "Run review" })).not
       .to.exist;
 
@@ -379,8 +479,10 @@ describe("AI reviewer: subject-bound discussion workspace", function () {
       expect(screen.getAllByText("Completed")).to.have.length(2);
     });
     const reviewList = screen.getByLabelText("Review list");
+    const timeline = reviewList.querySelector(".ai-reviewer-panel-timeline");
+    expect(timeline).not.to.equal(null);
     expect(
-      Array.from(reviewList.children).map((entry) =>
+      Array.from(timeline?.children ?? []).map((entry) =>
         entry.getAttribute("aria-label"),
       ),
     ).to.deep.equal(["Review run 1", "Discussion summary", "Review run 2"]);

@@ -1,23 +1,70 @@
 // @ts-check
 
-import { AgentGatewayAbortError } from "./AgentGateway.mjs";
+import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import {
   parseAiReviewerProviderConfig,
+  parseAiReviewerProviderConfigUpdate,
   publicAiReviewerProviderConfig,
 } from "./AiReviewerProviderConfig.mjs";
 
 /** @import { Request, Response } from 'express' */
 
-const ERRORS = {
-  invalid: [
-    "AI_PROVIDER_CONFIGURATION_INVALID",
-    "The AI provider configuration is invalid.",
-  ],
-  missing: ["AI_PROVIDER_NOT_CONFIGURED", "No AI provider is configured."],
-  timeout: ["AI_REQUEST_TIMEOUT", "The AI reviewer request timed out."],
-  aborted: ["AI_REQUEST_ABORTED", "The AI reviewer request was cancelled."],
-  provider: ["AI_PROVIDER_ERROR", "The AI provider request failed."],
-};
+const ERRORS = Object.freeze({
+  invalid: Object.freeze({
+    code: "AI_PROVIDER_CONFIGURATION_INVALID",
+    category: "configuration",
+    message: "The AI provider configuration is invalid.",
+    retryable: false,
+  }),
+  missing: Object.freeze({
+    code: "AI_PROVIDER_NOT_CONFIGURED",
+    category: "configuration",
+    message: "No AI provider is configured.",
+    retryable: false,
+  }),
+  timeout: Object.freeze({
+    code: "AI_REQUEST_TIMEOUT",
+    category: "timeout",
+    message: "The AI reviewer request timed out.",
+    retryable: true,
+  }),
+  aborted: Object.freeze({
+    code: "AI_REQUEST_ABORTED",
+    category: "aborted",
+    message: "The AI reviewer request was cancelled.",
+    retryable: false,
+  }),
+  authentication: Object.freeze({
+    code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+    category: "authentication",
+    message: "The AI provider rejected its credentials.",
+    retryable: false,
+  }),
+  network: Object.freeze({
+    code: "AI_PROVIDER_NETWORK_FAILED",
+    category: "network",
+    message: "The AI provider could not be reached.",
+    retryable: true,
+  }),
+  "rate-limit": Object.freeze({
+    code: "AI_PROVIDER_RATE_LIMITED",
+    category: "rate-limit",
+    message: "The AI provider rate limit was reached.",
+    retryable: true,
+  }),
+  schema: Object.freeze({
+    code: "AI_PROVIDER_SCHEMA_INVALID",
+    category: "schema",
+    message: "The AI provider returned invalid data.",
+    retryable: false,
+  }),
+  provider: Object.freeze({
+    code: "AI_PROVIDER_ERROR",
+    category: "provider",
+    message: "The AI provider request failed.",
+    retryable: true,
+  }),
+});
 
 /** @param {Request} request */
 function userId(request) {
@@ -34,14 +81,30 @@ function userId(request) {
  * @param {keyof typeof ERRORS} kind
  */
 function sendError(response, status, kind) {
-  const [code, message] = ERRORS[kind];
-  const category = ["invalid", "missing"].includes(kind)
-    ? "configuration"
-    : kind;
-  const retryable = kind === "timeout" || kind === "provider";
-  return response
-    .status(status)
-    .json({ error: { code, category, message, retryable } });
+  const error = ERRORS[kind];
+  return response.status(status).json({
+    error: {
+      code: error.code,
+      category: error.category,
+      message: error.message,
+      retryable: error.retryable,
+    },
+  });
+}
+
+/** @param {unknown} error */
+function providerFailureKind(error) {
+  if (error instanceof AgentGatewayError) {
+    switch (error.category) {
+      case "authentication":
+      case "network":
+      case "rate-limit":
+      case "schema":
+      case "provider":
+        return error.category;
+    }
+  }
+  return /** @type {const} */ ("provider");
 }
 
 /** @param {any} dependencies */
@@ -69,7 +132,7 @@ export function createAiReviewerProviderController(dependencies) {
    */
   async function saveConfiguration(request, response) {
     try {
-      const config = parseAiReviewerProviderConfig(request.body);
+      const config = parseAiReviewerProviderConfigUpdate(request.body);
       const saved = await configStore.save(userId(request), config);
       return response.json(publicAiReviewerProviderConfig(saved));
     } catch {
@@ -116,7 +179,7 @@ export function createAiReviewerProviderController(dependencies) {
       ) {
         return sendError(response, 499, "aborted");
       }
-      return sendError(response, 502, "provider");
+      return sendError(response, 502, providerFailureKind(error));
     } finally {
       request.removeListener?.("aborted", onAborted);
     }

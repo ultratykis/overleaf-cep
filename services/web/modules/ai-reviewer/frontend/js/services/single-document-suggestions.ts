@@ -2,18 +2,18 @@ import { z } from "zod";
 
 import {
   AgentRequestSchema,
-  ProposedSuggestionSchema,
+  UnresolvedSuggestionSchema,
 } from "../../../shared/contracts.mjs";
 import type {
   AgentRequest,
-  ProposedSuggestion,
+  UnresolvedSuggestion,
 } from "../../../shared/contract-types";
 
 type SingleDocumentRequest = Omit<AgentRequest, "scope"> & {
   scope: Exclude<AgentRequest["scope"], { kind: "project" }>;
 };
 
-type DiscardedSuggestion = Omit<ProposedSuggestion, "status"> & {
+type DiscardedSuggestion = Omit<UnresolvedSuggestion, "status"> & {
   status: "discarded";
 };
 
@@ -87,7 +87,7 @@ function parseRequest(request: unknown): SingleDocumentRequest {
 
 function assertSuggestionMatchesRequest(
   request: SingleDocumentRequest,
-  suggestion: ProposedSuggestion,
+  suggestion: UnresolvedSuggestion,
 ) {
   if (suggestion.requestId !== request.requestId) {
     throw new SingleDocumentSuggestionError(
@@ -172,9 +172,9 @@ export function prepareSingleDocumentSuggestion({
 }: {
   request: unknown;
   suggestion: unknown;
-}): ProposedSuggestion {
+}): UnresolvedSuggestion {
   const request = parseRequest(rawRequest);
-  const parsedSuggestion = ProposedSuggestionSchema.safeParse(rawSuggestion);
+  const parsedSuggestion = UnresolvedSuggestionSchema.safeParse(rawSuggestion);
   if (!parsedSuggestion.success) {
     throw new SingleDocumentSuggestionError(
       "AI_SUGGESTION_SCHEMA_INVALID",
@@ -258,7 +258,7 @@ export function preflightSingleDocumentSuggestion({
 export function discardSingleDocumentSuggestion(
   rawSuggestion: unknown,
 ): DiscardedSuggestion {
-  const parsed = ProposedSuggestionSchema.safeParse(rawSuggestion);
+  const parsed = UnresolvedSuggestionSchema.safeParse(rawSuggestion);
   if (!parsed.success) {
     throw new SingleDocumentSuggestionError(
       "AI_SUGGESTION_SCHEMA_INVALID",

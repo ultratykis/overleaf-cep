@@ -18,6 +18,7 @@ import AiIntegrationDetails, {
 import {
   type AiProviderConfiguration,
   type AiProviderConfigurationResponse,
+  type AiProviderConfigurationWrite,
   getAiProviderConfiguration,
   saveAiProviderConfiguration,
   testAiProviderConnection,
@@ -32,17 +33,36 @@ const projectId = "ai-provider-project";
 const otherProjectId = "other-ai-provider-project";
 const csrfToken = "synthetic-ai-provider-csrf";
 const rawPayload = "RAW_PROVIDER_RESPONSE_dial_tcp_127_0_0_1_11434";
+const credential = "PRIVATE_OPENAI_COMPATIBLE_CREDENTIAL";
+const credentialUpdatedAt = "2026-07-26T01:02:03.000Z";
+const replacementCredentialUpdatedAt = "2026-07-26T02:03:04.000Z";
 const configuration: AiProviderConfiguration = {
-  provider: "ollama",
+  provider: "openai-compatible",
   baseUrl: "http://127.0.0.1:11434/v1",
   model: "qwen3.5:4b",
   contextLength: 8_192,
+  credentialSet: false,
+  credentialUpdatedAt: null,
 };
 const otherConfiguration: AiProviderConfiguration = {
-  provider: "ollama",
-  baseUrl: "http://localhost:11434/v1",
-  model: "other-model:latest",
+  provider: "openai-compatible",
+  baseUrl: "https://api.example.com/v1",
+  model: "hosted-model",
   contextLength: 4_096,
+  credentialSet: true,
+  credentialUpdatedAt,
+};
+const configurationWrite: AiProviderConfigurationWrite = {
+  provider: configuration.provider,
+  baseUrl: configuration.baseUrl,
+  model: configuration.model,
+  contextLength: configuration.contextLength,
+};
+const otherConfigurationWrite: AiProviderConfigurationWrite = {
+  provider: otherConfiguration.provider,
+  baseUrl: otherConfiguration.baseUrl,
+  model: otherConfiguration.model,
+  contextLength: otherConfiguration.contextLength,
 };
 const unconfigured: AiProviderConfigurationResponse = {
   configured: false,
@@ -57,11 +77,11 @@ const configured: AiProviderConfigurationResponse = {
 const otherConfigured: AiProviderConfigurationResponse = {
   configured: true,
   config: otherConfiguration,
-  classification: "local",
+  classification: "remote",
 };
 const connectionResponse = {
   ok: true as const,
-  provider: "ollama" as const,
+  provider: "openai-compatible" as const,
   model: configuration.model,
   classification: "local" as const,
 };
@@ -169,7 +189,7 @@ describe("AI reviewer: provider configuration", function () {
     const candidate = {
       ...configuration,
       token: "must-not-be-sent",
-    } as AiProviderConfiguration;
+    } as AiProviderConfigurationWrite;
 
     expect(
       await saveAiProviderConfiguration(projectId, candidate, signal),
@@ -184,7 +204,43 @@ describe("AI reviewer: provider configuration", function () {
       "model",
       "contextLength",
     ]);
-    expect(JSON.parse(String(call.options.body))).to.deep.equal(configuration);
+    expect(JSON.parse(String(call.options.body))).to.deep.equal(
+      configurationWrite,
+    );
+  });
+
+  it("sends only an explicitly entered credential as the fifth PUT field", async function () {
+    const route = fetchMock.put(
+      `/project/${projectId}/ai-reviewer/config`,
+      otherConfigured,
+    );
+    const signal = new AbortController().signal;
+    const candidate = {
+      ...otherConfigurationWrite,
+      credential,
+      token: "must-not-be-sent",
+      credentialSet: true,
+      credentialUpdatedAt,
+    } as AiProviderConfigurationWrite;
+
+    expect(
+      await saveAiProviderConfiguration(projectId, candidate, signal),
+    ).to.deep.equal(otherConfigured);
+
+    const call = route.callHistory.calls()[0];
+    const body = JSON.parse(String(call.options.body));
+    expect(Object.keys(body)).to.deep.equal([
+      "provider",
+      "baseUrl",
+      "model",
+      "contextLength",
+      "credential",
+    ]);
+    expect(body).to.deep.equal({
+      ...otherConfigurationWrite,
+      credential,
+    });
+    expect(JSON.stringify(body)).not.to.include("must-not-be-sent");
   });
 
   it("tests persisted configuration through a bodyless POST", async function () {
@@ -204,7 +260,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(call.options.body).to.equal(undefined);
   });
 
-  it("loads, edits, saves, and tests an Ollama configuration", async function () {
+  it("loads, edits, saves, and tests a local configuration without a credential", async function () {
     const { saveConfiguration, testConnection } = renderDetails();
     await waitUntilLoaded();
 
@@ -222,15 +278,78 @@ describe("AI reviewer: provider configuration", function () {
     await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
     expect(saveConfiguration.firstCall.args.slice(0, 2)).to.deep.equal([
       projectId,
-      configuration,
+      configurationWrite,
     ]);
     await screen.findByText("Local");
+    await screen.findByText("No credential set");
 
     fireEvent.click(button("Test connection"));
     await waitFor(() => expect(testConnection).to.have.been.calledOnce);
     expect(testConnection.firstCall.args).to.have.length(2);
     expect(testConnection.firstCall.args[0]).to.equal(projectId);
     await screen.findByText("Connection successful");
+  });
+
+  it("shows only remote credential metadata and never renders a returned secret", async function () {
+    const responseWithSecret = {
+      ...otherConfigured,
+      config: {
+        ...otherConfiguration,
+        credential,
+      },
+    } as AiProviderConfigurationResponse;
+    renderDetails({
+      getConfiguration: sinon.stub().resolves(responseWithSecret),
+    });
+
+    await waitUntilLoaded();
+    const credentialInput = input("Credential (optional)");
+    expect(credentialInput.type).to.equal("password");
+    expect(credentialInput.value).to.equal("");
+    expect(credentialInput.autocomplete).to.equal("new-password");
+    expect(screen.getByText("Remote")).to.exist;
+    expect(screen.getByText("Credential set")).to.exist;
+    expect(screen.getByText(`Last updated: ${credentialUpdatedAt}`)).to.exist;
+    expect(document.body.textContent).not.to.include(credential);
+  });
+
+  it("saves a replacement credential and blanks its draft after the PUT response", async function () {
+    const replacementResponse: AiProviderConfigurationResponse = {
+      configured: true,
+      config: {
+        ...otherConfiguration,
+        credentialUpdatedAt: replacementCredentialUpdatedAt,
+      },
+      classification: "remote",
+    };
+    const saveConfiguration = sinon.stub().resolves(replacementResponse);
+    renderDetails({
+      getConfiguration: sinon.stub().resolves(otherConfigured),
+      saveConfiguration,
+    });
+    await waitUntilLoaded();
+
+    fireEvent.change(input("Credential (optional)"), {
+      target: { value: credential },
+    });
+    expect(button("Save").disabled).to.equal(false);
+    expect(button("Test connection").disabled).to.equal(true);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args.slice(0, 2)).to.deep.equal([
+      projectId,
+      {
+        ...otherConfigurationWrite,
+        credential,
+      },
+    ]);
+    await waitFor(() =>
+      expect(input("Credential (optional)").value).to.equal(""),
+    );
+    expect(button("Test connection").disabled).to.equal(false);
+    expect(screen.getByText(`Last updated: ${replacementCredentialUpdatedAt}`))
+      .to.exist;
   });
 
   it("requires a positive integer context length before saving", async function () {
@@ -343,8 +462,32 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.click(button("Test connection"));
 
     await screen.findByText(
-      "Ollama is unavailable. Start Ollama and try the connection again.",
+      "The AI provider could not be reached. Check the base URL and try again.",
     );
     expect(document.body.textContent).not.to.include(rawPayload);
+  });
+
+  it("preserves a bounded authentication category without exposing provider text", async function () {
+    fetchMock.get(`/project/${projectId}/ai-reviewer/config`, otherConfigured);
+    fetchMock.post(`/project/${projectId}/ai-reviewer/connection-test`, {
+      status: 502,
+      headers: { "Content-Type": "application/json" },
+      body: {
+        error: { code: "AI_PROVIDER_AUTHENTICATION_ERROR" },
+        providerPayload: rawPayload,
+      },
+    });
+
+    render(
+      <ProjectProvider>
+        <AiIntegrationDetails onHide={sinon.stub()} />
+      </ProjectProvider>,
+    );
+    await waitUntilLoaded();
+    fireEvent.click(button("Test connection"));
+
+    await screen.findByText("The AI provider rejected its credentials.");
+    expect(document.body.textContent).not.to.include(rawPayload);
+    expect(document.body.textContent).not.to.include(credential);
   });
 });

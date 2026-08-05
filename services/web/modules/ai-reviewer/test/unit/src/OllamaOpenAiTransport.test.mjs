@@ -404,7 +404,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       apiKey: "ollama",
       baseURL: baseUrl,
       fetch: expect.any(Function),
-      name: "ollama",
+      name: "openai-compatible",
     });
     expect(fixture.chat).toHaveBeenCalledExactlyOnceWith(modelTag);
     expect(fixture.fetchImpl).not.toHaveBeenCalled();
@@ -424,7 +424,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
     expect(gateway).toBeInstanceOf(AiSdkAgentGateway);
     expect(gateway).toMatchObject({
-      provider: "ollama",
+      provider: "openai-compatible",
       modelId: modelTag,
     });
     expect(gateway.model).toMatchObject({
@@ -447,7 +447,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
     expect(gateway).toBeInstanceOf(AiSdkAgentGateway);
     expect(gateway).toMatchObject({
-      provider: "ollama",
+      provider: "openai-compatible",
       modelId: modelTag,
       readProjectFile,
     });
@@ -466,7 +466,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
 
     expect(gateway).toBeInstanceOf(AiSdkAgentGateway);
     expect(gateway).toMatchObject({
-      provider: "ollama",
+      provider: "openai-compatible",
       modelId: modelTag,
       streamDiscussion: expect.any(Function),
     });
@@ -5677,7 +5677,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
   );
 
   it.each([
-    "qwen3.5",
+    "qwen 3.5",
     " qwen3.5:4b",
     "qwen3.5:4b ",
     "qwen3.5:",
@@ -5698,7 +5698,9 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
             createProvider,
             fetchImpl,
           }),
-      ).toThrow("modelTag must be an explicit canonical Ollama tag");
+      ).toThrow(
+        "modelId must be a canonical OpenAI-compatible model identifier",
+      );
       expect(createProvider).not.toHaveBeenCalled();
       expect(fetchImpl).not.toHaveBeenCalled();
     },
@@ -5716,7 +5718,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           createProvider,
           fetchImpl,
         }),
-    ).toThrow("not an allowed local OpenAI-compatible URL");
+    ).toThrow("OpenAI-compatible endpoint is not allowed");
     expect(createProvider).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
