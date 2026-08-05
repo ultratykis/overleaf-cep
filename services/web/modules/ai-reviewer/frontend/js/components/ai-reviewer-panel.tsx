@@ -1348,6 +1348,8 @@ export function AiReviewerPanelView({
   loadProviderModels?: typeof getAiProviderModels;
 }) {
   const { t } = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const [workspace, dispatch] = useReducer(
     reduceReviewWorkspaceState,
     initialReviewWorkspaceState,
@@ -1403,6 +1405,8 @@ export function AiReviewerPanelView({
   const [unresolvedFindingJumpPending, setUnresolvedFindingJumpPending] =
     useState(false);
   const firstUnresolvedFindingRef = useRef<HTMLElement | null>(null);
+  const runElementRefs = useRef(new Map<number, HTMLElement>());
+  const pendingStartedRunScroll = useRef<number | null>(null);
   const activeDiscussionIdRef = useRef<string | null>(activeDiscussionId);
   activeDiscussionIdRef.current = activeDiscussionId;
   const [showDeleteWorkspaceConfirmation, setShowDeleteWorkspaceConfirmation] =
@@ -1610,6 +1614,15 @@ export function AiReviewerPanelView({
     [],
   );
 
+  useEffect(() => {
+    updateDiscussions((current) =>
+      current.map((discussion) => ({
+        ...discussion,
+        subjectLabel: discussionSubjectLabel(discussion.subject, t),
+      })),
+    );
+  }, [t, updateDiscussions]);
+
   const enqueuePersistenceOperation = useCallback(
     <T,>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => {
       const generation = persistenceGeneration.current;
@@ -1714,7 +1727,8 @@ export function AiReviewerPanelView({
           }
           const storedWorkspace = storedSnapshot.workspace;
           const hydratedDiscussions = storedWorkspace.discussions.map(
-            (discussion) => discussionFromWorkspace(discussion, t),
+            (discussion) =>
+              discussionFromWorkspace(discussion, translationRef.current),
           );
           dispatch({
             type: "hydrate",
@@ -1753,7 +1767,9 @@ export function AiReviewerPanelView({
           ) {
             return;
           }
-          setPersistenceNotice(persistenceErrorMessage(error, t));
+          setPersistenceNotice(
+            persistenceErrorMessage(error, translationRef.current),
+          );
         },
       )
       .finally(() => {
@@ -1770,7 +1786,7 @@ export function AiReviewerPanelView({
         cancellationReason("The workspace persistence scope changed."),
       );
     };
-  }, [projectId, t, updateDiscussions, workspacePersistence]);
+  }, [projectId, updateDiscussions, workspacePersistence]);
 
   useEffect(() => {
     const hydratedScope = hydratedPersistenceScope.current;
@@ -1972,6 +1988,7 @@ export function AiReviewerPanelView({
       nextGeneration.current = run.generation;
       nextWorkspaceOrder.current += 1;
       activeRun.current = run;
+      pendingStartedRunScroll.current = run.generation;
       dispatch({
         type: "begin",
         status,
@@ -4599,6 +4616,13 @@ export function AiReviewerPanelView({
   const renderRun = (runState: SelectionWorkspaceState) => (
     <article
       key={`run:${runState.generation}`}
+      ref={(element) => {
+        if (element == null) {
+          runElementRefs.current.delete(runState.generation);
+        } else {
+          runElementRefs.current.set(runState.generation, element);
+        }
+      }}
       aria-label={t("ai_reviewer_review_run", {
         generation: runState.generation,
       })}
@@ -5069,6 +5093,19 @@ export function AiReviewerPanelView({
       return `run:${runState.generation}:${kind}:${finding.id}`;
     })
     .find((key): key is string => key != null);
+
+  useEffect(() => {
+    const generation = pendingStartedRunScroll.current;
+    if (generation == null || activeDiscussionId != null) {
+      return;
+    }
+    const target = runElementRefs.current.get(generation);
+    if (target == null) {
+      return;
+    }
+    pendingStartedRunScroll.current = null;
+    target.scrollIntoView?.({ block: "start" });
+  }, [activeDiscussionId, workspace.runs]);
 
   useEffect(() => {
     if (!unresolvedFindingJumpPending || activeDiscussionId != null) {

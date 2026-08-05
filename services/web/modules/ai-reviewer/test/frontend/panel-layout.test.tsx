@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -6,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { expect } from "chai";
+import i18next from "i18next";
 import React from "react";
 import sinon from "sinon";
 
@@ -16,6 +18,7 @@ import {
 } from "../../frontend/js/services/agent-stream";
 import type { AiProviderConnection } from "../../frontend/js/services/ai-provider-configuration";
 import type { AiReviewerModeInstructionPersistence } from "../../frontend/js/services/ai-reviewer-mode-instructions";
+import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import { AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH } from "../../shared/contracts.mjs";
 
 type StreamCall = Parameters<typeof streamAgentEvents>[0];
@@ -639,6 +642,106 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
   });
 
+  it("brings a newly started run into view below a long history", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: `panel-scroll-completed-${streamRequest.callCount}`,
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    const scrollIntoView = sinon.spy(function (
+      this: HTMLElement,
+      _options?: boolean | ScrollIntoViewOptions,
+    ) {
+      const panelBody = screen.getByTestId(
+        "ai-reviewer-conversation",
+      ) as HTMLElement;
+      panelBody.scrollTop = 2_521;
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      renderReviewPanel({ streamRequest });
+      for (let index = 1; index <= 3; index += 1) {
+        runSelectionReview();
+        const run = await screen.findByRole("article", {
+          name: `Review run ${index}`,
+        });
+        await within(run).findByText("Completed");
+      }
+
+      const panelBody = screen.getByTestId(
+        "ai-reviewer-conversation",
+      ) as HTMLElement;
+      Object.defineProperties(panelBody, {
+        clientHeight: { configurable: true, value: 677 },
+        scrollHeight: { configurable: true, value: 3_109 },
+      });
+      panelBody.scrollTop = 0;
+      scrollIntoView.resetHistory();
+
+      runSelectionReview();
+      const newRun = await screen.findByRole("article", {
+        name: "Review run 4",
+      });
+      await within(newRun).findByText("Completed");
+      Object.defineProperty(panelBody, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({
+          x: 0,
+          y: 79,
+          top: 79,
+          right: 320,
+          bottom: 756,
+          left: 0,
+          width: 320,
+          height: 677,
+          toJSON: () => ({}),
+        }),
+      });
+      Object.defineProperty(newRun, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({
+          x: 0,
+          y: 2_600 - panelBody.scrollTop,
+          top: 2_600 - panelBody.scrollTop,
+          right: 320,
+          bottom: 3_182 - panelBody.scrollTop,
+          left: 0,
+          width: 320,
+          height: 582,
+          toJSON: () => ({}),
+        }),
+      });
+
+      expect(panelBody.scrollHeight).to.be.greaterThan(panelBody.clientHeight);
+      expect(scrollIntoView.calledOnceWith({ block: "start" })).to.equal(true);
+      expect(scrollIntoView.firstCall.thisValue).to.equal(newRun);
+      const panelBounds = panelBody.getBoundingClientRect();
+      const runBounds = newRun.getBoundingClientRect();
+      expect(runBounds.top).to.be.at.least(panelBounds.top);
+      expect(runBounds.bottom).to.be.at.most(panelBounds.bottom);
+    } finally {
+      if (originalScrollIntoView == null) {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+          .scrollIntoView;
+      } else {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+          configurable: true,
+          value: originalScrollIntoView,
+        });
+      }
+    }
+  });
+
   it("reuses the run header action slot for discuss after completion", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       emitCompletedReview(call);
@@ -846,6 +949,168 @@ describe("AI reviewer: panel layout", function () {
     expect(
       within(alert).getByRole("button", { name: "Open connection settings" }),
     ).to.exist;
+  });
+
+  it("renders a sequence-zero model-context error delivered by the stream", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "error",
+        eventId: "panel-model-context-unknown",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        error: {
+          code: "AI_MODEL_CONTEXT_UNKNOWN",
+          category: "configuration",
+          message: "The selected model context length is unknown.",
+          retryable: false,
+        },
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+    expect(within(run).getByText("Error")).to.exist;
+    expect(
+      within(run).getByText(
+        "For Ollama, load the model first or set its context length in Connection settings, then run the review again.",
+      ),
+    ).to.exist;
+  });
+
+  it("renders a provider error delivered after the started event", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "started",
+        eventId: "panel-provider-started",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        provider: "azure",
+        model: "gpt-5.6-luna",
+        skill: call.request.skill,
+      });
+      call.onEvent({
+        type: "error",
+        eventId: "panel-provider-error",
+        requestId: call.request.requestId,
+        sequence: 1,
+        createdAt,
+        error: {
+          code: "AI_PROVIDER_ERROR",
+          category: "provider",
+          message: "The AI provider could not complete the request.",
+          retryable: true,
+        },
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+    expect(within(run).getByText("Error")).to.exist;
+    expect(
+      within(run).getByText(
+        "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
+      ),
+    ).to.exist;
+    expect(
+      within(run).getByText("Model used for this run: azure · gpt-5.6-luna"),
+    ).to.exist;
+  });
+
+  it("keeps both terminal error paths when translation resources refresh", async function () {
+    const workspacePersistence: AiReviewerWorkspacePersistence = {
+      load: sinon.stub().resolves({
+        revision: 0,
+        workspace: { runs: [], discussions: [] },
+      }),
+      save: sinon.stub().resolves({
+        revision: 1,
+        workspace: { runs: [], discussions: [] },
+      }),
+      deleteDiscussion: sinon.stub().resolves({
+        revision: 1,
+        workspace: { runs: [], discussions: [] },
+      }),
+      deleteAll: sinon.stub().resolves({
+        revision: 1,
+        workspace: { runs: [], discussions: [] },
+      }),
+    };
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      if (streamRequest.callCount === 1) {
+        call.onEvent({
+          type: "error",
+          eventId: "panel-refresh-model-context-unknown",
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          error: {
+            code: "AI_MODEL_CONTEXT_UNKNOWN",
+            category: "configuration",
+            message: "The selected model context length is unknown.",
+            retryable: false,
+          },
+        });
+        return;
+      }
+      call.onEvent({
+        type: "started",
+        eventId: "panel-refresh-provider-started",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        provider: "azure",
+        model: "gpt-5.6-luna",
+        skill: call.request.skill,
+      });
+      call.onEvent({
+        type: "error",
+        eventId: "panel-refresh-provider-error",
+        requestId: call.request.requestId,
+        sequence: 1,
+        createdAt,
+        error: {
+          code: "AI_PROVIDER_ERROR",
+          category: "provider",
+          message: "The AI provider could not complete the request.",
+          retryable: true,
+        },
+      });
+    });
+    renderReviewPanel({ streamRequest, workspacePersistence });
+
+    await waitFor(() => {
+      expect(
+        screen
+          .getByRole("button", { name: "Review selection" })
+          .hasAttribute("disabled"),
+      ).to.equal(false);
+    });
+    runSelectionReview();
+    await screen.findByRole("article", { name: "Review run 1" });
+    runSelectionReview();
+    await screen.findByRole("article", { name: "Review run 2" });
+
+    await act(async () => {
+      i18next.addResource(
+        "en",
+        "translation",
+        "ai_reviewer_issue_43_resource_refresh",
+        "Issue 43 resource refresh",
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(workspacePersistence.load).to.have.been.calledOnce;
+      expect(screen.getByRole("article", { name: "Review run 1" })).to.exist;
+      expect(screen.getByRole("article", { name: "Review run 2" })).to.exist;
+    });
   });
 
   it("explains where to set an unknown context length without showing server prose", async function () {
