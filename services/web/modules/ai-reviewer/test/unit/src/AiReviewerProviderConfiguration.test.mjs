@@ -4010,7 +4010,7 @@ Cite \cite{missing}`;
       code: "AI_MODEL_CONTEXT_UNKNOWN",
       category: "configuration",
       message:
-        "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
+        "The selected model's context length could not be detected. Set the context length in Connection settings, then try again. For Ollama, also set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to change the runtime allocation. Loading a model manually does not change the context used by AI Reviewer.",
       retryable: false,
     });
     expect(requestScopeReader.read).not.toHaveBeenCalled();

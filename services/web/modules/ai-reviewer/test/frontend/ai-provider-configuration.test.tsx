@@ -820,7 +820,7 @@ describe("AI reviewer: provider configuration", function () {
     const baseUrlInput = input("Base URL");
     expect(baseUrlInput.placeholder).to.equal("http://127.0.0.1:11434/v1");
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help",
+      "ai-reviewer-baseUrl-help",
     );
     const help = screen.getByText(
       /Enter the API base through its version prefix/,
@@ -833,12 +833,6 @@ describe("AI reviewer: provider configuration", function () {
     ]) {
       expect(help.textContent).to.include(example);
     }
-    expect(
-      screen.getByText(
-        "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
-      ),
-    ).to.exist;
-
     fireEvent.change(baseUrlInput, {
       target: {
         value: "http://127.0.0.1:11434/v1/chat/completions",
@@ -846,7 +840,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     expect(baseUrlInput.getAttribute("aria-invalid")).to.equal("true");
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help ai-reviewer-baseUrl-plaintext-warning ai-reviewer-baseUrl-error",
+      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning ai-reviewer-baseUrl-error",
     );
     expect(
       screen.getByText(
@@ -854,6 +848,30 @@ describe("AI reviewer: provider configuration", function () {
       ),
     ).to.exist;
     expect(button("Save").disabled).to.equal(true);
+  });
+
+  it("associates state-neutral context guidance with the context override", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    const baseUrlInput = input("Base URL");
+    const contextLengthInput = input("Context length override (tokens)");
+    const help = screen.getByText(
+      "AI Reviewer needs each model's context length. If this provider does not report it, set Context length override (tokens). For Ollama, OLLAMA_CONTEXT_LENGTH on the server controls the runtime allocation; loading a model manually does not change it.",
+    );
+
+    expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-baseUrl-help",
+    );
+    expect(baseUrlInput.getAttribute("aria-describedby")).not.to.include(
+      "ai-reviewer-ollama-context-length-help",
+    );
+    expect(contextLengthInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-contextLengthOverride-help ai-reviewer-ollama-context-length-help",
+    );
+    expect(help.id).to.equal("ai-reviewer-ollama-context-length-help");
+    expect(help.textContent).not.to.include("could not be detected");
+    expect(help.textContent).not.to.include("try again");
   });
 
   it("shows HTTP as unencrypted and blocks an API key until the scheme is HTTPS", async function () {
@@ -867,7 +885,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     expect(screen.getByText("HTTP: traffic is not encrypted.")).to.exist;
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help ai-reviewer-baseUrl-plaintext-warning",
+      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning",
     );
     expect(button("Save").disabled).to.equal(false);
 

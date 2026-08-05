@@ -2,6 +2,9 @@
 
 export const MAX_DETECTED_MODEL_CONTEXT_LENGTH = 10_000_000;
 
+export const MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE =
+  "The selected model's context length could not be detected. Set the context length in Connection settings, then try again. For Ollama, also set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to change the runtime allocation. Loading a model manually does not change the context used by AI Reviewer.";
+
 // Provider model-list APIs use different names for the same limit. Keep the
 // paths together so supporting another compatible server is a one-line change.
 export const MODEL_CONTEXT_LENGTH_FIELD_PATHS = Object.freeze([

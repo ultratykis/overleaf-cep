@@ -1824,7 +1824,7 @@ export function AiIntegrationDetailsView({
                                         : field === "baseUrl" &&
                                             draft.provider ===
                                               "openai-compatible"
-                                          ? `ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help${
+                                          ? `ai-reviewer-baseUrl-help${
                                               providerBaseUrlIsPlaintext
                                                 ? " ai-reviewer-baseUrl-plaintext-warning"
                                                 : ""
@@ -1890,14 +1890,6 @@ export function AiIntegrationDetailsView({
                                     className="ai-reviewer-provider-advanced-help mt-1 mb-0"
                                   >
                                     {t("ai_reviewer_provider_base_url_help")}
-                                  </p>
-                                  <p
-                                    id="ai-reviewer-ollama-context-length-help"
-                                    className="ai-reviewer-provider-advanced-help mt-1 mb-0"
-                                  >
-                                    {t(
-                                      "ai_reviewer_provider_ollama_context_length_help",
-                                    )}
                                   </p>
                                   {openAiBaseUrlHasCompletionPath && (
                                     <p
@@ -2001,7 +1993,11 @@ export function AiIntegrationDetailsView({
                                 }
                                 disabled={saved === undefined || !formEditable}
                                 autoComplete="off"
-                                aria-describedby="ai-reviewer-contextLengthOverride-help"
+                                aria-describedby={
+                                  draft.provider === "openai-compatible"
+                                    ? "ai-reviewer-contextLengthOverride-help ai-reviewer-ollama-context-length-help"
+                                    : "ai-reviewer-contextLengthOverride-help"
+                                }
                                 className="ai-reviewer-provider-settings-control"
                               />
                               <p
@@ -2012,6 +2008,16 @@ export function AiIntegrationDetailsView({
                                   "ai_reviewer_provider_context_length_override_help",
                                 )}
                               </p>
+                              {draft.provider === "openai-compatible" && (
+                                <p
+                                  id="ai-reviewer-ollama-context-length-help"
+                                  className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                                >
+                                  {t(
+                                    "ai_reviewer_provider_ollama_context_length_help",
+                                  )}
+                                </p>
+                              )}
                             </OLFormGroup>
                           )}
                           <OLFormCheckbox

@@ -13,6 +13,7 @@ import {
   AgentGatewayError,
   assertAgentEventForRequest,
 } from "./AgentGateway.mjs";
+import { MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE } from "./ModelContextLength.mjs";
 import { createAiReviewerConcurrencyStore } from "../models/AiReviewerConcurrency.mjs";
 
 /**
@@ -132,8 +133,7 @@ const PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR = Object.freeze({
 const PUBLIC_MODEL_CONTEXT_UNKNOWN_ERROR = Object.freeze({
   code: "AI_MODEL_CONTEXT_UNKNOWN",
   category: "configuration",
-  message:
-    "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
+  message: MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE,
   retryable: false,
 });
 

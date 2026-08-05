@@ -76,6 +76,8 @@ const projectContentFailureGuidance =
   "AI Reviewer could not read the required project content. Check that the project files are available, then try again.";
 const modelContextTooSmallGuidance =
   "The request does not fit this model's context length (4,096 tokens; provider-detected value). Narrow the scope, choose a model with a larger context length, or set the context length in Connection settings.";
+const modelContextUnknownGuidance =
+  "The selected model's context length could not be detected. Set the context length in Connection settings, then try again. For Ollama, also set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to change the runtime allocation. Loading a model manually does not change the context used by AI Reviewer.";
 const streamFailureGuidance =
   "AI Reviewer could not complete the request or read its response. Check your network connection and AI Reviewer settings, then try again.";
 const requestFailureGuidance =
@@ -1009,9 +1011,7 @@ describe("AI reviewer: panel layout", function () {
     const run = await screen.findByRole("article", { name: "Review run 1" });
     expect(within(run).getByText("Error")).to.exist;
     expect(
-      within(run).getByText(
-        "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
-      ),
+      within(run).getByText(modelContextUnknownGuidance),
     ).to.exist;
   });
 
@@ -1163,8 +1163,9 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
     const alert = await screen.findByRole("alert");
 
-    expect(alert.textContent).to.include(
-      "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
+    expect(alert.textContent).to.include(modelContextUnknownGuidance);
+    expect(alert.textContent).not.to.include(
+      "Context length override (tokens)",
     );
     expect(alert.textContent).not.to.include(serverMessage);
     expect(

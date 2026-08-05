@@ -22,6 +22,7 @@ import { createAiReviewerSkillGitImporter } from "./AiReviewerSkillGitImporter.m
 import { createAiReviewerSkillStore } from "./AiReviewerSkillStore.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
+import { MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE } from "./ModelContextLength.mjs";
 import { createAiReviewerProviderService } from "./OllamaProviderService.mjs";
 import { parseOpenAiCompatibleModelId } from "./OllamaEndpointPolicy.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
@@ -137,7 +138,7 @@ function selectedConnectionMissing() {
 
 function modelContextLengthRequired() {
   return new AgentGatewayError(
-    "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
+    MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE,
     {
       code: "AI_MODEL_CONTEXT_UNKNOWN",
       category: "configuration",
