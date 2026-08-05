@@ -11,8 +11,10 @@ import Settings from "@overleaf/settings";
 import { AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE } from "../../../app/src/AiReviewerFailureLogger.mjs";
 
 import {
+  AI_REVIEWER_TOOL_NAMES,
   AiSdkAgentGateway,
   READ_SKILL_MAX_CHARACTERS,
+  SYSTEM_INSTRUCTION,
 } from "../../../app/src/AiSdkAgentGateway.mjs";
 
 const maliciousInstruction =
@@ -453,16 +455,19 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
       const skillName = "Reproducibility audit for methods sections";
       const skillDescription =
         "Check whether the described procedure could be repeated by a reader.";
+      const toolName = AI_REVIEWER_TOOL_NAMES.proposeSuggestion;
       const providerError = Object.assign(
         new Error("Provider rejected the request."),
         {
           statusCode: 400,
           responseBody: JSON.stringify({
             error: {
-              message: `Invalid schema for function 'propose_suggestion': ${skillName}; description: ${skillDescription}; 'additionalProperties' is required.`,
+              message: `Invalid schema for function '${toolName}': ${skillName}; description: ${skillDescription}; 'required' is missing 'range'.`,
             },
           }),
-          requestBodyValues: {},
+          requestBodyValues: {
+            messages: [{ role: "system", content: SYSTEM_INSTRUCTION }],
+          },
         },
       );
       const failingModel = new MockLanguageModelV3({
@@ -490,7 +495,8 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
       expect(recorded).not.toContain(skillDescription);
       // The provider's own words still have to survive, or the record is
       // indistinguishable from having no diagnostic at all.
-      expect(recorded).toContain("propose_suggestion");
+      expect(recorded).toContain(toolName);
+      expect(recorded).toContain("range");
     } finally {
       Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
       warn.mockRestore();

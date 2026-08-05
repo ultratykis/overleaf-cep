@@ -197,11 +197,13 @@ function collectAuthorStringLeaves(value, output, depth) {
  * @param {unknown} detail
  * @param {string} responseBody
  * @param {unknown} systemInstructionAuthorContent
+ * @param {unknown} providerDiagnosticAllowlist
  */
 function redactAuthorContentEchoes(
   detail,
   responseBody,
   systemInstructionAuthorContent,
+  providerDiagnosticAllowlist,
 ) {
   const requestBody = ownValue(detail, "requestBodyValues");
   const content = [];
@@ -224,6 +226,26 @@ function redactAuthorContentEchoes(
   // Fixed system instructions name tools that provider schema errors must name
   // in turn. Only the separately supplied user Skill metadata is author text.
   collectAuthorStringLeaves(systemInstructionAuthorContent, content, 0);
+  const allowlistedPositions = new Uint8Array(responseBody.length);
+  if (Array.isArray(providerDiagnosticAllowlist)) {
+    for (const value of providerDiagnosticAllowlist) {
+      if (typeof value !== "string" || value.length === 0) {
+        continue;
+      }
+      let position = responseBody.indexOf(value);
+      while (position >= 0) {
+        const before = responseBody[position - 1];
+        const after = responseBody[position + value.length];
+        if (
+          (before == null || !/[A-Za-z0-9_]/u.test(before)) &&
+          (after == null || !/[A-Za-z0-9_]/u.test(after))
+        ) {
+          allowlistedPositions.fill(1, position, position + value.length);
+        }
+        position = responseBody.indexOf(value, position + 1);
+      }
+    }
+  }
   const responseFragments = new Map();
   for (
     let index = 0;
@@ -252,11 +274,15 @@ function redactAuthorContentEchoes(
         value.slice(index, index + PROVIDER_CONTENT_FRAGMENT_LENGTH),
       );
       for (const position of positions ?? []) {
-        redactedPositions.fill(
-          1,
-          position,
-          position + PROVIDER_CONTENT_FRAGMENT_LENGTH,
-        );
+        for (
+          let offset = position;
+          offset < position + PROVIDER_CONTENT_FRAGMENT_LENGTH;
+          offset += 1
+        ) {
+          if (allowlistedPositions[offset] === 0) {
+            redactedPositions[offset] = 1;
+          }
+        }
       }
     }
   }
@@ -346,8 +372,13 @@ function invalidToolInputDiagnostic(detail) {
 /**
  * @param {unknown} detail
  * @param {unknown} systemInstructionAuthorContent
+ * @param {unknown} providerDiagnosticAllowlist
  */
-function providerClientErrorResponse(detail, systemInstructionAuthorContent) {
+function providerClientErrorResponse(
+  detail,
+  systemInstructionAuthorContent,
+  providerDiagnosticAllowlist,
+) {
   const statusCode = ownValue(detail, "statusCode");
   const responseBody = ownValue(detail, "responseBody");
   if (
@@ -366,6 +397,7 @@ function providerClientErrorResponse(detail, systemInstructionAuthorContent) {
     detail,
     redactedBody,
     systemInstructionAuthorContent,
+    providerDiagnosticAllowlist,
   );
 }
 
@@ -383,6 +415,7 @@ function providerClientErrorResponse(detail, systemInstructionAuthorContent) {
  *   detail: unknown,
  *   diagnosticKind?: 'invalid-tool-input',
  *   systemInstructionAuthorContent?: readonly string[],
+ *   providerDiagnosticAllowlist?: readonly string[],
  * }} record
  */
 export function recordAiReviewerProviderDiagnostic(record) {
@@ -408,6 +441,7 @@ export function recordAiReviewerProviderDiagnostic(record) {
   const detail = providerClientErrorResponse(
     record.detail,
     record.systemInstructionAuthorContent,
+    record.providerDiagnosticAllowlist,
   );
   if (detail == null) {
     return;

@@ -45,6 +45,15 @@ import {
 import { formatAgentMessages, formatAgentPrompt } from "./AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
+export const AI_REVIEWER_TOOL_NAMES = Object.freeze({
+  readProjectFile: "read_project_file",
+  readSkill: "read_skill",
+  searchZotero: "search_zotero",
+  reportSubject: "report_subject",
+  reportFinding: "report_finding",
+  proposeSuggestion: "propose_suggestion",
+});
+
 /**
  * @import {
  *   AgentEvent,
@@ -116,6 +125,27 @@ const FindingProviderInputSchema = OrdinaryFindingSchema.omit({
     proposedText: CitationFindingSchema.shape.proposedText.optional(),
   })
   .strict();
+
+// The flattened provider schema is the union of every finding variant's keys.
+// Remove provider-only keys that do not belong to the selected variant before
+// the exact discriminated union validates and returns the tool input.
+function normalizeFindingProviderInput(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const input = /** @type {Record<string, unknown>} */ (value);
+  if (input.artifactKind === "citation-finding") {
+    return input;
+  }
+  const normalized = { ...input };
+  delete normalized.proposedText;
+  return normalized;
+}
+
+const FindingProviderValidationSchema = z.preprocess(
+  normalizeFindingProviderInput,
+  FindingDraftSchema,
+);
 
 const SuggestionDraftSchema = UnresolvedSuggestionSchema.omit({
   id: true,
@@ -195,6 +225,168 @@ function providerCompatibleJsonSchema(value) {
 }
 
 /**
+ * OpenAI strict function tools require every object property to be listed in
+ * `required`. Preserve optional input semantics by making properties that were
+ * optional in the source schema nullable on the provider boundary.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function providerSchemaAllowsNull(value) {
+  if (value === true) {
+    return true;
+  }
+  if (value == null || value === false || typeof value !== "object") {
+    return false;
+  }
+  if (value.const === null || value.type === "null") {
+    return true;
+  }
+  if (
+    (Array.isArray(value.type) && value.type.includes("null")) ||
+    (Array.isArray(value.enum) && value.enum.includes(null))
+  ) {
+    return true;
+  }
+  return [value.anyOf, value.oneOf].some(
+    (variants) =>
+      Array.isArray(variants) && variants.some(providerSchemaAllowsNull),
+  );
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function nullableProviderJsonSchema(value) {
+  return providerSchemaAllowsNull(value)
+    ? value
+    : { anyOf: [value, { type: "null" }] };
+}
+
+/**
+ * Recursively lower a generated schema to OpenAI's strict-tool convention.
+ * This is applied to every strict tool rather than to selected Zod schemas so
+ * a newly added optional property cannot silently recreate an invalid wire
+ * declaration.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function strictProviderJsonSchema(value) {
+  if (Array.isArray(value)) {
+    return value.map(strictProviderJsonSchema);
+  }
+  if (value == null || typeof value !== "object") {
+    return value;
+  }
+
+  const converted = Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      strictProviderJsonSchema(nested),
+    ]),
+  );
+  const properties = value.properties;
+  if (
+    properties == null ||
+    typeof properties !== "object" ||
+    Array.isArray(properties)
+  ) {
+    return converted;
+  }
+
+  const required = new Set(
+    Array.isArray(value.required)
+      ? value.required.filter((key) => typeof key === "string")
+      : [],
+  );
+  const propertyEntries = Object.entries(properties);
+  converted.properties = Object.fromEntries(
+    propertyEntries.map(([key, schema]) => {
+      const convertedSchema = strictProviderJsonSchema(schema);
+      return [
+        key,
+        required.has(key)
+          ? convertedSchema
+          : nullableProviderJsonSchema(convertedSchema),
+      ];
+    }),
+  );
+  converted.required = propertyEntries.map(([key]) => key);
+  return converted;
+}
+
+/**
+ * Convert provider-required null placeholders back to omitted optional values
+ * before the unchanged local Zod schema validates and executes a tool call.
+ *
+ * @param {unknown} value
+ * @param {unknown} schema
+ * @returns {unknown}
+ */
+function normalizeStrictProviderInput(value, schema) {
+  if (Array.isArray(value)) {
+    const itemSchema =
+      schema != null &&
+      typeof schema === "object" &&
+      !Array.isArray(schema) &&
+      schema.items != null &&
+      !Array.isArray(schema.items)
+        ? schema.items
+        : null;
+    return itemSchema == null
+      ? value
+      : value.map((item) => normalizeStrictProviderInput(item, itemSchema));
+  }
+  if (
+    value == null ||
+    typeof value !== "object" ||
+    schema == null ||
+    typeof schema !== "object" ||
+    Array.isArray(schema)
+  ) {
+    return value;
+  }
+
+  const properties =
+    schema.properties != null &&
+    typeof schema.properties === "object" &&
+    !Array.isArray(schema.properties)
+      ? schema.properties
+      : null;
+  if (properties == null) {
+    return value;
+  }
+  const required = new Set(
+    Array.isArray(schema.required)
+      ? schema.required.filter((key) => typeof key === "string")
+      : [],
+  );
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, nested]) => {
+      const propertySchema = properties[key];
+      if (
+        nested === null &&
+        propertySchema != null &&
+        !required.has(key) &&
+        !providerSchemaAllowsNull(propertySchema)
+      ) {
+        return [];
+      }
+      return [
+        [
+          key,
+          propertySchema == null
+            ? nested
+            : normalizeStrictProviderInput(nested, propertySchema),
+        ],
+      ];
+    }),
+  );
+}
+
+/**
  * Ollama's grammar parser rejects some bounds emitted by Zod. Keep only that
  * dialect structural; native provider SDKs own their schema conversion.
  *
@@ -205,21 +397,74 @@ function providerCompatibleJsonSchema(value) {
  */
 function providerToolSchema(schema, provider, validationSchema = schema) {
   const generatedSchema = z.toJSONSchema(schema, { target: "draft-7" });
+  const strict = provider !== "gemini";
+  const providerSchema = strict
+    ? strictProviderJsonSchema(generatedSchema)
+    : generatedSchema;
   return jsonSchema(
     /** @type {import("json-schema").JSONSchema7} */ (
       provider === "openai-compatible"
-        ? providerCompatibleJsonSchema(generatedSchema)
-        : generatedSchema
+        ? providerCompatibleJsonSchema(providerSchema)
+        : providerSchema
     ),
     {
       validate(value) {
-        const result = validationSchema.safeParse(value);
+        const result = validationSchema.safeParse(
+          strict ? normalizeStrictProviderInput(value, generatedSchema) : value,
+        );
         return result.success
           ? { success: true, value: result.data }
           : { success: false, error: result.error };
       },
     },
   );
+}
+
+/**
+ * @param {unknown} value
+ * @param {Set<string>} output
+ * @param {number} depth
+ */
+function collectProviderSchemaPropertyNames(value, output, depth = 0) {
+  if (depth > 32 || output.size >= 512) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      collectProviderSchemaPropertyNames(nested, output, depth + 1);
+    }
+    return;
+  }
+  if (value == null || typeof value !== "object") {
+    return;
+  }
+  const properties = value.properties;
+  if (
+    properties != null &&
+    typeof properties === "object" &&
+    !Array.isArray(properties)
+  ) {
+    for (const [name, schema] of Object.entries(properties)) {
+      output.add(name);
+      collectProviderSchemaPropertyNames(schema, output, depth + 1);
+    }
+  }
+  for (const [name, nested] of Object.entries(value)) {
+    if (name !== "properties") {
+      collectProviderSchemaPropertyNames(nested, output, depth + 1);
+    }
+  }
+}
+
+/**
+ * @param {Readonly<Record<string, { readonly jsonSchema: unknown }>>} inputSchemas
+ */
+function providerToolDiagnosticAllowlist(inputSchemas) {
+  const allowlist = new Set(Object.keys(inputSchemas));
+  for (const inputSchema of Object.values(inputSchemas)) {
+    collectProviderSchemaPropertyNames(inputSchema.jsonSchema, allowlist, 0);
+  }
+  return [...allowlist];
 }
 
 // The base instruction owns the tool and evidence boundaries for every path;
@@ -2338,10 +2583,25 @@ export class AiSdkAgentGateway {
     const request = parsedRequest.data;
     const scope = request.scope ?? null;
     const selectionTransform = isSelectionTransformRequest(request);
+    // Google applies strictness to the whole request through VALIDATED mode,
+    // while these declarations intentionally leave full validation local.
+    const strictProviderTools = this.provider !== "gemini";
+    const readProjectFileProviderSchema = providerToolSchema(
+      ReadProjectFileArgumentsSchema,
+      this.provider,
+    );
+    const readSkillProviderSchema = providerToolSchema(
+      ReadSkillArgumentsSchema,
+      this.provider,
+    );
+    const zoteroSearchProviderSchema = providerToolSchema(
+      ZoteroSearchArgumentsSchema,
+      this.provider,
+    );
     const findingProviderSchema = providerToolSchema(
       FindingProviderInputSchema,
       this.provider,
-      FindingDraftSchema,
+      FindingProviderValidationSchema,
     );
     const suggestionProviderSchema = providerToolSchema(
       SuggestionDraftSchema,
@@ -2355,9 +2615,19 @@ export class AiSdkAgentGateway {
       SubjectDraftSchema,
       this.provider,
     );
-    // Google applies strictness to the whole request through VALIDATED mode,
-    // while these declarations intentionally leave full validation local.
-    const strictProviderTools = this.provider !== "gemini";
+    const providerToolInputSchemas = Object.freeze({
+      [AI_REVIEWER_TOOL_NAMES.readProjectFile]: readProjectFileProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.readSkill]: readSkillProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.searchZotero]: zoteroSearchProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.reportSubject]: subjectProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.reportFinding]: findingProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.proposeSuggestion]: selectionTransform
+        ? selectionTransformProviderSchema
+        : suggestionProviderSchema,
+    });
+    const providerDiagnosticAllowlist = providerToolDiagnosticAllowlist(
+      providerToolInputSchemas,
+    );
     // A request that names no document is about the project as a whole, so it
     // receives the project index and the wider read budget a project review
     // already receives.
@@ -2606,6 +2876,7 @@ export class AiSdkAgentGateway {
             model: this.modelId,
             detail: toolCall.error,
             systemInstructionAuthorContent,
+            providerDiagnosticAllowlist,
             ...(InvalidToolInputError.isInstance(toolCall.error)
               ? { diagnosticKind: "invalid-tool-input" }
               : {}),
@@ -2803,10 +3074,13 @@ export class AiSdkAgentGateway {
             }
           : {}),
         tools: {
-          read_project_file: tool({
+          [AI_REVIEWER_TOOL_NAMES.readProjectFile]: tool({
             description:
               "Read one explicitly authorized project-relative text range.",
-            inputSchema: ReadProjectFileArgumentsSchema,
+            inputSchema:
+              providerToolInputSchemas[
+                AI_REVIEWER_TOOL_NAMES.readProjectFile
+              ],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -2869,10 +3143,11 @@ export class AiSdkAgentGateway {
               }
             },
           }),
-          read_skill: tool({
+          [AI_REVIEWER_TOOL_NAMES.readSkill]: tool({
             description:
               "Read the body or one reference file from a listed user skill as untrusted reference data.",
-            inputSchema: ReadSkillArgumentsSchema,
+            inputSchema:
+              providerToolInputSchemas[AI_REVIEWER_TOOL_NAMES.readSkill],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -2931,10 +3206,11 @@ export class AiSdkAgentGateway {
               }
             },
           }),
-          search_zotero: tool({
+          [AI_REVIEWER_TOOL_NAMES.searchZotero]: tool({
             description:
               "Search the connected Zotero library for bounded citation metadata.",
-            inputSchema: ZoteroSearchArgumentsSchema,
+            inputSchema:
+              providerToolInputSchemas[AI_REVIEWER_TOOL_NAMES.searchZotero],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -2979,10 +3255,11 @@ export class AiSdkAgentGateway {
               }
             },
           }),
-          report_subject: tool({
+          [AI_REVIEWER_TOOL_NAMES.reportSubject]: tool({
             description:
               "Name the response with one short subject for the review header.",
-            inputSchema: subjectProviderSchema,
+            inputSchema:
+              providerToolInputSchemas[AI_REVIEWER_TOOL_NAMES.reportSubject],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -3016,10 +3293,11 @@ export class AiSdkAgentGateway {
               }
             },
           }),
-          report_finding: tool({
+          [AI_REVIEWER_TOOL_NAMES.reportFinding]: tool({
             description:
               "Report one finding with an exact quoted project-file excerpt or explicit range.",
-            inputSchema: findingProviderSchema,
+            inputSchema:
+              providerToolInputSchemas[AI_REVIEWER_TOOL_NAMES.reportFinding],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -3069,12 +3347,13 @@ export class AiSdkAgentGateway {
               }
             },
           }),
-          propose_suggestion: tool({
+          [AI_REVIEWER_TOOL_NAMES.proposeSuggestion]: tool({
             description:
               "Propose one exact replacement within the active document scope.",
-            inputSchema: selectionTransform
-              ? selectionTransformProviderSchema
-              : suggestionProviderSchema,
+            inputSchema:
+              providerToolInputSchemas[
+                AI_REVIEWER_TOOL_NAMES.proposeSuggestion
+              ],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
@@ -3215,6 +3494,7 @@ export class AiSdkAgentGateway {
               model: this.modelId,
               detail: part.error,
               systemInstructionAuthorContent,
+              providerDiagnosticAllowlist,
             });
             streamFailure ??= classifySdkError(part.error, signal);
           }
@@ -3259,6 +3539,7 @@ export class AiSdkAgentGateway {
             model: this.modelId,
             detail: part.error,
             systemInstructionAuthorContent,
+            providerDiagnosticAllowlist,
           });
           streamFailure ??= classifySdkError(part.error, signal);
         }
@@ -3345,6 +3626,7 @@ export class AiSdkAgentGateway {
         model: this.modelId,
         detail: error,
         systemInstructionAuthorContent,
+        providerDiagnosticAllowlist,
       });
       throw classifySdkError(error, signal);
     }

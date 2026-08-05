@@ -897,6 +897,59 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
   });
 
+  it.each(["openai-compatible", "gemini"])(
+    "drops a citation-only proposedText from an ordinary finding for %s",
+    async function (provider) {
+      const proposedText = "Citation-only text from the provider.";
+      const { model } = strictStreamModel([
+        outputStep(
+          validOutput({
+            findings: [validFinding({ proposedText })],
+          }),
+        ),
+        closingStep(),
+      ]);
+
+      const events = await collect(
+        createGateway(model, { provider }).stream(selectionRequest()),
+      );
+      const finding = events.find((event) => event.type === "finding")?.finding;
+
+      expect(finding).toBeDefined();
+      expect(Object.hasOwn(finding, "proposedText")).toBe(false);
+    },
+  );
+
+  it.each(["openai-compatible", "gemini"])(
+    "retains proposedText on a citation finding for %s",
+    async function (provider) {
+      const proposedText = "Retained citation replacement text.";
+      const { model } = strictStreamModel([
+        outputStep(
+          validOutput({
+            findings: [
+              validFinding({
+                artifactKind: "citation-finding",
+                proposedText,
+              }),
+            ],
+          }),
+        ),
+        closingStep(),
+      ]);
+
+      const events = await collect(
+        createGateway(model, { provider }).stream(selectionRequest()),
+      );
+      const finding = events.find((event) => event.type === "finding")?.finding;
+
+      expect(finding).toMatchObject({
+        artifactKind: "citation-finding",
+        proposedText,
+      });
+    },
+  );
+
   it("classifies an explicit NoObjectGeneratedError without exposing its text", async function () {
     const sentinel = "NO_OBJECT_RAW_SENTINEL";
     const sdkError = new NoObjectGeneratedError({
@@ -990,6 +1043,31 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       signal: undefined,
     });
     expect(consumed()).toBe(2);
+  });
+
+  it("normalizes a strict provider's null range placeholder to an omitted optional input", async function () {
+    const { model } = strictStreamModel([
+      toolStep({ path: "main.tex", range: null }),
+      outputStep(validOutput()),
+    ]);
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      text: "Whole document text.",
+    }));
+    const request = documentRequest();
+
+    const events = await collect(
+      createGateway(model, { readProjectFile }).stream(request),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
+    expect(readProjectFile).toHaveBeenCalledExactlyOnceWith(
+      { path: "main.tex" },
+      { request, signal: undefined },
+    );
   });
 
   it("lets a selection review read its whole document and another project file", async function () {

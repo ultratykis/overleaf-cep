@@ -151,6 +151,55 @@ function conversationRequest() {
   };
 }
 
+function documentReviewRequest() {
+  return {
+    requestId: "native-document-request-0001",
+    projectId: "native-project-0001",
+    action: "review",
+    instruction: "Review this synthetic document.",
+    skill: "referee-review",
+    scope: {
+      kind: "document",
+      documentId: "native-document-0001",
+      path: "main.tex",
+      baseRevision: 1,
+      baseTextHash: "a".repeat(64),
+      text: "Synthetic.",
+    },
+  };
+}
+
+function expectAllObjectPropertiesRequired(schema) {
+  if (schema == null || typeof schema !== "object") {
+    return;
+  }
+  if (
+    schema.properties != null &&
+    typeof schema.properties === "object" &&
+    !Array.isArray(schema.properties)
+  ) {
+    expect([...(schema.required ?? [])].sort()).toEqual(
+      Object.keys(schema.properties).sort(),
+    );
+  }
+  for (const nested of Array.isArray(schema) ? schema : Object.values(schema)) {
+    expectAllObjectPropertiesRequired(nested);
+  }
+}
+
+function expectProviderSchemaAllowsNull(schema) {
+  const variants = [schema, ...(schema.anyOf ?? []), ...(schema.oneOf ?? [])];
+  expect(
+    variants.some(
+      (variant) =>
+        variant?.type === "null" ||
+        (Array.isArray(variant?.type) && variant.type.includes("null")) ||
+        variant?.const === null ||
+        (Array.isArray(variant?.enum) && variant.enum.includes(null)),
+    ),
+  ).toBe(true);
+}
+
 function agentGateway(transport, options = {}) {
   return transport.createAgentGateway({
     contextLength: 8_192,
@@ -314,6 +363,87 @@ describe("AI reviewer: native AI SDK provider transports", function () {
     expect(String(fetchImpl.mock.calls[0][0])).toBe(
       `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureDefaultApiVersion}`,
     );
+  });
+
+  it("sends all six real Azure tool schemas with every object property required", async function () {
+    let requestBody;
+    const fetchImpl = vi.fn(async (_input, init) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "SyntheticRequestCapture",
+            message: "Synthetic rejection after request capture.",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    });
+    const transport = new AzureAiSdkTransport({
+      baseUrl: azureBaseUrl,
+      requestStyle: "deployment",
+      apiVersion: azureApiVersion,
+      credential,
+      modelTag: azureDeployment,
+      fetchImpl,
+    });
+    const gateway = agentGateway(transport, {
+      skills: [
+        {
+          id: "native-skill-0001",
+          name: "Evidence audit",
+          description: "Check whether each claim is supported.",
+          body: "Compare claims with their evidence.",
+          referenceFiles: {
+            "references/checklist.md": "Check the conclusion.",
+          },
+        },
+      ],
+      searchZotero: async () => ({ items: [] }),
+      validateEvidence: async () => {},
+    });
+
+    await captureError(collect(gateway.stream(documentReviewRequest())));
+
+    const tools = requestBody.tools;
+    expect(tools.map((toolDefinition) => toolDefinition.function.name)).toEqual(
+      [
+        "read_project_file",
+        "read_skill",
+        "search_zotero",
+        "report_subject",
+        "report_finding",
+        "propose_suggestion",
+      ],
+    );
+    for (const toolDefinition of tools) {
+      expect(toolDefinition.function.strict).toBe(true);
+      expectAllObjectPropertiesRequired(toolDefinition.function.parameters);
+    }
+
+    const parameters = Object.fromEntries(
+      tools.map((toolDefinition) => [
+        toolDefinition.function.name,
+        toolDefinition.function.parameters,
+      ]),
+    );
+    const findingEvidence = parameters.report_finding.properties.evidence.items;
+    const suggestionEvidence =
+      parameters.propose_suggestion.properties.evidence.items;
+    for (const optionalSchema of [
+      parameters.read_project_file.properties.range,
+      parameters.read_skill.properties.referencePath,
+      parameters.report_finding.properties.proposedText,
+      findingEvidence.properties.range,
+      findingEvidence.properties.excerpt,
+      findingEvidence.properties.revision,
+      findingEvidence.properties.textHash,
+      suggestionEvidence.properties.range,
+      suggestionEvidence.properties.revision,
+      suggestionEvidence.properties.textHash,
+    ]) {
+      expectProviderSchemaAllowsNull(optionalSchema);
+    }
   });
 
   it("lets the Google SDK produce the Gemini finding declaration without strict mode", async function () {
