@@ -31,12 +31,18 @@ RUN --mount=type=cache,target=/root/.cache \
 # Add the actual source files
 # ---------------------------
 COPY --parents libraries/ services/ tools/migrations/ /overleaf/
+# The AI Reviewer frontend integrations are resolved at webpack time via the
+# importOverleafModules macro, so they must be enabled while compiling or they
+# are missing from the bundle no matter what the runtime flag says. The editor
+# extension is facet-only, and active integrations also check ExposedSettings.
+# Keep this RUN-scoped: an ENV would leak into the runtime image and force the
+# module on. export also passes the value to commands run by the piped bash.
 RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/root/.yarn/berry/cache,id=server-ce-yarn-cache \
     --mount=type=cache,target=/usr/local/share/.cache/yarn,id=server-ce-yarn-fallback-cache \
     --mount=type=cache,target=/overleaf/services/web/node_modules/.cache,id=server-ce-webpack-cache \
     --mount=type=tmpfs,target=/tmp \
-    node genScript compile | bash
+    export OVERLEAF_AI_REVIEWER_ENABLED=true && node genScript compile | bash
 
 # Copy runit service startup scripts to its location
 # --------------------------------------------------

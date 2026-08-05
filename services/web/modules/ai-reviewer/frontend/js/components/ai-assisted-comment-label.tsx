@@ -1,5 +1,6 @@
 import OLBadge from "@/shared/components/ol/ol-badge";
 import { useProjectContext } from "@/shared/context/project-context";
+import getMeta from "@/utils/meta";
 import { Fragment, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -10,7 +11,7 @@ type AiAssistedCommentLabelProps = {
   children: ReactNode;
 };
 
-export default function AiAssistedCommentLabel({
+function EnabledAiAssistedCommentLabel({
   commentId,
   children,
 }: AiAssistedCommentLabelProps) {
@@ -30,4 +31,13 @@ export default function AiAssistedCommentLabel({
       {children}
     </div>
   );
+}
+
+export default function AiAssistedCommentLabel(
+  props: AiAssistedCommentLabelProps,
+) {
+  if (getMeta("ol-ExposedSettings").aiReviewerEnabled === false) {
+    return <Fragment>{props.children}</Fragment>;
+  }
+  return <EnabledAiAssistedCommentLabel {...props} />;
 }

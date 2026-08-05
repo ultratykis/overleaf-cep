@@ -1,6 +1,7 @@
 import { useConnectionContext } from "@/features/ide-react/context/connection-context";
 import useSocketListener from "@/features/ide-react/hooks/use-socket-listener";
 import { useProjectContext } from "@/shared/context/project-context";
+import getMeta from "@/utils/meta";
 import RangesTracker from "@overleaf/ranges-tracker";
 import { useCallback, useEffect, useMemo } from "react";
 
@@ -30,7 +31,7 @@ type AiReviewerCommentBridgeProps = {
   addComment: AiReviewerHostAddComment;
 };
 
-export default function AiReviewerCommentBridge({
+function EnabledAiReviewerCommentBridge({
   addComment,
 }: AiReviewerCommentBridgeProps) {
   const { projectId } = useProjectContext();
@@ -94,4 +95,13 @@ export default function AiReviewerCommentBridge({
   useEffect(() => registerAiReviewerCommentPoster(poster), [poster]);
 
   return null;
+}
+
+export default function AiReviewerCommentBridge(
+  props: AiReviewerCommentBridgeProps,
+) {
+  if (getMeta("ol-ExposedSettings").aiReviewerEnabled !== true) {
+    return null;
+  }
+  return <EnabledAiReviewerCommentBridge {...props} />;
 }
