@@ -100,7 +100,7 @@ export type AiProviderModel = {
   connectionId: string;
   connectionLabel: string;
   contextLength: number | null;
-  contextLengthSource: "detected" | "override" | "unknown";
+  contextLengthSource: "detected" | "override" | "pending" | "unavailable";
 };
 
 /**

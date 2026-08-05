@@ -36,6 +36,8 @@ const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
 // payloads, so bound it before retaining or parsing the response body.
 const MAX_CONTEXT_METADATA_BYTES = 1_048_576;
 const MAX_CONTEXT_METADATA_CHUNKS = 2_048;
+const CONTEXT_LENGTH_PROBE_OUTPUT_TOKENS = 1;
+const CONTEXT_LENGTH_PROBE_PROMPT = ".";
 const MAX_NONSTREAM_CONTENT_PARTS = 512;
 const MAX_NONSTREAM_OUTPUT_CHARACTERS = 100_000;
 const MAX_PROMPT_CHARACTERS = 100_000;
@@ -2707,6 +2709,7 @@ function llamaPropsContextLength(input) {
  *   fetchImpl: typeof fetch,
  *   method: "GET" | "POST",
  *   body?: string,
+ *   optional?: boolean,
  * }} input
  */
 async function requestContextMetadata({
@@ -2717,6 +2720,7 @@ async function requestContextMetadata({
   fetchImpl,
   method,
   body,
+  optional = true,
 }) {
   const guardedFetch = createGuardedOpenAiCompatibleFetch({
     baseUrl,
@@ -2738,7 +2742,7 @@ async function requestContextMetadata({
     throw invalidContextMetadataResponse();
   }
   if (response.status < 200 || response.status >= 300) {
-    if ([404, 405, 501].includes(response.status)) {
+    if (optional && [404, 405, 501].includes(response.status)) {
       cancelRejectedResponseBody(response, invalidContextMetadataResponse());
       return null;
     }
@@ -2750,17 +2754,19 @@ async function requestContextMetadata({
 }
 
 /**
- * Prefer the context actually allocated to a loaded Ollama model or llama.cpp
- * slot. Ollama's model maximum is not a safe fallback because the next load
- * may allocate its smaller server default; without a runtime value, planning
- * must remain unknown. Every fixed metadata path stays on the configured
- * endpoint's guarded same origin.
+ * First send the smallest standard Chat Completions request through the same
+ * configured endpoint used by reviews. Ollama loads that request with its
+ * server default, so the immediately following /api/ps value is the allocation
+ * reviews can actually use. llama.cpp keeps its existing /slots and /props
+ * fallbacks after the same probe. Without a runtime value, planning remains
+ * unknown. Every request stays on the configured endpoint's guarded origin.
  *
  * @param {{
  *   baseUrl: unknown,
  *   credential?: unknown,
  *   model: unknown,
  *   signal?: AbortSignal,
+ *   probeSignal?: AbortSignal,
  *   fetchImpl?: typeof fetch,
  * }} input
  */
@@ -2769,6 +2775,7 @@ export async function detectOpenAiCompatibleContextLength({
   credential,
   model,
   signal,
+  probeSignal = signal,
   fetchImpl = globalThis.fetch,
 }) {
   const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
@@ -2787,6 +2794,46 @@ export async function detectOpenAiCompatibleContextLength({
   throwIfTransportSignalAborted(signal);
 
   const origin = new URL(endpoint.baseUrl).origin;
+  const chatRequestUrl = deriveAiReviewerChatRequestUrl({
+    provider: "openai-compatible",
+    baseUrl: endpoint.baseUrl,
+  });
+  let probeSucceeded = false;
+  try {
+    await requestContextMetadata({
+      baseUrl: endpoint.baseUrl,
+      url: chatRequestUrl,
+      credential: parsedCredential,
+      signal: probeSignal,
+      fetchImpl,
+      method: "POST",
+      body: JSON.stringify({
+        model: parsedModel,
+        messages: [{ role: "user", content: CONTEXT_LENGTH_PROBE_PROMPT }],
+        max_tokens: CONTEXT_LENGTH_PROBE_OUTPUT_TOKENS,
+        stream: false,
+      }),
+      optional: false,
+    });
+    probeSucceeded = true;
+  } catch (error) {
+    // A caller cancellation remains authoritative. A probe-local timeout,
+    // network failure, or non-2xx response is only evidence that generation
+    // could not reveal the runtime allocation; llama.cpp may still expose its
+    // context through /slots or /props.
+    throwIfTransportSignalAborted(signal);
+    if (
+      !(error instanceof AgentGatewayError) ||
+      ![
+        "AI_PROVIDER_CONTEXT_LENGTH_DETECTION_FAILED",
+        "AI_PROVIDER_NETWORK_FAILED",
+        "AI_PROVIDER_SCHEMA_INVALID",
+        "AI_REQUEST_TIMEOUT",
+      ].includes(error.code)
+    ) {
+      throw error;
+    }
+  }
   const request = (url, method, body) =>
     requestContextMetadata({
       baseUrl: endpoint.baseUrl,
@@ -2798,10 +2845,12 @@ export async function detectOpenAiCompatibleContextLength({
       ...(body === undefined ? {} : { body }),
     });
 
-  const running = await request(`${origin}/api/ps`, "GET");
-  if (running != null) {
-    const contextLength = ollamaRunningContextLength(running, parsedModel);
-    if (contextLength != null) return contextLength;
+  if (probeSucceeded) {
+    const running = await request(`${origin}/api/ps`, "GET");
+    if (running != null) {
+      const contextLength = ollamaRunningContextLength(running, parsedModel);
+      if (contextLength != null) return contextLength;
+    }
   }
 
   const slots = await request(`${origin}/slots`, "GET");
@@ -3493,8 +3542,9 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       provider: "openai-compatible",
       modelTag: parsedModelTag,
       gatewayProviderOptions: OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS,
-      // Ollama's num_ctx controls VRAM allocation, so choosing it here would
-      // silently make a hardware decision that belongs to the user.
+      // Ollama's OpenAI-compatible endpoint ignores num_ctx both at the top
+      // level and under options. Its context allocation must be configured on
+      // the Ollama server, so no ineffective num_ctx option is sent here.
       providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
       invalidModelMessage:
         "The OpenAI-compatible provider must return a concrete Chat Completions model.",

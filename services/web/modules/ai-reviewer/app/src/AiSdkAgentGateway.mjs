@@ -2757,6 +2757,8 @@ export class AiSdkAgentGateway {
     let terminalToolPolicyError = null;
     /** @type {Map<string, AgentGatewayError>} */
     const uncorrectedSdkToolErrors = new Map();
+    /** @type {Map<string, number>} */
+    const reportFindingRejectionCounts = new Map();
     let terminalToolExecutionFailed = false;
 
     /**
@@ -2770,6 +2772,12 @@ export class AiSdkAgentGateway {
         terminalToolExecutionFailed = true;
         terminalToolPolicyError ??= localError;
         return localError;
+      }
+      if (toolName === AI_REVIEWER_TOOL_NAMES.reportFinding) {
+        reportFindingRejectionCounts.set(
+          localError.code,
+          (reportFindingRejectionCounts.get(localError.code) ?? 0) + 1,
+        );
       }
       // The SDK returns a correctable rejection to the model without admitting
       // the candidate. A successful call of the same tool clears this record.
@@ -3614,6 +3622,7 @@ export class AiSdkAgentGateway {
         scopeKind: scope?.kind ?? "none",
         findingToolOffered: findingsAllowed,
         toolCallCounts,
+        reportFindingRejectionCounts,
         pendingValidatedArtifactCount: reportedArtifacts.size,
       });
       yield completedEvent;

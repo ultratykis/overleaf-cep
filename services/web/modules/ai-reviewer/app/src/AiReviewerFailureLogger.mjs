@@ -21,6 +21,15 @@ const COMPLETION_TOOL_NAMES = new Set([
   "report_finding",
   "propose_suggestion",
 ]);
+const COMPLETION_FINDING_REJECTION_CODES = new Set([
+  "AI_TOOL_INPUT_INVALID",
+  "AI_EVIDENCE_EXCERPT_NOT_FOUND",
+  "AI_EVIDENCE_EXCERPT_AMBIGUOUS",
+  "AI_EVIDENCE_SCOPE_MISMATCH",
+  "AI_EVENT_SCOPE_MISMATCH",
+  "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+  "AI_MODEL_CONTEXT_TOO_SMALL",
+]);
 
 // Failure codes are bounded identifiers; rejecting free-form values keeps the
 // normal log from becoming a second path for provider or manuscript content.
@@ -53,6 +62,26 @@ function safeCompletionToolCallCounts(toolCallCounts) {
 }
 
 /**
+ * @param {ReadonlyMap<string, number>} rejectionCounts
+ */
+function safeReportFindingRejections(rejectionCounts) {
+  /** @type {Record<string, number>} */
+  const byCode = {};
+  let count = 0;
+  for (const [code, rejected] of rejectionCounts) {
+    if (!Number.isSafeInteger(rejected) || rejected <= 0) {
+      continue;
+    }
+    const safeCode = COMPLETION_FINDING_REJECTION_CODES.has(code)
+      ? code
+      : "unknown";
+    byCode[safeCode] = (byCode[safeCode] ?? 0) + rejected;
+    count += rejected;
+  }
+  return { count, byCode };
+}
+
+/**
  * Completion diagnostics stay shape-only so a run with no visible artifacts
  * can be distinguished without retaining provider or manuscript content.
  *
@@ -63,6 +92,7 @@ function safeCompletionToolCallCounts(toolCallCounts) {
  *   scopeKind: 'selection' | 'document' | 'project' | 'none',
  *   findingToolOffered: boolean,
  *   toolCallCounts: ReadonlyMap<string, number>,
+ *   reportFindingRejectionCounts: ReadonlyMap<string, number>,
  *   pendingValidatedArtifactCount: number,
  * }} record
  */
@@ -75,6 +105,9 @@ export function recordAiReviewerCompletion(record) {
       scopeKind: record.scopeKind,
       findingToolOffered: record.findingToolOffered,
       toolCallCounts: safeCompletionToolCallCounts(record.toolCallCounts),
+      reportFindingRejections: safeReportFindingRejections(
+        record.reportFindingRejectionCounts,
+      ),
       pendingValidatedArtifactCount: record.pendingValidatedArtifactCount,
     },
     AI_REVIEWER_COMPLETION_LOG_MESSAGE,

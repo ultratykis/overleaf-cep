@@ -133,7 +133,7 @@ const PUBLIC_MODEL_CONTEXT_UNKNOWN_ERROR = Object.freeze({
   code: "AI_MODEL_CONTEXT_UNKNOWN",
   category: "configuration",
   message:
-    "The selected model context length is unknown. For Ollama, load the model first or set it in Connection settings, then run the review again.",
+    "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
   retryable: false,
 });
 

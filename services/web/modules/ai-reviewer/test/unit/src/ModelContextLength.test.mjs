@@ -5,6 +5,7 @@ import {
   MODEL_CONTEXT_LENGTH_FIELD_PATHS,
   modelContextLengthFromFields,
   resolveModelContextLength,
+  resolveModelContextLengthWithoutDetection,
 } from "../../../app/src/ModelContextLength.mjs";
 
 describe("AI reviewer model context length", function () {
@@ -65,7 +66,21 @@ describe("AI reviewer model context length", function () {
     });
   });
 
-  it("keeps even a formerly built-in native model unknown without API metadata", async function () {
+  it("distinguishes a pending compatible probe from unavailable native metadata", async function () {
+    expect(
+      resolveModelContextLengthWithoutDetection({
+        provider: "openai-compatible",
+      }),
+    ).toEqual({
+      contextLength: null,
+      contextLengthSource: "pending",
+    });
+    expect(
+      resolveModelContextLengthWithoutDetection({ provider: "azure" }),
+    ).toEqual({
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    });
     expect(
       await resolveModelContextLength({
         provider: "gemini",
@@ -73,7 +88,7 @@ describe("AI reviewer model context length", function () {
       }),
     ).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "unavailable",
     });
     expect(
       await resolveModelContextLength({
@@ -82,11 +97,11 @@ describe("AI reviewer model context length", function () {
       }),
     ).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "unavailable",
     });
   });
 
-  it("prefers an OpenAI-compatible runtime allocation to its list value", async function () {
+  it("uses an OpenAI-compatible model-list value without probing", async function () {
     const detectOpenAiCompatibleContextLength = vi.fn(async () => 32_768);
     const input = {
       provider: "openai-compatible",
@@ -102,19 +117,16 @@ describe("AI reviewer model context length", function () {
         detectOpenAiCompatibleContextLength,
       }),
     ).toEqual({
-      contextLength: 32_768,
+      contextLength: 131_072,
       contextLengthSource: "detected",
     });
-    expect(detectOpenAiCompatibleContextLength).toHaveBeenCalledExactlyOnceWith(
-      {
-        baseUrl: input.baseUrl,
-        model: input.model,
-        credential: input.credential,
-      },
-    );
+    expect(detectOpenAiCompatibleContextLength).not.toHaveBeenCalled();
   });
 
-  it("falls back to the compatible model-list value when allocation discovery fails", async function () {
+  it("does not start vLLM runtime discovery when the model list has a value", async function () {
+    const detectOpenAiCompatibleContextLength = vi.fn(async () => {
+      throw new Error("PRIVATE_PROVIDER_FAILURE");
+    });
     expect(
       await resolveModelContextLength(
         {
@@ -124,30 +136,33 @@ describe("AI reviewer model context length", function () {
           detectedContextLength: 65_536,
         },
         {
-          detectOpenAiCompatibleContextLength: vi.fn(async () => {
-            throw new Error("PRIVATE_PROVIDER_FAILURE");
-          }),
+          detectOpenAiCompatibleContextLength,
         },
       ),
     ).toEqual({
       contextLength: 65_536,
       contextLengthSource: "detected",
     });
+    expect(detectOpenAiCompatibleContextLength).not.toHaveBeenCalled();
   });
 
-  it("keeps a compatible model unknown when neither source returns a value", async function () {
+  it("marks a failed compatible probe unavailable for that run", async function () {
     expect(
       await resolveModelContextLength(
         {
           provider: "openai-compatible",
-          baseUrl: "http://127.0.0.1:8000/v1",
+          baseUrl: "http://127.0.0.1:1234/v1",
           model: "reviewer",
         },
-        { detectOpenAiCompatibleContextLength: vi.fn(async () => null) },
+        {
+          detectOpenAiCompatibleContextLength: vi.fn(async () => {
+            throw new Error("PRIVATE_CONTEXT_PROBE_FAILURE");
+          }),
+        },
       ),
     ).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "unavailable",
     });
   });
 

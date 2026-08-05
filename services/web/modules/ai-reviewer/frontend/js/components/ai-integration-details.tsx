@@ -1784,7 +1784,7 @@ export function AiIntegrationDetailsView({
                                         : field === "baseUrl" &&
                                             draft.provider ===
                                               "openai-compatible"
-                                          ? `ai-reviewer-baseUrl-help${
+                                          ? `ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help${
                                               providerBaseUrlIsPlaintext
                                                 ? " ai-reviewer-baseUrl-plaintext-warning"
                                                 : ""
@@ -1850,6 +1850,14 @@ export function AiIntegrationDetailsView({
                                     className="ai-reviewer-provider-advanced-help mt-1 mb-0"
                                   >
                                     {t("ai_reviewer_provider_base_url_help")}
+                                  </p>
+                                  <p
+                                    id="ai-reviewer-ollama-context-length-help"
+                                    className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                                  >
+                                    {t(
+                                      "ai_reviewer_provider_ollama_context_length_help",
+                                    )}
                                   </p>
                                   {openAiBaseUrlHasCompletionPath && (
                                     <p

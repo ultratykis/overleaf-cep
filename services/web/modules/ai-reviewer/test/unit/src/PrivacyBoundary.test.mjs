@@ -63,6 +63,7 @@ describe("AI reviewer: module shell privacy boundary", function () {
 
   it("records completion tool and pending-artifact counts without content", function () {
     const manuscriptSentinel = "COMPLETION_MANUSCRIPT_LOG_SENTINEL";
+    const rejectionSentinel = "PRIVATE_REJECTION_CODE_SENTINEL";
     const info = vi.spyOn(logger, "info").mockImplementation(() => {});
     try {
       recordAiReviewerCompletion({
@@ -74,6 +75,10 @@ describe("AI reviewer: module shell privacy boundary", function () {
         toolCallCounts: new Map([
           ["read_project_file", 3],
           ["report_finding", 1],
+        ]),
+        reportFindingRejectionCounts: new Map([
+          ["AI_EVIDENCE_EXCERPT_NOT_FOUND", 2],
+          [rejectionSentinel, 3],
         ]),
         pendingValidatedArtifactCount: 2,
         manuscript: manuscriptSentinel,
@@ -90,11 +95,16 @@ describe("AI reviewer: module shell privacy boundary", function () {
             read_project_file: 3,
             report_finding: 1,
           },
+          reportFindingRejections: {
+            count: 5,
+            byCode: { AI_EVIDENCE_EXCERPT_NOT_FOUND: 2, unknown: 3 },
+          },
           pendingValidatedArtifactCount: 2,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );
       expect(JSON.stringify(info.mock.calls)).not.toContain(manuscriptSentinel);
+      expect(JSON.stringify(info.mock.calls)).not.toContain(rejectionSentinel);
     } finally {
       info.mockRestore();
     }
@@ -114,6 +124,7 @@ describe("AI reviewer: module shell privacy boundary", function () {
           ["report_finding", 1],
           [unexpectedToolName, 2],
         ]),
+        reportFindingRejectionCounts: new Map(),
         pendingValidatedArtifactCount: 0,
       });
 
@@ -125,6 +136,7 @@ describe("AI reviewer: module shell privacy boundary", function () {
           scopeKind: "document",
           findingToolOffered: true,
           toolCallCounts: { report_finding: 1, unknown: 2 },
+          reportFindingRejections: { count: 0, byCode: {} },
           pendingValidatedArtifactCount: 0,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,

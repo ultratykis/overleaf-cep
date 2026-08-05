@@ -16,9 +16,13 @@ export const MODEL_CONTEXT_LENGTH_FIELD_PATHS = Object.freeze([
   Object.freeze(["contextLength"]),
 ]);
 
-const UNKNOWN_MODEL_CONTEXT_LENGTH = Object.freeze({
+const PENDING_MODEL_CONTEXT_LENGTH = Object.freeze({
   contextLength: null,
-  contextLengthSource: /** @type {const} */ ("unknown"),
+  contextLengthSource: /** @type {const} */ ("pending"),
+});
+const UNAVAILABLE_MODEL_CONTEXT_LENGTH = Object.freeze({
+  contextLength: null,
+  contextLengthSource: /** @type {const} */ ("unavailable"),
 });
 
 /**
@@ -73,6 +77,7 @@ export function modelContextLengthFromFields(input) {
  * present.
  *
  * @param {{
+ *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
  *   contextLength?: number,
  *   contextLengthOverride?: number | null,
  *   detectedContextLength?: number | null,
@@ -106,7 +111,9 @@ export function resolveModelContextLengthWithoutDetection(input) {
     });
   }
 
-  return UNKNOWN_MODEL_CONTEXT_LENGTH;
+  return input.provider === "openai-compatible"
+    ? PENDING_MODEL_CONTEXT_LENGTH
+    : UNAVAILABLE_MODEL_CONTEXT_LENGTH;
 }
 
 /**
@@ -134,6 +141,7 @@ export async function resolveModelContextLength(
   const withoutDetection = resolveModelContextLengthWithoutDetection(input);
   if (
     withoutDetection.contextLengthSource === "override" ||
+    withoutDetection.contextLengthSource === "detected" ||
     input.provider !== "openai-compatible" ||
     typeof input.baseUrl !== "string" ||
     typeof detectOpenAiCompatibleContextLength !== "function"
@@ -158,9 +166,13 @@ export async function resolveModelContextLength(
       });
     }
   } catch {
-    // Runtime allocation discovery is best-effort. A list value remains usable,
-    // while an entirely unknown value is refused before any model request.
+    // Runtime allocation discovery is best-effort. Ollama /api/ps values enter
+    // only through the detector after a successful probe, so its failed probe
+    // is unavailable for this run and is refused before the review request. A
+    // later run may probe again because failures are not cached.
   }
 
-  return withoutDetection;
+  return withoutDetection.contextLengthSource === "pending"
+    ? UNAVAILABLE_MODEL_CONTEXT_LENGTH
+    : withoutDetection;
 }

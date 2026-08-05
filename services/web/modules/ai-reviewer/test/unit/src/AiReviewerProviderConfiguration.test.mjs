@@ -25,6 +25,7 @@ import {
   createAiReviewerProviderService,
   createOllamaProviderService,
 } from "../../../app/src/OllamaProviderService.mjs";
+import { detectOpenAiCompatibleContextLength } from "../../../app/src/OllamaOpenAiTransport.mjs";
 import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mjs";
 import {
   AgentEventSchema,
@@ -1798,7 +1799,7 @@ describe("AI reviewer provider configuration", function () {
 
     expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "pending",
     });
     expect(contextLengthDetector).not.toHaveBeenCalled();
 
@@ -1812,7 +1813,7 @@ describe("AI reviewer provider configuration", function () {
       baseUrl: remoteBaseUrl,
       model: remoteModel,
       credential,
-      signal,
+      probeSignal: signal,
     });
     expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
       contextLength: 32_768,
@@ -1821,7 +1822,7 @@ describe("AI reviewer provider configuration", function () {
     now += 60_001;
     expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "pending",
     });
 
     // The connection's escape hatch wins over anything the endpoint says.
@@ -1847,7 +1848,7 @@ describe("AI reviewer provider configuration", function () {
       await service.resolveContextLength(azureConnectionWrite, azureDeployment),
     ).toEqual({
       contextLength: null,
-      contextLengthSource: "unknown",
+      contextLengthSource: "unavailable",
     });
     expect(contextLengthDetector).toHaveBeenCalledOnce();
     expect(
@@ -1866,6 +1867,42 @@ describe("AI reviewer provider configuration", function () {
       contextLength: 128_000,
       contextLengthSource: "override",
     });
+  });
+
+  it("gives a cold-load context probe 55 seconds before fallback", async function () {
+    const probeSignal = new AbortController().signal;
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValue(probeSignal);
+    try {
+      const contextLengthDetector = vi.fn(async () => 32_768);
+      const service = createAiReviewerProviderService({
+        contextLengthDetector,
+      });
+
+      expect(
+        await service.resolveContextLength(
+          {
+            provider: "openai-compatible",
+            baseUrl: remoteBaseUrl,
+            credential,
+          },
+          remoteModel,
+        ),
+      ).toEqual({
+        contextLength: 32_768,
+        contextLengthSource: "detected",
+      });
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(55_000);
+      expect(contextLengthDetector).toHaveBeenCalledExactlyOnceWith({
+        baseUrl: remoteBaseUrl,
+        model: remoteModel,
+        credential,
+        probeSignal,
+      });
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it("passes caller cancellation through selected-model context discovery", async function () {
@@ -2204,12 +2241,319 @@ describe("AI reviewer provider configuration", function () {
     });
     expect(contextLengthDetector).toHaveBeenCalledOnce();
 
+    // Model and base URL are both part of the successful probe cache key.
+    await service.resolveContextLength(connection, otherModel, {
+      cacheKey: "user-aaaaaaaaaaaaaaaaaaaaaaaa\u0000connection-0001",
+    });
+    await service.resolveContextLength(
+      { ...connection, baseUrl: "https://other.example.com/openai/v1" },
+      remoteModel,
+      { cacheKey: "user-aaaaaaaaaaaaaaaaaaaaaaaa\u0000connection-0001" },
+    );
+    expect(contextLengthDetector).toHaveBeenCalledTimes(3);
+
     // Different user: must resolve on its own credentials, not reuse the entry.
     await service.resolveContextLength(connection, remoteModel, {
       cacheKey: "user-bbbbbbbbbbbbbbbbbbbbbbbb\u0000connection-0001",
     });
+    expect(contextLengthDetector).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps a failed probe unknown without negatively caching it", async function () {
+    const contextLengthDetector = vi.fn(async () => {
+      throw new Error("PRIVATE_CONTEXT_PROBE_FAILURE");
+    });
+    const service = createAiReviewerProviderService({ contextLengthDetector });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: baseUrl,
+    };
+
+    expect(await service.resolveContextLength(connection, model)).toEqual({
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    });
+    expect(await service.resolveContextLength(connection, model)).toEqual({
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    });
     expect(contextLengthDetector).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    {
+      server: "Ollama",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen3.5:4b",
+      entry: {
+        id: "qwen3.5:4b",
+        object: "model",
+        owned_by: "library",
+        context_length: 4_096,
+      },
+      contextLength: 4_096,
+      nativeModels: {
+        models: [
+          {
+            name: "qwen3.5:4b",
+            capabilities: ["completion", "tools"],
+          },
+        ],
+      },
+    },
+    {
+      server: "vLLM",
+      baseUrl: "http://127.0.0.1:8000/v1",
+      model: "Qwen/Qwen3.5-4B-Instruct",
+      entry: {
+        id: "Qwen/Qwen3.5-4B-Instruct",
+        object: "model",
+        owned_by: "vllm",
+        max_model_len: 65_536,
+      },
+      contextLength: 65_536,
+    },
+    {
+      server: "LM Studio",
+      baseUrl: "http://127.0.0.1:1234/v1",
+      model: "qwen3.5-4b-instruct",
+      entry: {
+        id: "qwen3.5-4b-instruct",
+        object: "model",
+        owned_by: "lmstudio",
+        max_context_length: 32_768,
+      },
+      contextLength: 32_768,
+    },
+    {
+      server: "OpenRouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "openai/gpt-4o-mini",
+      credential,
+      entry: {
+        id: "openai/gpt-4o-mini",
+        name: "GPT-4o mini",
+        context_length: 128_000,
+      },
+      contextLength: 128_000,
+    },
+  ])(
+    "does not issue a generation request when $server advertises context length in /v1/models",
+    async function ({
+      baseUrl: candidateBaseUrl,
+      model: candidateModel,
+      credential: candidateCredential,
+      entry,
+      contextLength: advertisedContextLength,
+      nativeModels,
+    }) {
+      const requests = [];
+      const modelFetchImpl = vi.fn(async (input, init = {}) => {
+        const url = String(input);
+        requests.push({ url, method: init.method ?? "GET" });
+        if (url.endsWith("/api/tags")) {
+          return new Response(JSON.stringify(nativeModels), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/models")) {
+          return new Response(
+            JSON.stringify({ object: "list", data: [entry] }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected context request: ${url}`);
+      });
+      const contextLengthDetector = vi.fn(async (candidate) =>
+        detectOpenAiCompatibleContextLength({
+          ...candidate,
+          fetchImpl: modelFetchImpl,
+        }),
+      );
+      const service = createAiReviewerProviderService({
+        modelFetchImpl,
+        contextLengthDetector,
+        modelNow: () => 1_000,
+      });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: candidateBaseUrl,
+        ...(candidateCredential == null
+          ? {}
+          : { credential: candidateCredential }),
+      };
+
+      expect(
+        await service.listModels(connection, { cacheKey: userId }),
+      ).toEqual([
+        {
+          id: candidateModel,
+          displayName:
+            typeof entry.name === "string" ? entry.name : candidateModel,
+        },
+      ]);
+      expect(
+        await service.resolveContextLength(connection, candidateModel, {
+          cacheKey: userId,
+        }),
+      ).toEqual({
+        contextLength: advertisedContextLength,
+        contextLengthSource: "detected",
+      });
+      expect(contextLengthDetector).not.toHaveBeenCalled();
+      expect(
+        requests.filter(
+          ({ url, method }) =>
+            method === "POST" && url.endsWith("/chat/completions"),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    {
+      server: "Ollama",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen3.5:4b",
+      entry: {
+        id: "qwen3.5:4b",
+        object: "model",
+        owned_by: "library",
+      },
+      nativeModels: {
+        models: [
+          {
+            name: "qwen3.5:4b",
+            capabilities: ["completion", "tools"],
+          },
+        ],
+      },
+      metadata(url) {
+        return url.endsWith("/api/ps")
+          ? {
+              status: 200,
+              body: {
+                models: [{ name: "qwen3.5:4b", context_length: 4_096 }],
+              },
+            }
+          : { status: 404, body: {} };
+      },
+      expected: { contextLength: 4_096, contextLengthSource: "detected" },
+    },
+    {
+      server: "llama.cpp",
+      baseUrl: "http://127.0.0.1:8080/v1",
+      model: "qwen3.5-4b-instruct.gguf",
+      entry: {
+        id: "qwen3.5-4b-instruct.gguf",
+        object: "model",
+        owned_by: "llama.cpp",
+      },
+      metadata(url) {
+        return url.endsWith("/slots")
+          ? { status: 200, body: [{ n_ctx: 8_192 }] }
+          : { status: 404, body: {} };
+      },
+      expected: { contextLength: 8_192, contextLengthSource: "detected" },
+    },
+    {
+      server: "api.openai.com",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+      credential,
+      entry: {
+        id: "gpt-4o-mini",
+        object: "model",
+        owned_by: "system",
+      },
+      metadata() {
+        return { status: 404, body: {} };
+      },
+      expected: { contextLength: null, contextLengthSource: "unavailable" },
+    },
+  ])(
+    "continues probing $server when /v1/models has no context length",
+    async function ({
+      baseUrl: candidateBaseUrl,
+      model: candidateModel,
+      credential: candidateCredential,
+      entry,
+      nativeModels,
+      metadata,
+      expected,
+    }) {
+      const requests = [];
+      const modelFetchImpl = vi.fn(async (input, init = {}) => {
+        const url = String(input);
+        const method = init.method ?? "GET";
+        requests.push({ url, method });
+        if (url.endsWith("/models")) {
+          return new Response(
+            JSON.stringify({ object: "list", data: [entry] }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/api/tags")) {
+          return new Response(JSON.stringify(nativeModels), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/chat/completions")) {
+          return new Response(
+            JSON.stringify({
+              id: "context-probe",
+              object: "chat.completion",
+              choices: [
+                {
+                  index: 0,
+                  finish_reason: "length",
+                  message: { role: "assistant", content: "OK" },
+                },
+              ],
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        const response = metadata(url);
+        return new Response(JSON.stringify(response.body), {
+          status: response.status,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const contextLengthDetector = vi.fn(async (candidate) =>
+        detectOpenAiCompatibleContextLength({
+          ...candidate,
+          fetchImpl: modelFetchImpl,
+        }),
+      );
+      const service = createAiReviewerProviderService({
+        modelFetchImpl,
+        contextLengthDetector,
+        modelNow: () => 1_000,
+      });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: candidateBaseUrl,
+        ...(candidateCredential == null
+          ? {}
+          : { credential: candidateCredential }),
+      };
+
+      await service.listModels(connection, { cacheKey: userId });
+      expect(
+        await service.resolveContextLength(connection, candidateModel, {
+          cacheKey: userId,
+        }),
+      ).toEqual(expected);
+      expect(contextLengthDetector).toHaveBeenCalledOnce();
+      expect(
+        requests.filter(
+          ({ url, method }) =>
+            method === "POST" && url.endsWith("/chat/completions"),
+        ),
+      ).toHaveLength(1);
+    },
+  );
 
   it("uses user-entered Azure deployment names instead of fabricating a model catalogue", async function () {
     const modelFetchImpl = vi.fn();
@@ -2244,14 +2588,6 @@ describe("AI reviewer provider configuration", function () {
               { name: "bge-m3:latest", capabilities: ["embedding"] },
               { name: "plain:latest", capabilities: ["completion"] },
             ],
-          }),
-          { headers: { "content-type": "application/json" } },
-        );
-      }
-      if (String(input).endsWith("/api/ps")) {
-        return new Response(
-          JSON.stringify({
-            models: [{ name: "qwen3.5:4b", context_length: 4_096 }],
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -2301,11 +2637,10 @@ describe("AI reviewer provider configuration", function () {
         },
         "qwen3.5:4b",
       ),
-    ).toEqual({ contextLength: 4_096, contextLengthSource: "detected" });
+    ).toEqual({ contextLength: null, contextLengthSource: "pending" });
     expect(requests).toEqual([
       "http://127.0.0.1:11434/v1/models",
       "http://127.0.0.1:11434/api/tags",
-      "http://127.0.0.1:11434/api/ps",
     ]);
   });
 
@@ -3631,7 +3966,7 @@ Cite \cite{missing}`;
       ]),
       resolveContextLength: vi.fn(async () => ({
         contextLength: null,
-        contextLengthSource: "unknown",
+        contextLengthSource: "unavailable",
       })),
       createAgentGateway: vi.fn(),
     };
@@ -3654,7 +3989,7 @@ Cite \cite{missing}`;
       code: "AI_MODEL_CONTEXT_UNKNOWN",
       category: "configuration",
       message:
-        "The selected model context length is unknown. For Ollama, load the model first or set it in Connection settings, then run the review again.",
+        "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
       retryable: false,
     });
     expect(requestScopeReader.read).not.toHaveBeenCalled();

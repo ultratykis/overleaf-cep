@@ -233,7 +233,11 @@ function catalogModel(
   id: string,
   displayName: string,
   contextLength = 4_096,
-  contextLengthSource: "detected" | "override" | "unknown" = "detected",
+  contextLengthSource:
+    | "detected"
+    | "override"
+    | "pending"
+    | "unavailable" = "detected",
 ) {
   return {
     id,
@@ -643,7 +647,14 @@ describe("AI reviewer: panel layout", function () {
   });
 
   it("brings a newly started run into view below a long history", async function () {
+    let finishFourthRun = () => {};
+    const fourthRunPending = new Promise<void>((resolve) => {
+      finishFourthRun = resolve;
+    });
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      if (streamRequest.callCount === 4) {
+        await fourthRunPending;
+      }
       call.onEvent({
         type: "completed",
         eventId: `panel-scroll-completed-${streamRequest.callCount}`,
@@ -692,7 +703,6 @@ describe("AI reviewer: panel layout", function () {
       const newRun = await screen.findByRole("article", {
         name: "Review run 4",
       });
-      await within(newRun).findByText("Completed");
       Object.defineProperty(panelBody, "getBoundingClientRect", {
         configurable: true,
         value: () => ({
@@ -722,14 +732,23 @@ describe("AI reviewer: panel layout", function () {
         }),
       });
 
+      expect(within(newRun).queryByText("Completed")).not.to.exist;
+      expect(within(newRun).getByText("Streaming")).to.exist;
       expect(panelBody.scrollHeight).to.be.greaterThan(panelBody.clientHeight);
-      expect(scrollIntoView.calledOnceWith({ block: "start" })).to.equal(true);
+      await waitFor(() => {
+        expect(scrollIntoView.calledOnceWith({ block: "start" })).to.equal(
+          true,
+        );
+      });
       expect(scrollIntoView.firstCall.thisValue).to.equal(newRun);
       const panelBounds = panelBody.getBoundingClientRect();
       const runBounds = newRun.getBoundingClientRect();
       expect(runBounds.top).to.be.at.least(panelBounds.top);
       expect(runBounds.bottom).to.be.at.most(panelBounds.bottom);
+      finishFourthRun();
+      await within(newRun).findByText("Completed");
     } finally {
+      finishFourthRun();
       if (originalScrollIntoView == null) {
         delete (HTMLElement.prototype as { scrollIntoView?: unknown })
           .scrollIntoView;
@@ -975,7 +994,7 @@ describe("AI reviewer: panel layout", function () {
     expect(within(run).getByText("Error")).to.exist;
     expect(
       within(run).getByText(
-        "For Ollama, load the model first or set its context length in Connection settings, then run the review again.",
+        "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
       ),
     ).to.exist;
   });
@@ -1129,7 +1148,7 @@ describe("AI reviewer: panel layout", function () {
     const alert = await screen.findByRole("alert");
 
     expect(alert.textContent).to.include(
-      "For Ollama, load the model first or set its context length in Connection settings, then run the review again.",
+      "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
     );
     expect(alert.textContent).not.to.include(serverMessage);
     expect(

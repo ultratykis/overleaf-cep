@@ -799,7 +799,7 @@ describe("AI reviewer: provider configuration", function () {
     const baseUrlInput = input("Base URL");
     expect(baseUrlInput.placeholder).to.equal("http://127.0.0.1:11434/v1");
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help",
+      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help",
     );
     const help = screen.getByText(
       /Enter the API base through its version prefix/,
@@ -812,6 +812,11 @@ describe("AI reviewer: provider configuration", function () {
     ]) {
       expect(help.textContent).to.include(example);
     }
+    expect(
+      screen.getByText(
+        "For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
+      ),
+    ).to.exist;
 
     fireEvent.change(baseUrlInput, {
       target: {
@@ -820,7 +825,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     expect(baseUrlInput.getAttribute("aria-invalid")).to.equal("true");
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning ai-reviewer-baseUrl-error",
+      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help ai-reviewer-baseUrl-plaintext-warning ai-reviewer-baseUrl-error",
     );
     expect(
       screen.getByText(
@@ -841,7 +846,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     expect(screen.getByText("HTTP: traffic is not encrypted.")).to.exist;
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning",
+      "ai-reviewer-baseUrl-help ai-reviewer-ollama-context-length-help ai-reviewer-baseUrl-plaintext-warning",
     );
     expect(button("Save").disabled).to.equal(false);
 

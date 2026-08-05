@@ -8,6 +8,7 @@ import Settings from "@overleaf/settings";
 import { describe, expect, it, vi } from "vitest";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
+import { AI_REVIEWER_COMPLETION_LOG_MESSAGE } from "../../../app/src/AiReviewerFailureLogger.mjs";
 import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
 import {
@@ -952,6 +953,155 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       message:
         "The quoted evidence excerpt was not found in the captured scope text.",
     });
+  });
+
+  it("records an actual rejected finding excerpt by reason after correction", async function () {
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      range: { from: 10, to: 32 },
+      revision: 7,
+      textHash: contentHash,
+      text: firstSentence,
+    }));
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk("read_project_file", {
+          path: "main.tex",
+          range: { from: 10, to: 32 },
+        }),
+      ]),
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [
+              { path: "main.tex", excerpt: "A passage that is not present." },
+            ],
+          }),
+          "rejected-finding-call",
+        ),
+      ]),
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [{ path: "main.tex", excerpt: "method is unclear." }],
+          }),
+          "corrected-finding-call",
+        ),
+      ]),
+      textStep("Corrected."),
+    ]);
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      const events = await collect(
+        createGateway(model, {
+          readProjectFile,
+          validateEvidence: vi.fn(),
+        }).stream(projectRequest()),
+      );
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "finding",
+          finding: expect.objectContaining({ title: "Unclear antecedent" }),
+        }),
+      );
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolCallCounts: { read_project_file: 1, report_finding: 2 },
+          reportFindingRejections: {
+            count: 1,
+            byCode: { AI_EVIDENCE_EXCERPT_NOT_FOUND: 1 },
+          },
+          pendingValidatedArtifactCount: 0,
+        }),
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("records zero finding rejections when the first call succeeds", async function () {
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("report_finding", findingDraft())]),
+      textStep("Reported."),
+    ]);
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      await collect(
+        createGateway(model, { validateEvidence: vi.fn() }).stream(
+          documentRequest(),
+        ),
+      );
+
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolCallCounts: { report_finding: 1 },
+          reportFindingRejections: { count: 0, byCode: {} },
+        }),
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("does not count a rejected suggestion as a finding rejection", async function () {
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "propose_suggestion",
+          suggestionDraft({
+            evidence: [
+              {
+                path: "other.tex",
+                range: { from: 0, to: 22 },
+                revision: 7,
+                textHash: contentHash,
+              },
+            ],
+          }),
+          "rejected-suggestion-call",
+        ),
+      ]),
+      toolStep([
+        toolChunk(
+          "propose_suggestion",
+          suggestionDraft(),
+          "corrected-suggestion-call",
+        ),
+      ]),
+      textStep("Corrected."),
+    ]);
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      const events = await collect(
+        createGateway(model, { validateEvidence: vi.fn() }).stream(
+          documentRequest(),
+        ),
+      );
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "suggestion",
+          suggestion: expect.objectContaining({
+            replacement: suggestionDraft().replacement,
+          }),
+        }),
+      );
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolCallCounts: { propose_suggestion: 2 },
+          reportFindingRejections: { count: 0, byCode: {} },
+          pendingValidatedArtifactCount: 0,
+        }),
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("rejects an excerpt that identifies more than one captured range", async function () {

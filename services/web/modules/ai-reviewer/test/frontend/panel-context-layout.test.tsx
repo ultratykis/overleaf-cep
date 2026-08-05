@@ -75,7 +75,11 @@ function catalogModel(
   id: string,
   displayName: string,
   contextLength: number | null = null,
-  contextLengthSource: "detected" | "override" | "unknown" = "unknown",
+  contextLengthSource:
+    | "detected"
+    | "override"
+    | "pending"
+    | "unavailable" = "pending",
 ) {
   return {
     id,
@@ -975,8 +979,36 @@ describe("AI reviewer: context-driven panel", function () {
     ).to.exist;
   });
 
-  it("marks an unknown context length in the model catalogue", async function () {
-    renderPanel({ ...providerProps() });
+  it("distinguishes a pending compatible probe from unavailable Azure metadata", async function () {
+    const azureConnection: AiProviderConnection = {
+      id: "connection-azure",
+      revision: 1,
+      label: "Azure OpenAI",
+      classification: "remote",
+      config: {
+        provider: "azure",
+        baseUrl: "https://reviewer.openai.azure.com",
+        requestStyle: "v1",
+        deployments: ["reviewer-deployment"],
+        contextLengthOverrides: [],
+        contextLengthOverride: null,
+        credentialSet: true,
+        credentialUpdatedAt: createdAt,
+      },
+    };
+    const azureModel = catalogModel(
+      azureConnection,
+      "reviewer-deployment",
+      "Azure reviewer",
+      null,
+      "unavailable",
+    );
+    renderPanel({
+      ...providerProps(
+        [localConnection, azureConnection],
+        [defaultModel, azureModel],
+      ),
+    });
 
     fireEvent.click(
       await screen.findByRole("button", { name: "Selected model — None" }),
@@ -984,10 +1016,29 @@ describe("AI reviewer: context-driven panel", function () {
 
     expect(
       screen.getByRole("menuitem", {
-        name: `Default reviewer (${localConnection.label}) · Context length unknown. Set it in Connection settings.`,
+        name: `Default reviewer (${localConnection.label}) · Will be detected during review.`,
       }),
     ).to.exist;
+    expect(
+      screen.getByRole("menuitem", {
+        name: `Azure reviewer (${azureConnection.label}) · Unknown. Set it in Connection settings.`,
+      }),
+    ).to.exist;
+    expect(screen.getByText("· Detect during review")).to.exist;
     expect(screen.getByText("· Context unknown")).to.exist;
+  });
+
+  it("names an unprobed selected model without repeating Context length", async function () {
+    renderPanel({ ...providerProps() });
+
+    await chooseModel(`Default reviewer (${localConnection.label})`);
+
+    const selectedModel = screen.getByRole("button", {
+      name: "Selected model — Default reviewer. Context length — Will be detected during review.",
+    });
+    expect(
+      selectedModel.getAttribute("aria-label")?.match(/Context length/gu),
+    ).to.have.length(1);
   });
 
   it("filters a 49-model catalogue by display name or id", async function () {

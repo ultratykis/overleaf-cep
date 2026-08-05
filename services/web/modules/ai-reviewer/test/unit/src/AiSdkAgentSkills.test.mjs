@@ -454,7 +454,7 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
       };
       const skillName = "Reproducibility audit for methods sections";
       const skillDescription =
-        "Check whether the described procedure could be repeated by a reader.";
+        "In context=('properties','range'), this author-only schema note must stay private.";
       const toolName = AI_REVIEWER_TOOL_NAMES.proposeSuggestion;
       const providerError = Object.assign(
         new Error("Provider rejected the request."),
@@ -462,7 +462,7 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
           statusCode: 400,
           responseBody: JSON.stringify({
             error: {
-              message: `Invalid schema for function '${toolName}': ${skillName}; description: ${skillDescription}; 'required' is missing 'range'.`,
+              message: `Invalid schema for function '${toolName}': ${skillName}; description: ${skillDescription}`,
             },
           }),
           requestBodyValues: {
@@ -487,7 +487,8 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
       );
 
       const diagnostic = warn.mock.calls.find(
-        ([, message]) => message === AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
+        ([, message]) =>
+          message === AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
       );
       expect(diagnostic).to.not.equal(undefined);
       const recorded = JSON.stringify(diagnostic[0]);

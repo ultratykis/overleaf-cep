@@ -307,7 +307,8 @@ function modelContextSourceLabel(
       return t("ai_reviewer_model_context_source_detected");
     case "override":
       return t("ai_reviewer_model_context_source_override");
-    case "unknown":
+    case "pending":
+    case "unavailable":
       return t("ai_reviewer_model_context_source_unknown");
     case "derived":
       return t("ai_reviewer_model_context_source_detected");
@@ -325,7 +326,8 @@ function modelContextSourceShortLabel(
       return t("ai_reviewer_model_context_source_detected_short");
     case "override":
       return t("ai_reviewer_model_context_source_override_short");
-    case "unknown":
+    case "pending":
+    case "unavailable":
       return t("ai_reviewer_model_context_source_unknown_short");
   }
 }
@@ -336,7 +338,9 @@ function modelContextLabel(
   t: TFunction<"translation">,
 ) {
   if (contextLength == null) {
-    return t("ai_reviewer_model_context_unknown");
+    return source === "pending"
+      ? t("ai_reviewer_model_context_pending")
+      : t("ai_reviewer_model_context_unknown");
   }
   return t("ai_reviewer_model_context", {
     contextLength: contextLength.toLocaleString(),
@@ -350,7 +354,9 @@ function modelContextShortLabel(
   t: TFunction<"translation">,
 ) {
   if (contextLength == null) {
-    return t("ai_reviewer_model_context_unknown_short");
+    return source === "pending"
+      ? t("ai_reviewer_model_context_pending_short")
+      : t("ai_reviewer_model_context_unknown_short");
   }
   return t("ai_reviewer_model_context", {
     contextLength: contextLength.toLocaleString(),

@@ -28,6 +28,10 @@ import {
 // to prove the endpoint responded and accepted the credential.
 const AZURE_CONNECTION_TEST_OUTPUT_TOKENS = 2048;
 
+// The review route has a 60 second deadline. Reserve the former five-second
+// metadata allowance for the fallback GETs after giving a cold model load the
+// rest of that budget.
+const CONTEXT_LENGTH_PROBE_TIMEOUT_MILLISECONDS = 55_000;
 const MODEL_CACHE_TTL_MILLISECONDS = 60_000;
 const MAX_MODEL_COUNT = 1_000;
 const MAX_MODEL_RESPONSE_BYTES = 1_048_576;
@@ -242,14 +246,8 @@ function safeModelId(value) {
  * @param {ReturnType<typeof parseAiReviewerProviderConfig>["provider"]} provider
  * @param {unknown} input
  * @param {Map<string, string[]> | null} [capabilities]
- * @param {Map<string, number> | null} [runningContextLengths]
  */
-function normalizeModels(
-  provider,
-  input,
-  capabilities = null,
-  runningContextLengths = null,
-) {
+function normalizeModels(provider, input, capabilities = null) {
   const root = /** @type {any} */ (input);
   const entries =
     provider === "openai-compatible"
@@ -297,8 +295,7 @@ function normalizeModels(
       ) ?? id;
     if (NON_REVIEW_MODEL.test(`${id} ${displayName}`)) continue;
     seen.add(id);
-    const detectedContextLength =
-      runningContextLengths?.get(id) ?? modelContextLengthFromFields(candidate);
+    const detectedContextLength = modelContextLengthFromFields(candidate);
     models.push(
       Object.freeze({
         id,
@@ -355,46 +352,6 @@ async function fetchOllamaCapabilities(baseUrl, guardedFetch, signal) {
       );
     }
     return capabilities.size === 0 ? null : capabilities;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * A loaded Ollama model reports the context actually allocated for this
- * process. This is more useful than the model's larger theoretical limit.
- *
- * @param {string} baseUrl
- * @param {(input: string, init: any) => Promise<Response>} guardedFetch
- * @param {AbortSignal | undefined} signal
- * @returns {Promise<Map<string, number> | null>}
- */
-async function fetchOllamaRunningContextLengths(baseUrl, guardedFetch, signal) {
-  try {
-    const response = await guardedFetch(`${baseUrl}/api/ps`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    if (!response.ok) {
-      cancelResponseBody(response);
-      return null;
-    }
-    const body = /** @type {any} */ (
-      await readBoundedModelResponse(response, signal)
-    );
-    if (!Array.isArray(body?.models)) {
-      return null;
-    }
-    const contexts = new Map();
-    for (const entry of body.models) {
-      const id = safeModelId(entry?.name ?? entry?.model);
-      const contextLength = modelContextLengthFromFields(entry);
-      if (id != null && contextLength != null) {
-        contexts.set(id, contextLength);
-      }
-    }
-    return contexts.size === 0 ? null : contexts;
   } catch {
     return null;
   }
@@ -465,7 +422,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
     dependencies.contextLengthDetector ?? detectOpenAiCompatibleContextLength;
   const contextLengthDetectionSignalFactory =
     dependencies.contextLengthDetectionSignalFactory ??
-    (() => AbortSignal.timeout(5_000));
+    (() => AbortSignal.timeout(CONTEXT_LENGTH_PROBE_TIMEOUT_MILLISECONDS));
   const openAiCompatibleTransportFactory =
     dependencies.openAiCompatibleTransportFactory ??
     dependencies.transportFactory ??
@@ -696,23 +653,10 @@ export function createAiReviewerProviderService(dependencies = {}) {
             signal,
           )
         : null;
-    const runningContextLengths =
-      config.provider === "openai-compatible" && nativeBaseUrl !== null
-        ? await fetchOllamaRunningContextLengths(
-            nativeBaseUrl,
-            createGuardedOpenAiCompatibleFetch({
-              baseUrl: nativeBaseUrl,
-              allowedRequestUrl: `${nativeBaseUrl}/api/ps`,
-              fetchImpl: modelFetchImpl,
-            }),
-            signal,
-          )
-        : null;
     const normalizedModels = normalizeModels(
       config.provider,
       body,
       capabilities,
-      runningContextLengths,
     );
     const models = Object.freeze(
       normalizedModels.map(({ id, displayName }) =>
@@ -786,7 +730,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
         {
           detectOpenAiCompatibleContextLength: async (candidate) => {
             const timeoutSignal = contextLengthDetectionSignalFactory();
-            const detectionSignal =
+            const probeSignal =
               signal == null
                 ? timeoutSignal
                 : timeoutSignal == null
@@ -794,7 +738,8 @@ export function createAiReviewerProviderService(dependencies = {}) {
                   : AbortSignal.any([signal, timeoutSignal]);
             return await contextLengthDetector({
               ...candidate,
-              ...(detectionSignal == null ? {} : { signal: detectionSignal }),
+              ...(signal == null ? {} : { signal }),
+              ...(probeSignal == null ? {} : { probeSignal }),
             });
           },
         },
@@ -803,10 +748,12 @@ export function createAiReviewerProviderService(dependencies = {}) {
       // resolver may convert detector failures to an advertised or unknown
       // value, so re-check the route signal before caching or starting a review.
       throwIfAborted(signal);
-      contextLengthCache.set(key, {
-        expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,
-        resolution,
-      });
+      if (resolution.contextLength != null) {
+        contextLengthCache.set(key, {
+          expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,
+          resolution,
+        });
+      }
       return resolution;
     },
 

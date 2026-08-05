@@ -14,6 +14,20 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function chatCompletionResponse() {
+  return jsonResponse({
+    id: "context-probe",
+    object: "chat.completion",
+    choices: [
+      {
+        index: 0,
+        finish_reason: "length",
+        message: { role: "assistant", content: "OK" },
+      },
+    ],
+  });
+}
+
 async function captureError(work) {
   try {
     await work;
@@ -24,12 +38,26 @@ async function captureError(work) {
 }
 
 describe("AI reviewer OpenAI-compatible context detection", function () {
-  it("prefers Ollama's loaded allocation over the larger model limit", async function () {
-    const fetchImpl = vi.fn(async (input) => {
+  it("probes Chat Completions before observing Ollama's request allocation", async function () {
+    let runningContextLength = 32_768;
+    const fetchImpl = vi.fn(async (input, init) => {
       const url = String(input);
+      if (url.endsWith("/chat/completions")) {
+        expect(init).toMatchObject({ method: "POST" });
+        expect(JSON.parse(init.body)).toEqual({
+          model,
+          messages: [{ role: "user", content: "." }],
+          max_tokens: 1,
+          stream: false,
+        });
+        expect(JSON.parse(init.body)).not.toHaveProperty("options");
+        expect(JSON.parse(init.body)).not.toHaveProperty("num_ctx");
+        runningContextLength = 4_096;
+        return chatCompletionResponse();
+      }
       if (url.endsWith("/api/ps")) {
         return jsonResponse({
-          models: [{ name: model, context_length: 4_096 }],
+          models: [{ name: model, context_length: runningContextLength }],
         });
       }
       return jsonResponse({ n_ctx: 131_072 });
@@ -38,13 +66,17 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     expect(
       await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
     ).toBe(4_096);
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    expect(fetchImpl.mock.calls[0][0]).toBe("http://127.0.0.1:11434/api/ps");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
+      "http://127.0.0.1:11434/api/ps",
+    ]);
   });
 
   it("uses the smallest llama.cpp slot allocation before model properties", async function () {
     const fetchImpl = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/chat/completions")) return chatCompletionResponse();
       if (url.endsWith("/api/ps")) return jsonResponse({}, 404);
       if (url.endsWith("/slots")) {
         return jsonResponse([{ n_ctx: 16_384 }, { n_ctx: 8_192 }]);
@@ -55,8 +87,9 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     expect(
       await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
     ).toBe(8_192);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
       "http://127.0.0.1:11434/api/ps",
       "http://127.0.0.1:11434/slots",
     ]);
@@ -65,6 +98,7 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
   it("uses llama.cpp properties when slots are unavailable", async function () {
     const fetchImpl = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/chat/completions")) return chatCompletionResponse();
       if (url.endsWith("/props")) {
         return jsonResponse({ default_generation_settings: { n_ctx: 32_768 } });
       }
@@ -74,12 +108,13 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     expect(
       await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
     ).toBe(32_768);
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 
-  it("leaves an unloaded Ollama model unknown instead of using /api/show's maximum", async function () {
+  it("leaves missing runtime metadata unknown instead of using a model maximum", async function () {
     const fetchImpl = vi.fn(async (input) => {
       const url = String(input);
+      if (url.endsWith("/chat/completions")) return chatCompletionResponse();
       if (url.endsWith("/api/ps")) return jsonResponse({ models: [] });
       if (url.endsWith("/api/show")) {
         return jsonResponse({
@@ -95,12 +130,140 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     expect(
       await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
     ).toBeNull();
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
       "http://127.0.0.1:11434/api/ps",
       "http://127.0.0.1:11434/slots",
       "http://127.0.0.1:11434/props",
     ]);
+  });
+
+  it("uses llama.cpp slots after the probe exceeds its own timeout", async function () {
+    const probeSignal = AbortSignal.timeout(5);
+    const fetchImpl = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/chat/completions")) {
+        return await new Promise((_, reject) => {
+          if (init.signal.aborted) {
+            reject(init.signal.reason);
+            return;
+          }
+          init.signal.addEventListener(
+            "abort",
+            () => reject(init.signal.reason),
+            { once: true },
+          );
+        });
+      }
+      if (url.endsWith("/slots")) {
+        return jsonResponse([{ model, n_ctx: 16_384 }]);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    expect(
+      await detectOpenAiCompatibleContextLength({
+        baseUrl,
+        model,
+        probeSignal,
+        fetchImpl,
+      }),
+    ).toBe(16_384);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
+      "http://127.0.0.1:11434/slots",
+    ]);
+  });
+
+  it("does not fall back after caller cancellation", async function () {
+    const caller = new AbortController();
+    /** @type {() => void} */
+    let markProbeStarted = () => {};
+    const probeStarted = new Promise((resolve) => {
+      markProbeStarted = () => resolve();
+    });
+    const fetchImpl = vi.fn(async (input, init) => {
+      expect(String(input)).toBe("http://127.0.0.1:11434/v1/chat/completions");
+      markProbeStarted();
+      return await new Promise((_, reject) => {
+        init.signal.addEventListener(
+          "abort",
+          () => reject(init.signal.reason),
+          { once: true },
+        );
+      });
+    });
+    const captured = captureError(
+      detectOpenAiCompatibleContextLength({
+        baseUrl,
+        model,
+        signal: caller.signal,
+        probeSignal: caller.signal,
+        fetchImpl,
+      }),
+    );
+    await probeStarted;
+    caller.abort(new DOMException("cancelled", "AbortError"));
+
+    expect(await captured).toMatchObject({
+      code: "AI_REQUEST_ABORTED",
+      category: "aborted",
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("uses llama.cpp properties after a non-2xx probe response", async function () {
+    const fetchImpl = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/chat/completions")) {
+        return jsonResponse(
+          { error: { message: "PRIVATE_CHAT_TEMPLATE_FAILURE" } },
+          503,
+        );
+      }
+      if (url.endsWith("/props")) {
+        return jsonResponse({ default_generation_settings: { n_ctx: 32_768 } });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    expect(
+      await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
+    ).toBe(32_768);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
+      "http://127.0.0.1:11434/slots",
+      "http://127.0.0.1:11434/props",
+    ]);
+  });
+
+  it("keeps Ollama unavailable instead of reading stale /api/ps after a failed probe", async function () {
+    const fetchImpl = vi.fn(async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return jsonResponse(
+          { error: { message: "PRIVATE_PROBE_FAILURE" } },
+          500,
+        );
+      }
+      return String(input).endsWith("/api/ps")
+        ? jsonResponse({
+            models: [{ name: model, context_length: 32_768 }],
+          })
+        : jsonResponse({}, 404);
+    });
+
+    expect(
+      await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
+    ).toBeNull();
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      "http://127.0.0.1:11434/v1/chat/completions",
+      "http://127.0.0.1:11434/slots",
+      "http://127.0.0.1:11434/props",
+    ]);
+    expect(fetchImpl.mock.calls.flat()).not.toContain(
+      "http://127.0.0.1:11434/api/ps",
+    );
   });
 
   it("blocks an HTTP credential before any metadata request", async function () {
@@ -123,11 +286,14 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
 
   it("sends a credential only through guarded same-origin metadata requests", async function () {
     const encryptedLocalBaseUrl = "https://localhost:8443/v1";
-    const fetchImpl = vi.fn(async (input) =>
-      String(input).endsWith("/props")
+    const fetchImpl = vi.fn(async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return chatCompletionResponse();
+      }
+      return String(input).endsWith("/props")
         ? jsonResponse({ n_ctx: 32_768 })
-        : jsonResponse({}, 404),
-    );
+        : jsonResponse({}, 404);
+    });
 
     expect(
       await detectOpenAiCompatibleContextLength({
@@ -151,7 +317,11 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
       detectOpenAiCompatibleContextLength({
         baseUrl,
         model,
-        fetchImpl: vi.fn(async () => jsonResponse({ details: {} })),
+        fetchImpl: vi.fn(async (input) =>
+          String(input).endsWith("/chat/completions")
+            ? chatCompletionResponse()
+            : jsonResponse({ details: {} }),
+        ),
       }),
     );
     expect(error).toBeInstanceOf(AgentGatewayError);
@@ -169,11 +339,13 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     "leaves unusable runtime metadata unknown: $name",
     async function ({ contextLength }) {
       const fetchImpl = vi.fn(async (input) =>
-        String(input).endsWith("/api/ps")
-          ? jsonResponse({
-              models: [{ name: model, context_length: contextLength }],
-            })
-          : jsonResponse({}, 404),
+        String(input).endsWith("/chat/completions")
+          ? chatCompletionResponse()
+          : String(input).endsWith("/api/ps")
+            ? jsonResponse({
+                models: [{ name: model, context_length: contextLength }],
+              })
+            : jsonResponse({}, 404),
       );
 
       expect(
@@ -183,24 +355,26 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
           fetchImpl,
         }),
       ).toBeNull();
-      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
     },
   );
 
   it("rejects an oversized metadata response before parsing it", async function () {
     const fetchImpl = vi.fn(async (input) =>
-      String(input).endsWith("/props")
-        ? new Response(
-            JSON.stringify({
-              n_ctx: 32_768,
-              padding: "x".repeat(1_100_000),
-            }),
-            {
-              status: 200,
-              headers: { "content-type": "application/json" },
-            },
-          )
-        : jsonResponse({}, 404),
+      String(input).endsWith("/chat/completions")
+        ? chatCompletionResponse()
+        : String(input).endsWith("/props")
+          ? new Response(
+              JSON.stringify({
+                n_ctx: 32_768,
+                padding: "x".repeat(1_100_000),
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              },
+            )
+          : jsonResponse({}, 404),
     );
     const error = await captureError(
       detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),

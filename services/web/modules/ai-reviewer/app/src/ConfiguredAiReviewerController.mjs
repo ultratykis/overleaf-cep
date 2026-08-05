@@ -126,7 +126,7 @@ function modelSelectionRequired() {
 
 function modelContextLengthRequired() {
   return new AgentGatewayError(
-    "The selected model context length is unknown. For Ollama, load the model first or set it in Connection settings.",
+    "The selected model context length is unknown. For Ollama, set OLLAMA_CONTEXT_LENGTH on the Ollama server and restart it to use a larger context. Loading a model manually does not change the context used by AI Reviewer.",
     {
       code: "AI_MODEL_CONTEXT_UNKNOWN",
       category: "configuration",
@@ -221,10 +221,7 @@ async function resolveRunConfiguration(
       cacheKey: aiReviewerModelCacheKey(userId, connection.id ?? null),
     },
   );
-  if (
-    resolution.contextLength == null ||
-    resolution.contextLengthSource === "unknown"
-  ) {
+  if (resolution.contextLength == null) {
     // Stop before RequestScopeReader, ProjectSnapshot, or AiSdkAgentGateway can
     // calculate a budget. No provider generation request is made for an
     // invented context length.
