@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "files": [
+    {
+      "path": "main.tex",
+      "kind": "latex",
+      "sha256": "6d8e3c12c98d6499fa4dd5e23abf4e1bc5d1aab67c5605ce74c3e9998e2cdfc2"
+    },
+    {
+      "path": "sections/method.tex",
+      "kind": "latex",
+      "sha256": "b865c2ca30908acf6613857d952d2850b1db9f3fdfd1a94ca1bf293c00d33e00"
+    },
+    {
+      "path": "references.bib",
+      "kind": "bibliography",
+      "sha256": "a5916cfd0921cb9d7fc7887465bf260246cacd6c7e7c020eb411eae80d77e22d"
+    },
+    {
+      "path": "stale-suggestion.json",
+      "kind": "stale-edit",
+      "sha256": "5b0cc491f482110bf1db92f0c3cb5295abc215bd41044e3fa3888af8bbbd9573"
+    },
+    {
+      "path": "zotero-linked-file.json",
+      "kind": "zotero-linked",
+      "sha256": "1c74f3e90be61bdba12e4ef8bff126f2a970b2c398d46ebffa6a8aab79fef2ad"
+    }
+  ]
+}

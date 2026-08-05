@@ -81,6 +81,25 @@ const parseTextExtensions = function (extensions) {
   }
 }
 
+const booleanFromEnv = function (name, defaultValue) {
+  const rawValue = process.env[name]
+  if (rawValue == null || rawValue.trim() === '') {
+    return defaultValue
+  }
+
+  const normalized = rawValue.trim().toLowerCase()
+  if (normalized === 'true') {
+    return true
+  }
+  if (normalized === 'false') {
+    return false
+  }
+
+  throw new Error(`${name} must be "true" or "false"`)
+}
+
+const aiReviewerEnabled = booleanFromEnv('OVERLEAF_AI_REVIEWER_ENABLED', false)
+
 const httpPermissionsPolicy = {
   blocked: [
     'accelerometer',
@@ -456,6 +475,10 @@ module.exports = {
     standardQuota: 'standard',
     basicQuota: 'basic',
     unlimitedQuota: 'unlimited',
+  },
+
+  aiReviewer: {
+    enabled: aiReviewerEnabled,
   },
 
   quotaGrants: {
@@ -1176,6 +1199,10 @@ module.exports = {
     integrationPanelComponents: [
       Path.resolve(
         __dirname,
+        '../modules/ai-reviewer/frontend/js/components/ai-integration-card.tsx'
+      ),
+      Path.resolve(
+        __dirname,
         '../modules/github-sync/frontend/js/components/github-integration-card.tsx'
       ),
       Path.resolve(
@@ -1198,7 +1225,12 @@ module.exports = {
         '../modules/reference-picker/frontend/reference-index/advanced-reference-index.ts'
       ),
     ],
-    railEntries: [],
+    railEntries: [
+      Path.resolve(
+        __dirname,
+        '../modules/ai-reviewer/frontend/js/components/ai-reviewer-rail-entry.tsx'
+      ),
+    ],
     railPopovers: [],
     railActions: [],
     railModals: [],
@@ -1221,6 +1253,7 @@ module.exports = {
     'git-bridge',
     'github-sync',
     'zotero',
+    ...(aiReviewerEnabled ? ['ai-reviewer'] : []),
   ],
   viewIncludes: {},
 

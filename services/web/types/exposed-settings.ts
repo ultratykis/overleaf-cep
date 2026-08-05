@@ -6,6 +6,7 @@ type TemplateLink = {
 
 export type ExposedSettings = {
   adminEmail: string
+  aiReviewerEnabled: boolean
   appName: string
   cookieDomain: string
   dropboxAppName: string

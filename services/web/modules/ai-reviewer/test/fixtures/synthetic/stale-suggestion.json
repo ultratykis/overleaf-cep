@@ -1,0 +1,50 @@
+{
+  "baseDocument": {
+    "projectId": "project-0001",
+    "documentId": "document-0001",
+    "path": "chapters/introduction.tex",
+    "revision": 12,
+    "text": "Synthetic text.",
+    "textHash": "088d518d5976ba9fcee527eafbb0e8923d76c5b95b1f86b82d8439fa2e23ca29"
+  },
+  "liveDocument": {
+    "projectId": "project-0001",
+    "documentId": "document-0001",
+    "path": "chapters/introduction.tex",
+    "revision": 13,
+    "text": "Locally changed.",
+    "textHash": "187b480bb9aa6e533c8b607c9323ae886b31d1c01857ae9c1cc22a26c3c7856b"
+  },
+  "suggestion": {
+    "id": "suggestion-stale-0001",
+    "requestId": "request-stale-0001",
+    "projectId": "project-0001",
+    "documentId": "document-0001",
+    "path": "chapters/introduction.tex",
+    "baseRevision": 12,
+    "baseTextHash": "088d518d5976ba9fcee527eafbb0e8923d76c5b95b1f86b82d8439fa2e23ca29",
+    "range": {
+      "from": 0,
+      "to": 15
+    },
+    "original": "Synthetic text.",
+    "replacement": "Revised text.",
+    "rationale": "The synthetic replacement is shorter.",
+    "evidence": [
+      {
+        "path": "chapters/introduction.tex",
+        "range": {
+          "from": 0,
+          "to": 15
+        },
+        "revision": 12,
+        "textHash": "088d518d5976ba9fcee527eafbb0e8923d76c5b95b1f86b82d8439fa2e23ca29"
+      }
+    ],
+    "provider": "fake",
+    "model": "deterministic-v1",
+    "skill": "line-edit",
+    "createdAt": "2026-07-24T00:00:00.000Z",
+    "status": "proposed"
+  }
+}

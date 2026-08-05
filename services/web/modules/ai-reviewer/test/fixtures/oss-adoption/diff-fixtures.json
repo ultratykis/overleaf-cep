@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "insert",
+      "original": "alpha\nomega\n",
+      "replacement": "alpha\ninserted\nomega\n"
+    },
+    {
+      "id": "delete",
+      "original": "alpha\ndeleted\nomega\n",
+      "replacement": "alpha\nomega\n"
+    },
+    {
+      "id": "replace",
+      "original": "alpha\nbefore\nomega\n",
+      "replacement": "alpha\nafter!\nomega\n"
+    },
+    {
+      "id": "adjacent",
+      "original": "zero\none\ntwo\nthree\n",
+      "replacement": "zero\nONE\nTWO\nthree\n"
+    },
+    {
+      "id": "empty-range",
+      "original": "",
+      "replacement": "added"
+    },
+    {
+      "id": "multibyte",
+      "original": "前文\n日本語😀です\n後文\n",
+      "replacement": "前文\n日本語😺です\n後文\n"
+    }
+  ]
+}

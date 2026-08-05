@@ -414,6 +414,7 @@ export default async function (webRouter, privateApiRouter, publicApiRouter) {
       wikiEnabled: Settings.overleaf != null || Settings.proxyLearn,
       templatesEnabled:
         Settings.overleaf != null || Boolean(Settings.templates),
+      aiReviewerEnabled: Settings.aiReviewer?.enabled === true,
       cioWriteKey: Settings.analytics?.cio?.writeKey,
       cioSiteId: Settings.analytics?.cio?.siteId,
       linkedInInsightsPartnerId: Settings.analytics?.linkedIn?.partnerId,

@@ -1,0 +1,20 @@
+{
+  "name": "overleaf-ai-reviewer-oss-adoption-spike",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/mcp": "1.0.37",
+    "@ai-sdk/openai": "3.0.54",
+    "@codemirror/language": "6.12.1",
+    "@codemirror/merge": "6.12.2",
+    "@codemirror/state": "6.5.4",
+    "@codemirror/view": "6.38.6",
+    "@unified-latex/unified-latex": "1.8.4",
+    "ai": "6.0.170",
+    "esbuild": "0.27.7",
+    "jsdom": "27.4.0",
+    "latex-utensils": "7.0.0",
+    "zod": "4.1.11"
+  }
+}

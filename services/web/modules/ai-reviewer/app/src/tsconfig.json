@@ -1,0 +1,14 @@
+{
+  "extends": "../../../../tsconfig.backend.json",
+  "files": [
+    "AgentGateway.mjs",
+    "AiSdkAgentGateway.mjs",
+    "AiReviewerController.mjs",
+    "AiReviewerRouter.mjs",
+    "ConfiguredAiReviewerController.mjs",
+    "EnabledAiReviewerModule.mjs",
+    "../../shared/contracts.mjs",
+    "../../shared/contract-types.ts"
+  ],
+  "include": []
+}

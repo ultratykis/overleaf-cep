@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "registry": "https://registry.npmjs.org/",
+  "metadataObservation": {
+    "observedAt": "2026-07-24",
+    "source": "npm registry version metadata and the recorded upstream source URLs"
+  },
+  "isolatedInstall": {
+    "packageManifest": "package.json",
+    "lockfile": "package-lock.json",
+    "ignoreScripts": true
+  },
+  "runtime": {
+    "node": "26.5.0",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "targetHardware": "Apple M1 MacBook Pro with 16 GB RAM"
+  },
+  "browser": {
+    "image": "cypress/included:15.12.0",
+    "digest": "sha256:ad327f499e73c4eec699bcbde281a771ede9d4edb822c2bddc2a242580480cca",
+    "network": "none"
+  },
+  "licensePolicy": {
+    "intendedDistribution": "private local deployment; retain all applicable license and notice texts before any later redistribution",
+    "allowedSpdxExpressions": [
+      "(AFL-2.1 OR BSD-3-Clause)",
+      "Apache-2.0",
+      "BSD-2-Clause",
+      "BSD-3-Clause",
+      "BlueOak-1.0.0",
+      "CC0-1.0",
+      "ISC",
+      "MIT",
+      "MIT-0"
+    ],
+    "selectedAlternatives": {
+      "(AFL-2.1 OR BSD-3-Clause)": "BSD-3-Clause"
+    }
+  },
+  "packages": [
+    {
+      "id": "ai-sdk-v6",
+      "name": "ai",
+      "version": "6.0.170",
+      "integrity": "sha512-FWTKeGGDRcYJtPWIrdZDSuvOW5LCjI2NZUJmaml8OTOaPEsXnFdFvmawCXbT+wTGxyWKJTgZ9sZtCjbJsmjM2Q==",
+      "tarball": "https://registry.npmjs.org/ai/-/ai-6.0.170.tgz",
+      "license": "Apache-2.0",
+      "source": "https://github.com/vercel/ai/tree/main/packages/ai",
+      "publishedAt": "2026-04-29T17:08:01.289Z",
+      "packedBytes": 1284338,
+      "unpackedBytes": 6481746,
+      "role": "provider adapter behind AgentGateway",
+      "maintenanceObservation": "The resolved v6 line is actively maintained upstream; this spike does not upgrade its major version.",
+      "distributionObligations": [
+        "retain the Apache-2.0 license",
+        "record bundled third-party notices before redistribution"
+      ]
+    },
+    {
+      "id": "codemirror-merge",
+      "name": "@codemirror/merge",
+      "version": "6.12.2",
+      "integrity": "sha512-V8JvyAPjHbPupqP7BeMcsdsYCbyPij74jxIbaIJDORI+VZzW44zFmon8bF+oxGWvOKhcRmkiUMXd8MxHr3YA2w==",
+      "tarball": "https://registry.npmjs.org/@codemirror/merge/-/merge-6.12.2.tgz",
+      "license": "MIT",
+      "source": "https://code.haverbeke.berlin/codemirror/merge",
+      "publishedAt": "2026-06-09T07:58:41.283Z",
+      "packedBytes": 44639,
+      "unpackedBytes": 183429,
+      "role": "detached read-only diff preview",
+      "maintenanceObservation": "The package has current 2026 releases and remains part of the maintained CodeMirror 6 family.",
+      "distributionObligations": ["retain the MIT license and copyright notice"]
+    },
+    {
+      "id": "openai-compatible-provider",
+      "name": "@ai-sdk/openai",
+      "version": "3.0.54",
+      "integrity": "sha512-j1qrNe/ebUKuE+fETzS+CVnczs11jQBR9y9M6aoKtJZAosg6SZnPC1Bb92e2u6yaSK+88TZoFhiY67uYphPitw==",
+      "tarball": "https://registry.npmjs.org/@ai-sdk/openai/-/openai-3.0.54.tgz",
+      "license": "Apache-2.0",
+      "source": "https://github.com/vercel/ai/tree/main/packages/openai",
+      "publishedAt": "2026-04-29T03:44:19.003Z",
+      "packedBytes": 638077,
+      "unpackedBytes": 3582512,
+      "role": "OpenAI-compatible Ollama model factory deferred to Phase 3",
+      "maintenanceObservation": "The resolved package belongs to the maintained AI SDK v6-compatible line; this spike does not create a provider instance or make a network request.",
+      "distributionObligations": [
+        "retain the Apache-2.0 license",
+        "record bundled third-party notices before redistribution"
+      ]
+    },
+    {
+      "id": "unified-latex",
+      "name": "@unified-latex/unified-latex",
+      "version": "1.8.4",
+      "integrity": "sha512-ZaW8EZh1MWwLM/7Rywirhu3yx/fDI/gA8xuZ7xd4EP6W79ZMepOYqtyP368wkU9WS0dYGJH2x8U4/j/N7MWIWA==",
+      "tarball": "https://registry.npmjs.org/@unified-latex/unified-latex/-/unified-latex-1.8.4.tgz",
+      "license": "MIT",
+      "source": "https://github.com/siefkenj/unified-latex",
+      "publishedAt": "2026-04-03T19:57:59.787Z",
+      "packedBytes": 33627,
+      "unpackedBytes": 135076,
+      "role": "LaTeX project-graph parser candidate",
+      "maintenanceObservation": "The project has a current 2026 release and a multi-package parser ecosystem.",
+      "distributionObligations": ["retain the MIT license and copyright notice"]
+    },
+    {
+      "id": "latex-utensils",
+      "name": "latex-utensils",
+      "version": "7.0.0",
+      "integrity": "sha512-njP9hTOoZuQlxhBoUgp0tKuqE9vwkd56LXnbm7HXxWMaS+WXfXv94Anw3SfZi/5lqP9XBwkcHt1aKKWpmmS+jQ==",
+      "tarball": "https://registry.npmjs.org/latex-utensils/-/latex-utensils-7.0.0.tgz",
+      "license": "MIT",
+      "source": "https://github.com/tamuratak/latex-utensils",
+      "publishedAt": "2026-04-14T09:09:17.146Z",
+      "packedBytes": 92672,
+      "unpackedBytes": 933957,
+      "role": "LaTeX project-graph parser candidate",
+      "maintenanceObservation": "The project released a new major in 2026 and provides a parser-level timeout.",
+      "distributionObligations": ["retain the MIT license and copyright notice"]
+    },
+    {
+      "id": "ai-sdk-mcp",
+      "name": "@ai-sdk/mcp",
+      "version": "1.0.37",
+      "integrity": "sha512-kcR00X0A7mqV6BeSo+22Ir3qVqxJaeTO12ChCgGViwvAICVwT2x6mW3bRsOWItY5sYM0RekzGLVz7428ETL4+g==",
+      "tarball": "https://registry.npmjs.org/@ai-sdk/mcp/-/mcp-1.0.37.tgz",
+      "license": "Apache-2.0",
+      "source": "https://github.com/vercel/ai/tree/main/packages/mcp",
+      "publishedAt": "2026-04-29T03:44:16.409Z",
+      "packedBytes": 141472,
+      "unpackedBytes": 705727,
+      "role": "patched versus unpatched protocol negotiation candidate",
+      "maintenanceObservation": "The resolved 1.x package is maintained, but this fork carries a protocol-version patch that must be justified independently.",
+      "distributionObligations": [
+        "retain the Apache-2.0 license",
+        "record the local patch and bundled third-party notices before redistribution"
+      ]
+    }
+  ],
+  "diff": {
+    "fixtures": [
+      "insert",
+      "delete",
+      "replace",
+      "adjacent",
+      "empty-range",
+      "multibyte"
+    ],
+    "requireSingleCodeMirrorRuntime": true,
+    "allowEditorDispatch": false
+  },
+  "parser": {
+    "repetitions": 3,
+    "watchdogMsPerCase": 30000,
+    "maxSourceBytes": 102400,
+    "requiredFacts": [
+      "input",
+      "include",
+      "section",
+      "label",
+      "ref",
+      "cite",
+      "bibliography"
+    ],
+    "suppressInside": ["comment", "verbatim", "lstlisting", "verb"]
+  },
+  "mcp": {
+    "cases": ["2025-06-18", "2025-11-25", "unsupported", "malformed"],
+    "ownerIfRetained": "local AI reviewer MCP adapter",
+    "removalCondition": "remove when an unpatched supported SDK release propagates the negotiated protocol version on later requests and passes import, require, cancellation, timeout, close, and malformed-negotiation cases"
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "graph",
+      "file": "graph.tex",
+      "expected": [
+        {
+          "kind": "input",
+          "macro": "input",
+          "values": ["sections/intro"],
+          "slice": "\\input{sections/intro}"
+        },
+        {
+          "kind": "include",
+          "macro": "include",
+          "values": ["chapters/results"],
+          "slice": "\\include{chapters/results}"
+        },
+        {
+          "kind": "section",
+          "macro": "section",
+          "values": ["日本語😀"],
+          "slice": "\\section{日本語😀}"
+        },
+        {
+          "kind": "label",
+          "macro": "label",
+          "values": ["sec:emoji"],
+          "slice": "\\label{sec:emoji}"
+        },
+        {
+          "kind": "ref",
+          "macro": "ref",
+          "values": ["sec:emoji"],
+          "slice": "\\ref{sec:emoji}"
+        },
+        {
+          "kind": "ref",
+          "macro": "eqref",
+          "values": ["eq:one"],
+          "slice": "\\eqref{eq:one}"
+        },
+        {
+          "kind": "ref",
+          "macro": "autoref",
+          "values": ["sec:emoji"],
+          "slice": "\\autoref{sec:emoji}"
+        },
+        {
+          "kind": "ref",
+          "macro": "cref",
+          "values": ["eq:one"],
+          "slice": "\\cref{eq:one}"
+        },
+        {
+          "kind": "cite",
+          "macro": "cite",
+          "values": ["alpha", "beta"],
+          "slice": "\\cite{alpha,beta}"
+        },
+        {
+          "kind": "cite",
+          "macro": "citet",
+          "values": ["gamma"],
+          "slice": "\\citet{gamma}"
+        },
+        {
+          "kind": "cite",
+          "macro": "citep",
+          "values": ["delta"],
+          "slice": "\\citep{delta}"
+        },
+        {
+          "kind": "cite",
+          "macro": "parencite",
+          "values": ["epsilon"],
+          "slice": "\\parencite{epsilon}"
+        },
+        {
+          "kind": "cite",
+          "macro": "textcite",
+          "values": ["zeta"],
+          "slice": "\\textcite{zeta}"
+        },
+        {
+          "kind": "bibliography",
+          "macro": "bibliography",
+          "values": ["references", "more"],
+          "slice": "\\bibliography{references,more}"
+        },
+        {
+          "kind": "bibliography",
+          "macro": "addbibresource",
+          "values": ["extra.bib"],
+          "slice": "\\addbibresource{extra.bib}"
+        }
+      ]
+    },
+    {
+      "id": "suppression",
+      "file": "suppression.tex",
+      "expected": [
+        {
+          "kind": "cite",
+          "macro": "cite",
+          "values": ["kept"],
+          "slice": "\\cite{kept}"
+        }
+      ]
+    },
+    {
+      "id": "malformed",
+      "file": "malformed.tex",
+      "expected": [
+        {
+          "kind": "label",
+          "macro": "label",
+          "values": ["sec:before"],
+          "slice": "\\label{sec:before}"
+        },
+        {
+          "kind": "input",
+          "macro": "input",
+          "values": ["after"],
+          "slice": "\\input{after}"
+        }
+      ]
+    }
+  ],
+  "boundary": {
+    "acceptedBytes": 102400,
+    "rejectedBytes": 102401,
+    "seedFile": "graph.tex"
+  }
+}

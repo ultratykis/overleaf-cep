@@ -1,0 +1,25 @@
+{
+  "path": "zotero-library.bib",
+  "managed": true,
+  "linkedFileData": {
+    "provider": "zotero",
+    "source": "synthetic-library"
+  },
+  "normalizedItems": [
+    {
+      "itemKey": "SYNTHETIC1",
+      "itemType": "journalArticle",
+      "title": "A Synthetic Zotero Fixture",
+      "creators": [
+        {
+          "firstName": "Alice",
+          "lastName": "Example",
+          "creatorType": "author"
+        }
+      ],
+      "year": "2026",
+      "doi": null,
+      "verificationDepth": "metadata-only"
+    }
+  ]
+}
