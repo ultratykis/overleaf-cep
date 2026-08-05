@@ -183,7 +183,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
           model: "fixture-model",
           scopeKind: "project",
           findingToolOffered: true,
-          toolCallCount: 0,
+          toolCallCounts: {},
           pendingValidatedArtifactCount: 0,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
@@ -205,19 +205,36 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     ]);
     const { model, consumed } = strictStreamModel([subjectStep, closingStep()]);
     const gateway = createGateway(model);
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
 
-    const events = await collect(gateway.stream(request()));
+    try {
+      const events = await collect(gateway.stream(request()));
 
-    expect(events.map((event) => event.type)).toEqual([
-      "started",
-      "subject",
-      "completed",
-    ]);
-    expect(events[1]).toMatchObject({
-      subject: "Claim support in chapter 3",
-      sequence: 1,
-    });
-    expect(consumed()).toBe(2);
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "subject",
+        "completed",
+      ]);
+      expect(events[1]).toMatchObject({
+        subject: "Claim support in chapter 3",
+        sequence: 1,
+      });
+      expect(consumed()).toBe(2);
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: "request-sdk-0001",
+          provider: "fixture-provider",
+          model: "fixture-model",
+          scopeKind: "project",
+          findingToolOffered: true,
+          toolCallCounts: { report_subject: 1 },
+          pendingValidatedArtifactCount: 0,
+        },
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
   });
 
   it("maps one read-only tool call and structured result into local events", async function () {

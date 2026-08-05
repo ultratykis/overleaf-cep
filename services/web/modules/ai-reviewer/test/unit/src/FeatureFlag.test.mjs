@@ -21,6 +21,13 @@ function loadSettings(value) {
 
 function expectThinFrontendShells(settings) {
   expect(
+    settings.overleafModuleImports.settingsEntries.filter((componentPath) =>
+      componentPath.endsWith(
+        "/modules/ai-reviewer/frontend/js/components/ai-reviewer-account-settings.tsx",
+      ),
+    ),
+  ).toHaveLength(1);
+  expect(
     settings.overleafModuleImports.integrationPanelComponents.filter(
       (componentPath) =>
         componentPath.endsWith(

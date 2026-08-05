@@ -1242,6 +1242,9 @@ export function AiReviewerPanelView({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
     null,
   );
+  const [unresolvedFindingJumpPending, setUnresolvedFindingJumpPending] =
+    useState(false);
+  const firstUnresolvedFindingRef = useRef<HTMLElement | null>(null);
   const activeDiscussionIdRef = useRef<string | null>(activeDiscussionId);
   activeDiscussionIdRef.current = activeDiscussionId;
   const [showDeleteWorkspaceConfirmation, setShowDeleteWorkspaceConfirmation] =
@@ -3753,24 +3756,53 @@ export function AiReviewerPanelView({
     title: string | null,
     status: FindingArtifactStatus | SuggestionArtifactStatus,
     body: ReactNode,
-  ) => (
-    <article
-      key={key}
-      // A resolved artifact stays in place and only dims, so the list keeps the
-      // shape the reader learned instead of rearranging under them.
-      className={`ai-reviewer-artifact${
-        isTerminalArtifactStatus(status) ? " ai-reviewer-artifact-resolved" : ""
-      }`}
-    >
-      {title != null && <h5 className="ai-reviewer-artifact-title">{title}</h5>}
-      <p className="ai-reviewer-artifact-status">
-        {t("ai_reviewer_artifact_status", {
-          status: artifactStatusLabel(status, t),
-        })}
-      </p>
-      {body}
-    </article>
-  );
+    jumpTarget = false,
+  ) => {
+    const statusLabel = t("ai_reviewer_artifact_status", {
+      status: artifactStatusLabel(status, t),
+    });
+    const jumpTargetProps = jumpTarget
+      ? {
+          ref: firstUnresolvedFindingRef,
+          tabIndex: -1,
+        }
+      : {};
+
+    if (isTerminalArtifactStatus(status)) {
+      return (
+        <article
+          key={key}
+          className="ai-reviewer-artifact ai-reviewer-artifact-resolved"
+        >
+          {/* Native disclosure semantics keep completed work to one line while
+              leaving its details and historical actions available on demand. */}
+          <details className="ai-reviewer-artifact-disclosure">
+            <summary className="ai-reviewer-artifact-summary">
+              <span className="ai-reviewer-artifact-summary-content">
+                {title != null && (
+                  <span className="ai-reviewer-artifact-title">{title}</span>
+                )}
+                <span className="ai-reviewer-artifact-status">
+                  {statusLabel}
+                </span>
+              </span>
+            </summary>
+            <div className="ai-reviewer-artifact-body">{body}</div>
+          </details>
+        </article>
+      );
+    }
+
+    return (
+      <article key={key} className="ai-reviewer-artifact" {...jumpTargetProps}>
+        {title != null && (
+          <h5 className="ai-reviewer-artifact-title">{title}</h5>
+        )}
+        <p className="ai-reviewer-artifact-status">{statusLabel}</p>
+        {body}
+      </article>
+    );
+  };
 
   const renderEvidence = (
     runState: SelectionWorkspaceState,
@@ -3898,6 +3930,7 @@ export function AiReviewerPanelView({
             </p>
           )}
       </>,
+      commentDraftKey === firstUnresolvedFindingKey,
     );
   };
 
@@ -3993,6 +4026,7 @@ export function AiReviewerPanelView({
             </p>
           )}
       </>,
+      commentDraftKey === firstUnresolvedFindingKey,
     );
   };
 
@@ -4025,7 +4059,7 @@ export function AiReviewerPanelView({
       activeSuggestionPreview.suggestion === suggestion;
     return renderArtifact(
       commentDraftKey,
-      null,
+      t("ai_reviewer_suggestion_title", { index: index + 1 }),
       status,
       <>
         <p className="ai-reviewer-panel-quoted-source">
@@ -4163,9 +4197,9 @@ export function AiReviewerPanelView({
     );
 
   /**
-   * A run is one exchange in the conversation: what was asked, what the agent
-   * read, what it said, and any edit it proposed. Its findings are pinned in
-   * the band above instead, so they do not scroll away with the thread.
+   * A run owns what was asked, what the agent read and said, and every artifact
+   * it produced. Keeping that ownership visible makes the source of each
+   * finding clear without a second, detached list.
    */
   const renderRun = (runState: SelectionWorkspaceState) => (
     <article
@@ -4188,8 +4222,11 @@ export function AiReviewerPanelView({
             {runStatusLabel(runState.status, t)}
           </span>
           {runState.provider != null && runState.model != null && (
-            <span className="text-muted">
-              {runState.provider} · {runState.model}
+            <span className="ai-reviewer-run-model">
+              {t("ai_reviewer_run_model", {
+                provider: runState.provider,
+                model: runState.model,
+              })}
             </span>
           )}
         </div>
@@ -4244,6 +4281,21 @@ export function AiReviewerPanelView({
           checkNewLines
           translate="no"
         />
+      )}
+      {runState.findings.length > 0 && (
+        <section
+          className="ai-reviewer-run-artifacts"
+          aria-label={t("ai_reviewer_review_findings")}
+        >
+          <h4 className="ai-reviewer-run-section-title">
+            {t("ai_reviewer_findings")}
+          </h4>
+          {runState.findings.map((finding) =>
+            finding.artifactKind === "citation-finding"
+              ? renderCitationFinding(runState, finding)
+              : renderFinding(runState, finding),
+          )}
+        </section>
       )}
       {runState.suggestions.length > 0 && (
         <section
@@ -4302,7 +4354,7 @@ export function AiReviewerPanelView({
       activeSuggestionPreview.suggestion === suggestion;
     return renderArtifact(
       commentDraftKey,
-      null,
+      t("ai_reviewer_suggestion_title", { index: index + 1 }),
       status,
       <>
         <p className="ai-reviewer-panel-quoted-source">
@@ -4599,6 +4651,45 @@ export function AiReviewerPanelView({
     ({ runState, finding }) =>
       findingStatus(runState.findingStatuses, finding.id) === "unresolved",
   ).length;
+  const firstUnresolvedFindingKey = findingEntries
+    .map(({ runState, finding }) => {
+      const status = findingStatus(runState.findingStatuses, finding.id);
+      if (status !== "unresolved") {
+        return null;
+      }
+      const kind =
+        finding.artifactKind === "citation-finding" ? "citation" : "finding";
+      return `run:${runState.generation}:${kind}:${finding.id}`;
+    })
+    .find((key): key is string => key != null);
+
+  useEffect(() => {
+    if (!unresolvedFindingJumpPending || activeDiscussionId != null) {
+      return;
+    }
+    const target = firstUnresolvedFindingRef.current;
+    if (target != null) {
+      target.scrollIntoView?.({ block: "start" });
+      target.focus({ preventScroll: true });
+    }
+    setUnresolvedFindingJumpPending(false);
+  }, [
+    activeDiscussionId,
+    firstUnresolvedFindingKey,
+    unresolvedFindingJumpPending,
+  ]);
+
+  const jumpToFirstUnresolvedFinding = () => {
+    // A discussion replaces the list in the single scroller, so return to the
+    // list before the effect moves focus to the first item needing attention.
+    setActiveDiscussionId(null);
+    setUnresolvedFindingJumpPending(true);
+  };
+
+  const selectedModelLabel =
+    runModel == null
+      ? t("ai_reviewer_selected_model_none")
+      : t("ai_reviewer_selected_model", { model: runModel.displayName });
 
   const workspaceIsEmpty =
     workspace.runs.length === 0 && discussions.length === 0;
@@ -4628,6 +4719,23 @@ export function AiReviewerPanelView({
             {t("ai_reviewer_back_to_review_list")}
           </OLButton>
         )}
+        {findingEntries.length > 0 && (
+          <OLButton
+            type="button"
+            variant="link"
+            size="sm"
+            className="ai-reviewer-panel-unresolved-findings"
+            aria-label={t("ai_reviewer_jump_to_unresolved_findings", {
+              count: unresolvedFindingCount,
+            })}
+            disabled={unresolvedFindingCount === 0}
+            onClick={jumpToFirstUnresolvedFinding}
+          >
+            {t("ai_reviewer_findings_unresolved", {
+              count: unresolvedFindingCount,
+            })}
+          </OLButton>
+        )}
         {/* Models from every connection sit in one list: choosing a model is
             what chooses the connection, so no separate picker is offered. With
             no connection at all there is nothing to choose between. */}
@@ -4637,10 +4745,10 @@ export function AiReviewerPanelView({
               bsPrefix="ai-reviewer-panel-model-chip"
               variant="ghost"
               size="sm"
-              aria-label={t("ai_reviewer_provider_model")}
+              aria-label={selectedModelLabel}
               disabled={busy}
             >
-              {runModel?.displayName ?? t("ai_reviewer_provider_model")}
+              {selectedModelLabel}
             </DropdownToggle>
             <AiReviewerPortaledMenu className="ai-reviewer-panel-model-menu">
               {models.map((candidate) => (
@@ -4710,27 +4818,6 @@ export function AiReviewerPanelView({
         </div>
       ) : (
         <>
-          {/* The findings sit above the conversation and keep their own scroll,
-              so a long thread never carries them off screen. */}
-          {selectedMode !== "brainstorm" && findingEntries.length > 0 && (
-            <section
-              className="ai-reviewer-panel-findings"
-              aria-label={t("ai_reviewer_review_findings")}
-              data-testid="ai-reviewer-findings"
-            >
-              <h3 className="ai-reviewer-run-section-title">
-                {t("ai_reviewer_findings_unresolved", {
-                  count: unresolvedFindingCount,
-                })}
-              </h3>
-              {findingEntries.map(({ runState, finding }) =>
-                finding.artifactKind === "citation-finding"
-                  ? renderCitationFinding(runState, finding)
-                  : renderFinding(runState, finding),
-              )}
-            </section>
-          )}
-
           <div
             className="ai-reviewer-panel-body"
             aria-label={t("ai_reviewer_conversation")}

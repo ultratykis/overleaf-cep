@@ -70,7 +70,10 @@ describe("AI reviewer: module shell privacy boundary", function () {
         model: "safe-model",
         scopeKind: "document",
         findingToolOffered: true,
-        toolCallCount: 4,
+        toolCallCounts: new Map([
+          ["read_project_file", 3],
+          ["report_finding", 1],
+        ]),
         pendingValidatedArtifactCount: 2,
         manuscript: manuscriptSentinel,
       });
@@ -82,12 +85,50 @@ describe("AI reviewer: module shell privacy boundary", function () {
           model: "safe-model",
           scopeKind: "document",
           findingToolOffered: true,
-          toolCallCount: 4,
+          toolCallCounts: {
+            read_project_file: 3,
+            report_finding: 1,
+          },
           pendingValidatedArtifactCount: 2,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );
       expect(JSON.stringify(info.mock.calls)).not.toContain(manuscriptSentinel);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("folds unexpected completion tool names into a fixed bucket", function () {
+    const unexpectedToolName = "UNEXPECTED_TOOL_NAME_LOG_SENTINEL";
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      recordAiReviewerCompletion({
+        requestId: "completion-request",
+        provider: "openai-compatible",
+        model: "safe-model",
+        scopeKind: "document",
+        findingToolOffered: true,
+        toolCallCounts: new Map([
+          ["report_finding", 1],
+          [unexpectedToolName, 2],
+        ]),
+        pendingValidatedArtifactCount: 0,
+      });
+
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: "completion-request",
+          provider: "openai-compatible",
+          model: "safe-model",
+          scopeKind: "document",
+          findingToolOffered: true,
+          toolCallCounts: { report_finding: 1, unknown: 2 },
+          pendingValidatedArtifactCount: 0,
+        },
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+      expect(JSON.stringify(info.mock.calls)).not.toContain(unexpectedToolName);
     } finally {
       info.mockRestore();
     }

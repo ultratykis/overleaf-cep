@@ -62,6 +62,8 @@
   .ai-reviewer-provider-settings-header,
   .ai-reviewer-provider-settings-body,
   .ai-reviewer-provider-settings-footer,
+  .ai-reviewer-settings-tab-content,
+  .ai-reviewer-settings-tab-pane,
   .ai-reviewer-provider-settings-field,
   .ai-reviewer-provider-settings-state,
   .ai-reviewer-provider-settings-hint,
@@ -84,6 +86,31 @@
   .ai-reviewer-provider-settings-body {
     color: var(--content-primary-themed);
     background: var(--bg-primary-themed);
+  }
+
+  // tabs.scss states these colours from the light-theme variables, under a
+  // selector carrying four classes and an element. Inside this dialog the
+  // surface is themed, so --content-primary resolves to the panel's own
+  // background and the selected tab's label disappears. Match its shape so the
+  // themed values win, rather than reaching for !important.
+  .ol-tabs .nav-tabs-container .ai-reviewer-settings-tabs {
+    border-bottom-color: var(--border-divider-themed);
+
+    li > a,
+    li > button {
+      color: var(--content-secondary-themed);
+
+      &:hover,
+      &:focus-visible {
+        color: var(--content-primary-themed);
+        background-color: var(--bg-secondary-themed);
+      }
+    }
+
+    li > a.active,
+    li > button.active {
+      color: var(--content-primary-themed);
+    }
   }
 
   .ai-reviewer-connections > .h5,
@@ -263,9 +290,22 @@
   }
 
   .ai-reviewer-skills,
+  .ai-reviewer-skills-description,
+  .ai-reviewer-skills-empty,
+  .ai-reviewer-skill-group-list,
+  .ai-reviewer-skill-group-item,
+  .ai-reviewer-skill-group,
+  .ai-reviewer-skill-group-summary,
+  .ai-reviewer-skill-group-header,
+  .ai-reviewer-skill-group-identity,
+  .ai-reviewer-skill-group-metadata,
   .ai-reviewer-skill-list,
+  .ai-reviewer-skill-item,
   .ai-reviewer-skill-row,
   .ai-reviewer-skill-summary,
+  .ai-reviewer-skill-detail,
+  .ai-reviewer-skill-git-import,
+  .ai-reviewer-skill-git-preview,
   .ai-reviewer-skill-upload {
     width: 100%;
     max-width: 100%;
@@ -274,11 +314,24 @@
   }
 
   .ai-reviewer-skills {
-    margin-top: var(--spacing-07);
-    padding-top: var(--spacing-07);
-    border-top: var(--bs-border-width) solid var(--border-divider-themed);
+    color: var(--content-primary-themed);
   }
 
+  .ai-reviewer-skills-description {
+    margin: 0 0 var(--spacing-04);
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-skills-empty {
+    margin: 0 0 var(--spacing-04);
+    padding: var(--spacing-04);
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    color: var(--content-secondary-themed);
+    background: var(--bg-secondary-themed);
+  }
+
+  .ai-reviewer-skill-group-list,
   .ai-reviewer-skill-list {
     display: flex;
     flex-direction: column;
@@ -288,15 +341,254 @@
     list-style: none;
   }
 
-  .ai-reviewer-skill-row {
-    display: flex;
+  .ai-reviewer-skill-group {
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    color: var(--content-primary-themed);
+    background: var(--bg-secondary-themed);
+    overflow: hidden;
+  }
+
+  .ai-reviewer-skill-group-summary,
+  .ai-reviewer-skill-summary {
+    cursor: pointer;
+  }
+
+  .ai-reviewer-skill-group-summary {
+    padding: var(--spacing-04);
+
+    &::marker {
+      color: var(--content-secondary-themed);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--border-primary-themed);
+      outline-offset: -2px;
+    }
+  }
+
+  .ai-reviewer-skill-group-header {
+    display: inline-flex;
+    flex-wrap: wrap;
     align-items: flex-start;
-    gap: var(--spacing-02);
+    gap: var(--spacing-02) var(--spacing-05);
+    width: calc(100% - var(--spacing-05));
+    vertical-align: top;
+  }
+
+  .ai-reviewer-skill-group-identity {
+    display: flex;
+    flex: 1 1 14rem;
+    flex-direction: column;
+    overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-skill-group-source,
+  .ai-reviewer-skill-group-metadata {
+    color: var(--content-secondary-themed);
+    font-size: var(--font-size-01);
+  }
+
+  .ai-reviewer-skill-group-metadata {
+    display: flex;
+    flex: 1 1 18rem;
+    flex-wrap: wrap;
+    gap: var(--spacing-01) var(--spacing-04);
+  }
+
+  .ai-reviewer-skill-group[open] > .ai-reviewer-skill-group-summary {
+    border-bottom: var(--bs-border-width) solid var(--border-divider-themed);
+  }
+
+  .ai-reviewer-skill-list {
+    padding: var(--spacing-04);
+  }
+
+  .ai-reviewer-skill-row {
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    color: var(--content-primary-themed);
+    background: var(--bg-primary-themed);
+    overflow: hidden;
   }
 
   .ai-reviewer-skill-summary {
-    flex: 1 1 auto;
+    padding: var(--spacing-03);
+
+    &::marker {
+      color: var(--content-secondary-themed);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--border-primary-themed);
+      outline-offset: -2px;
+    }
+
+    strong {
+      display: inline-block;
+      max-width: calc(100% - var(--spacing-05));
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+  }
+
+  .ai-reviewer-skill-detail {
+    padding: var(--spacing-04);
+    border-top: var(--bs-border-width) solid var(--border-divider-themed);
     overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-skill-metadata,
+  .ai-reviewer-skill-upload .form-text {
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-skill-metadata {
+    margin-top: var(--spacing-01);
+    font-size: var(--font-size-01);
+  }
+
+  .ai-reviewer-skill-upload {
+    margin-top: var(--spacing-05);
+
+    .ai-reviewer-skill-upload-control {
+      display: flex;
+      align-items: center;
+      gap: var(--spacing-03);
+      min-width: 0;
+    }
+
+    .ai-reviewer-skill-file-label {
+      flex: 0 0 auto;
+      margin-bottom: 0;
+    }
+
+    .ai-reviewer-skill-file-input:focus-visible
+      + .ai-reviewer-skill-file-label {
+      box-shadow: var(--bs-btn-focus-box-shadow);
+    }
+
+    .ai-reviewer-skill-upload-selection {
+      min-width: 0;
+      color: var(--content-secondary-themed);
+      overflow-wrap: anywhere;
+    }
+
+    .form-text {
+      margin-top: var(--spacing-02);
+    }
+  }
+
+  .ai-reviewer-skill-delete {
+    margin-top: var(--spacing-03);
+  }
+
+  .ai-reviewer-skill-git-import {
+    margin-top: var(--spacing-05);
+    padding: var(--spacing-04);
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    color: var(--content-primary-themed);
+    background: var(--bg-secondary-themed);
+
+    > .h6,
+    .ai-reviewer-skill-git-preview > .h6 {
+      margin-top: 0;
+    }
+
+    .form-group {
+      min-width: 0;
+    }
+  }
+
+  .ai-reviewer-skill-git-import-help,
+  .ai-reviewer-skill-git-source {
+    color: var(--content-secondary-themed);
+    overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-skill-git-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: var(--spacing-03);
+  }
+
+  .ai-reviewer-skill-git-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-02);
+  }
+
+  .ai-reviewer-skill-git-preview {
+    margin-top: var(--spacing-04);
+    padding: var(--spacing-04);
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+    color: var(--content-primary-themed);
+    background: var(--bg-primary-themed);
+    overflow-wrap: anywhere;
+  }
+
+  .ai-reviewer-skill-git-preview-details {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+    gap: var(--spacing-01) var(--spacing-03);
+    margin-bottom: var(--spacing-04);
+
+    dt,
+    dd {
+      min-width: 0;
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    dd code {
+      color: inherit;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    ul {
+      margin: 0;
+      padding-inline-start: var(--spacing-05);
+    }
+  }
+
+  .ai-reviewer-skill-git-plugins,
+  .ai-reviewer-skill-git-selection {
+    display: grid;
+    gap: var(--spacing-03);
+  }
+
+  .ai-reviewer-skill-git-plugins,
+  .ai-reviewer-skill-git-no-manifest {
+    margin-bottom: var(--spacing-04);
+  }
+
+  .ai-reviewer-skill-git-preview-skill {
+    min-width: 0;
+    padding: var(--spacing-03);
+    border: var(--bs-border-width) solid var(--border-divider-themed);
+    border-radius: var(--border-radius-base);
+
+    > p {
+      margin: var(--spacing-02) 0 var(--spacing-03);
+    }
+
+    > .ai-reviewer-skill-git-preview-details {
+      margin-bottom: 0;
+    }
+  }
+
+  .ai-reviewer-skill-git-selection + .btn,
+  .ai-reviewer-skill-git-selection + [role="alert"] {
+    margin-top: var(--spacing-04);
+  }
+
+  .ai-reviewer-skill-git-selection + [role="alert"] + .btn {
+    margin-top: var(--spacing-02);
   }
 
   .modal-title,
@@ -348,6 +640,7 @@
 .ai-reviewer-panel-header {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--spacing-02);
@@ -402,23 +695,6 @@
   max-width: 100%;
   min-height: 0;
   padding: var(--spacing-02);
-  overflow: hidden auto;
-}
-
-// The findings keep their own scroller above the conversation, so a thread
-// that grows can never carry the list off screen.
-.ai-reviewer-panel-findings {
-  display: flex;
-  flex: 0 1 auto;
-  flex-direction: column;
-  width: 100%;
-  max-width: 100%;
-  min-height: 0;
-  max-height: 45%;
-  gap: var(--spacing-03);
-  padding: var(--spacing-02);
-  border-bottom: 1px solid var(--border-divider-themed);
-  background: var(--bg-primary-themed);
   overflow: hidden auto;
 }
 
@@ -575,6 +851,7 @@
 }
 
 .ai-reviewer-run-status,
+.ai-reviewer-run-model,
 .ai-reviewer-artifact-status,
 .ai-reviewer-discussion-row-status,
 .ai-reviewer-discussion-row-updated {
@@ -594,14 +871,59 @@
   ul {
     margin-block: 0;
   }
+
+  &:focus-visible {
+    outline: 2px solid var(--border-primary-themed);
+    outline-offset: -2px;
+  }
 }
 
-// A resolved artifact keeps its place and only recedes, so the list the reader
-// learned does not rearrange under them.
+// Completed work stays in its run but yields its vertical space until the
+// reader asks to inspect it again.
 .ai-reviewer-artifact-resolved {
   color: var(--content-secondary-themed);
   background: var(--bg-tertiary-themed);
-  opacity: 0.7;
+}
+
+.ai-reviewer-artifact-disclosure {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.ai-reviewer-artifact-summary {
+  max-width: 100%;
+  min-width: 0;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.ai-reviewer-artifact-summary-content {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: calc(100% - var(--spacing-04));
+  min-width: 0;
+  gap: var(--spacing-02);
+  vertical-align: middle;
+
+  .ai-reviewer-artifact-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ai-reviewer-artifact-status {
+    flex: none;
+    white-space: nowrap;
+  }
+}
+
+.ai-reviewer-artifact-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-02);
+  margin-top: var(--spacing-02);
 }
 
 .ai-reviewer-panel-truncate,
@@ -872,6 +1194,15 @@
   text-align: left;
 }
 
+.ai-reviewer-panel-unresolved-findings {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--content-primary-themed);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .ai-reviewer-panel-onboarding,
 .ai-reviewer-panel-selection {
   display: flex;
@@ -940,7 +1271,6 @@
 @container (min-width: 100px) {
   .ai-reviewer-panel-header,
   .ai-reviewer-panel-body,
-  .ai-reviewer-panel-findings,
   .ai-reviewer-panel-footer,
   .ai-reviewer-discussion-header {
     padding: var(--spacing-03);

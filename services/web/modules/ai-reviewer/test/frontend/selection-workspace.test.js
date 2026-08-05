@@ -382,8 +382,9 @@ describe("AI reviewer: single document selection workspace", function () {
     });
     await screen.findByText("Completed");
 
-    // Both kinds of finding are pinned in the one list above the conversation.
-    const findingsSection = screen.getByRole("region", {
+    // Both kinds of finding stay under the run that produced them.
+    const run = screen.getByRole("article", { name: "Review run 1" });
+    const findingsSection = within(run).getByRole("region", {
       name: "Review findings",
     });
     const findingCard = within(findingsSection)
@@ -412,9 +413,12 @@ describe("AI reviewer: single document selection workspace", function () {
     ]);
     expect(within(citationCard).queryByText(/Apply/u)).not.to.exist;
 
-    const suggestionsSection = screen.getByRole("region", {
+    const suggestionsSection = within(run).getByRole("region", {
       name: "Review suggestions",
     });
+    const suggestionCard = within(suggestionsSection)
+      .getByText("Rationale: Use a more precise synthetic term.")
+      .closest(".ai-reviewer-artifact");
     expect(
       within(suggestionsSection)
         .getAllByRole("button")
@@ -447,12 +451,16 @@ describe("AI reviewer: single document selection workspace", function () {
         name: "Discard finding",
       }),
     );
-    // A resolved finding keeps its place in the list and only dims.
+    // A resolved finding keeps its place but hides its controls until opened.
     expect(within(findingCard).getByText("Status: Discarded")).to.exist;
     expect(
       findingCard.classList.contains("ai-reviewer-artifact-resolved"),
     ).to.equal(true);
+    const findingDisclosure = findingCard.querySelector("details");
+    expect(findingDisclosure.open).to.equal(false);
     expect(within(findingCard).queryAllByRole("button")).to.have.length(1);
+    fireEvent.click(findingCard.querySelector("summary"));
+    expect(findingDisclosure.open).to.equal(true);
     expect(
       within(findingCard).getByRole("button", {
         name: "Discuss finding",
@@ -468,7 +476,11 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(
       citationCard.classList.contains("ai-reviewer-artifact-resolved"),
     ).to.equal(true);
+    const citationDisclosure = citationCard.querySelector("details");
+    expect(citationDisclosure.open).to.equal(false);
     expect(within(citationCard).queryAllByRole("button")).to.have.length(1);
+    fireEvent.click(citationCard.querySelector("summary"));
+    expect(citationDisclosure.open).to.equal(true);
     expect(
       within(citationCard).getByRole("button", {
         name: "Discuss citation finding",
@@ -482,16 +494,15 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     expect(within(suggestionsSection).getByText("Status: Discarded")).to.exist;
     expect(
-      within(suggestionsSection)
-        .getByText("Rationale: Use a more precise synthetic term.")
-        .closest(".ai-reviewer-artifact")
-        .classList.contains("ai-reviewer-artifact-resolved"),
+      suggestionCard.classList.contains("ai-reviewer-artifact-resolved"),
     ).to.equal(true);
-    expect(within(suggestionsSection).queryAllByRole("button")).to.have.length(
-      1,
-    );
+    const suggestionDisclosure = suggestionCard.querySelector("details");
+    expect(suggestionDisclosure.open).to.equal(false);
+    expect(within(suggestionCard).queryAllByRole("button")).to.have.length(1);
+    fireEvent.click(suggestionCard.querySelector("summary"));
+    expect(suggestionDisclosure.open).to.equal(true);
     expect(
-      within(suggestionsSection).getByRole("button", {
+      within(suggestionCard).getByRole("button", {
         name: "Discuss suggestion",
       }),
     ).to.exist;

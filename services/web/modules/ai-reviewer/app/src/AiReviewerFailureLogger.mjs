@@ -13,6 +13,14 @@ export const AI_REVIEWER_COMPLETION_LOG_MESSAGE =
   "AI reviewer request completed";
 
 const INTERNAL_FAILURE_CODE_PATTERN = /^AI_[A-Z0-9_]{1,125}$/u;
+const COMPLETION_TOOL_NAMES = new Set([
+  "read_project_file",
+  "read_skill",
+  "search_zotero",
+  "report_subject",
+  "report_finding",
+  "propose_suggestion",
+]);
 
 // Failure codes are bounded identifiers; rejecting free-form values keeps the
 // normal log from becoming a second path for provider or manuscript content.
@@ -21,6 +29,27 @@ function safeInternalFailureCode(value) {
   return typeof value === "string" && INTERNAL_FAILURE_CODE_PATTERN.test(value)
     ? value
     : "AI_PROVIDER_ERROR";
+}
+
+/**
+ * Tool names are provider-controlled until they cross this boundary. Folding
+ * undeclared values into one fixed bucket keeps arbitrary text out of logs.
+ *
+ * @param {ReadonlyMap<string, number>} toolCallCounts
+ */
+function safeCompletionToolCallCounts(toolCallCounts) {
+  /** @type {Record<string, number>} */
+  const safeCounts = {};
+  for (const [toolName, count] of toolCallCounts) {
+    if (!Number.isSafeInteger(count) || count <= 0) {
+      continue;
+    }
+    const safeToolName = COMPLETION_TOOL_NAMES.has(toolName)
+      ? toolName
+      : "unknown";
+    safeCounts[safeToolName] = (safeCounts[safeToolName] ?? 0) + count;
+  }
+  return safeCounts;
 }
 
 /**
@@ -33,7 +62,7 @@ function safeInternalFailureCode(value) {
  *   model: string,
  *   scopeKind: 'selection' | 'document' | 'project' | 'none',
  *   findingToolOffered: boolean,
- *   toolCallCount: number,
+ *   toolCallCounts: ReadonlyMap<string, number>,
  *   pendingValidatedArtifactCount: number,
  * }} record
  */
@@ -45,7 +74,7 @@ export function recordAiReviewerCompletion(record) {
       model: record.model,
       scopeKind: record.scopeKind,
       findingToolOffered: record.findingToolOffered,
-      toolCallCount: record.toolCallCount,
+      toolCallCounts: safeCompletionToolCallCounts(record.toolCallCounts),
       pendingValidatedArtifactCount: record.pendingValidatedArtifactCount,
     },
     AI_REVIEWER_COMPLETION_LOG_MESSAGE,

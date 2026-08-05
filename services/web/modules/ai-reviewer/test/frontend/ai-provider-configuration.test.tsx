@@ -21,11 +21,15 @@ import {
   type AiProviderConfigurationWrite,
   type AiProviderConnection,
   createAiProviderConnection,
+  createUserAiProviderConnection,
   deleteAiProviderConnection,
+  deleteUserAiProviderConnection,
   getAiProviderConnections,
   getAiProviderModels,
+  getUserAiProviderConnections,
   testAiProviderConnection,
   updateAiProviderConnection,
+  updateUserAiProviderConnection,
 } from "../../frontend/js/services/ai-provider-configuration";
 
 type Deferred<T> = {
@@ -279,11 +283,13 @@ function renderDetails({
     testConnection,
     listSkills: sinon.stub().resolves({ skills: [] }),
     uploadSkill: sinon.stub(),
+    previewSkillGitImport: sinon.stub(),
+    confirmSkillGitImport: sinon.stub(),
     deleteSkill: sinon.stub(),
   };
   return {
     ...render(
-      <AiIntegrationDetailsView projectId={activeProjectId} {...props} />,
+      <AiIntegrationDetailsView scopeKey={activeProjectId} {...props} />,
     ),
     ...props,
     props,
@@ -303,11 +309,13 @@ function renderConnections({
   testConnection = sinon.stub().resolves(connectionResponse),
   listSkills = sinon.stub().resolves({ skills: [] }),
   uploadSkill = sinon.stub(),
+  previewSkillGitImport = sinon.stub(),
+  confirmSkillGitImport = sinon.stub(),
   deleteSkill = sinon.stub(),
 } = {}) {
   return render(
     <AiIntegrationDetailsView
-      projectId={projectId}
+      scopeKey={projectId}
       onHide={onHide}
       listConnections={listConnections}
       createConnection={createConnection}
@@ -316,6 +324,8 @@ function renderConnections({
       testConnection={testConnection}
       listSkills={listSkills}
       uploadSkill={uploadSkill}
+      previewSkillGitImport={previewSkillGitImport}
+      confirmSkillGitImport={confirmSkillGitImport}
       deleteSkill={deleteSkill}
     />,
   );
@@ -409,6 +419,55 @@ describe("AI reviewer: provider configuration", function () {
     const headers = new Headers(call.options.headers);
     expect(headers.get("x-csrf-token")).to.equal(csrfToken);
     expect(headers.get("content-type")).to.equal("application/json");
+  });
+
+  it("uses the user-scoped connection CRUD routes without putting a user id in the URL", async function () {
+    const scopeKey = "must-not-be-sent-as-a-user-id";
+    const signal = new AbortController().signal;
+    fetchMock.get("/user/ai-reviewer/connections", {
+      connections: [configured],
+    });
+    fetchMock.post("/user/ai-reviewer/connections", configured);
+    fetchMock.put(
+      `/user/ai-reviewer/connections/${connectionId}`,
+      otherConfigured,
+    );
+    fetchMock.delete(`/user/ai-reviewer/connections/${connectionId}`, {
+      connections: [],
+    });
+
+    await getUserAiProviderConnections(scopeKey, signal);
+    await createUserAiProviderConnection(scopeKey, configurationWrite, signal);
+    await updateUserAiProviderConnection(
+      scopeKey,
+      connectionId,
+      configured.revision,
+      otherConfigurationWrite,
+      signal,
+    );
+    await deleteUserAiProviderConnection(
+      scopeKey,
+      connectionId,
+      configured.revision,
+      signal,
+    );
+
+    expect(
+      fetchMock.callHistory
+        .calls()
+        .map(({ url, options }) => [
+          options.method?.toUpperCase(),
+          new URL(url).pathname,
+        ]),
+    ).to.deep.equal([
+      ["GET", "/user/ai-reviewer/connections"],
+      ["POST", "/user/ai-reviewer/connections"],
+      ["PUT", `/user/ai-reviewer/connections/${connectionId}`],
+      ["DELETE", `/user/ai-reviewer/connections/${connectionId}`],
+    ]);
+    expect(
+      fetchMock.callHistory.calls().map(({ url }) => new URL(url).pathname),
+    ).not.to.include(scopeKey);
   });
 
   it("creates a connection with exactly the four destination fields", async function () {
@@ -1371,7 +1430,7 @@ describe("AI reviewer: provider configuration", function () {
     const oldSignal = getConfiguration.firstCall.args[1] as AbortSignal;
     rendered.rerender(
       <AiIntegrationDetailsView
-        projectId={otherProjectId}
+        scopeKey={otherProjectId}
         {...rendered.props}
       />,
     );
@@ -1432,7 +1491,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(document.body.textContent).not.to.include(credential);
   });
 
-  it("uses named icon actions and a danger treatment before the Skills section", async function () {
+  it("uses named icon actions and a danger treatment in the Connections tab", async function () {
     const listConnections = sinon
       .stub()
       .resolves({ connections: [otherConfigured] });
@@ -1446,12 +1505,12 @@ describe("AI reviewer: provider configuration", function () {
     const remove = deleteConnectionButton(otherConfigured);
     expect(edit.classList.contains("btn-secondary")).to.equal(true);
     expect(remove.classList.contains("btn-danger")).to.equal(true);
-
-    const skillsHeading = screen.getByRole("heading", { name: "Skills" });
     expect(
-      row.compareDocumentPosition(skillsHeading) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).to.equal(Node.DOCUMENT_POSITION_FOLLOWING);
+      screen
+        .getByRole("tab", { name: "Connections" })
+        .getAttribute("aria-selected"),
+    ).to.equal("true");
+    expect(screen.queryByRole("heading", { name: "Skills" })).to.equal(null);
   });
 
   it("hides the form until Add is chosen and confirms a dirty Cancel", async function () {

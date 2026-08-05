@@ -1,12 +1,14 @@
 // @ts-check
 
 import { AiReviewerSkillParseError } from "./AiReviewerSkillParser.mjs";
+import { AiReviewerSkillGitImportError } from "./AiReviewerSkillGitImporter.mjs";
 import {
   AiReviewerSkillByteLimitError,
   AiReviewerSkillCountLimitError,
   AiReviewerSkillDuplicateNameError,
   AiReviewerSkillNotFoundError,
   AiReviewerSkillValidationError,
+  aiReviewerSkillContentBytes,
 } from "./AiReviewerSkillStore.mjs";
 
 /** @import { Request, Response } from 'express' */
@@ -22,19 +24,30 @@ function userId(request) {
 
 /** @param {any} skill */
 function publicSkill(skill) {
-  return {
+  const value = {
     id: skill.id,
     name: skill.name,
     description: skill.description,
+    sizeBytes: aiReviewerSkillContentBytes(skill.body, skill.referenceFiles),
+    referenceCount: Object.keys(skill.referenceFiles ?? {}).length,
   };
+  return skill.provenance == null
+    ? value
+    : { ...value, provenance: skill.provenance };
 }
 
-/** @param {Response} response @param {number} status @param {string} code @param {string} message */
-function sendError(response, status, code, message) {
+/** @param {Response} response @param {number} status @param {string} code @param {string} message @param {string} [category] */
+function sendError(
+  response,
+  status,
+  code,
+  message,
+  category = "configuration",
+) {
   return response.status(status).json({
     error: {
       code,
-      category: "configuration",
+      category,
       message,
       retryable: false,
     },
@@ -55,6 +68,15 @@ function sendSkills(response, skills) {
  * @param {unknown} error
  */
 function sendValidationError(response, error) {
+  if (error instanceof AiReviewerSkillGitImportError) {
+    return sendError(
+      response,
+      error.status,
+      error.code,
+      error.message,
+      error.category,
+    );
+  }
   if (error instanceof AiReviewerSkillByteLimitError) {
     return sendError(
       response,
@@ -88,8 +110,11 @@ function sendValidationError(response, error) {
   return null;
 }
 
-/** @param {{ skillStore: any }} dependencies */
-export function createAiReviewerSkillController({ skillStore }) {
+/** @param {{ skillStore: any, skillGitImporter: any }} dependencies */
+export function createAiReviewerSkillController({
+  skillStore,
+  skillGitImporter,
+}) {
   return {
     /** @param {Request} request @param {Response} response */
     async listSkills(request, response) {
@@ -127,6 +152,47 @@ export function createAiReviewerSkillController({ skillStore }) {
           500,
           "AI_REVIEWER_SKILL_STORAGE_FAILED",
           "The AI reviewer skill could not be saved.",
+        );
+      }
+    },
+
+    /** @param {Request} request @param {Response} response */
+    async previewGitImport(request, response) {
+      try {
+        return response.json(await skillGitImporter.preview(request.body));
+      } catch (error) {
+        const validationResponse = sendValidationError(response, error);
+        if (validationResponse != null) {
+          return validationResponse;
+        }
+        return sendError(
+          response,
+          500,
+          "AI_REVIEWER_SKILL_GIT_IMPORT_FAILED",
+          "The git skill import preview could not be completed.",
+        );
+      }
+    },
+
+    /** @param {Request} request @param {Response} response */
+    async confirmGitImport(request, response) {
+      try {
+        const fetched = await skillGitImporter.confirm(request.body);
+        const skills = await skillStore.createMany(
+          userId(request),
+          fetched.skills,
+        );
+        return sendSkills(response, skills);
+      } catch (error) {
+        const validationResponse = sendValidationError(response, error);
+        if (validationResponse != null) {
+          return validationResponse;
+        }
+        return sendError(
+          response,
+          500,
+          "AI_REVIEWER_SKILL_GIT_IMPORT_FAILED",
+          "The git skill import could not be saved.",
         );
       }
     },

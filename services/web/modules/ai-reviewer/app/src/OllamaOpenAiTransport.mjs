@@ -3280,6 +3280,7 @@ export class HardenedAiSdkProviderTransport {
   /**
    * @param {{
    *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
+   *   skills?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["skills"],
    *   readProjectFile: ConstructorParameters<typeof AiSdkAgentGateway>[0]["readProjectFile"],
    *   projectContext?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["projectContext"],
    *   searchZotero?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["searchZotero"],
@@ -3290,6 +3291,7 @@ export class HardenedAiSdkProviderTransport {
    */
   createAgentGateway({
     contextLength,
+    skills,
     readProjectFile,
     projectContext,
     searchZotero,
@@ -3303,6 +3305,7 @@ export class HardenedAiSdkProviderTransport {
       modelId: this.#modelTag,
       providerOptions: this.#gatewayProviderOptions,
       contextLength,
+      skills,
       readProjectFile,
       projectContext,
       searchZotero,

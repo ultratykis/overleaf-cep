@@ -18,6 +18,8 @@
  *   deleteConnection: (...args: any[]) => unknown,
  *   listSkills: (...args: any[]) => unknown,
  *   uploadSkill: (...args: any[]) => unknown,
+ *   previewSkillGitImport: (...args: any[]) => unknown,
+ *   confirmSkillGitImport: (...args: any[]) => unknown,
  *   deleteSkill: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
  *   getWorkspace: (...args: any[]) => unknown,
@@ -41,6 +43,8 @@ export function createAiReviewerRouter({
   deleteConnection,
   listSkills,
   uploadSkill,
+  previewSkillGitImport,
+  confirmSkillGitImport,
   deleteSkill,
   stream,
   getWorkspace,
@@ -74,6 +78,7 @@ export function createAiReviewerRouter({
         authorizationMiddleware.blockRestrictedUserFromProject,
         authorizationMiddleware.ensureUserCanReadProject,
       ];
+      const userSettingsMiddleware = [requireLogin, rateLimit];
 
       webRouter.get(
         "/project/:project_id/ai-reviewer/provider/models",
@@ -126,8 +131,32 @@ export function createAiReviewerRouter({
         deleteCommentProvenance,
       );
 
-      // Connections stay inside the same authorization chain as the single
-      // configuration they replaced.
+      // Account settings are authenticated by the session. requireLogin
+      // replaces request.user from that session, and the handlers never read
+      // an owner from route parameters.
+      webRouter.get(
+        "/user/ai-reviewer/connections",
+        ...userSettingsMiddleware,
+        listConnections,
+      );
+      webRouter.post(
+        "/user/ai-reviewer/connections",
+        ...userSettingsMiddleware,
+        createConnection,
+      );
+      webRouter.put(
+        "/user/ai-reviewer/connections/:connection_id",
+        ...userSettingsMiddleware,
+        updateConnection,
+      );
+      webRouter.delete(
+        "/user/ai-reviewer/connections/:connection_id",
+        ...userSettingsMiddleware,
+        deleteConnection,
+      );
+
+      // Keep the project entry point for editing while writing. It reaches the
+      // same user-owned records without changing the project model selection.
       webRouter.get(
         "/project/:project_id/ai-reviewer/connections",
         ...commonMiddleware,
@@ -149,9 +178,35 @@ export function createAiReviewerRouter({
         deleteConnection,
       );
 
-      // Skills are user-owned, but the project-scoped route keeps their
-      // settings behind the same authenticated, unrestricted read boundary as
-      // every other AI Reviewer setting.
+      // Skills share the settings screen and are user-owned too, so account
+      // settings receives session-scoped endpoints without changing storage.
+      webRouter.get(
+        "/user/ai-reviewer/skills",
+        ...userSettingsMiddleware,
+        listSkills,
+      );
+      webRouter.post(
+        "/user/ai-reviewer/skills",
+        ...userSettingsMiddleware,
+        uploadSkill,
+      );
+      webRouter.post(
+        "/user/ai-reviewer/skills/import/preview",
+        ...userSettingsMiddleware,
+        previewSkillGitImport,
+      );
+      webRouter.post(
+        "/user/ai-reviewer/skills/import",
+        ...userSettingsMiddleware,
+        confirmSkillGitImport,
+      );
+      webRouter.delete(
+        "/user/ai-reviewer/skills/:skill_id",
+        ...userSettingsMiddleware,
+        deleteSkill,
+      );
+
+      // The project entry point remains available while writing.
       webRouter.get(
         "/project/:project_id/ai-reviewer/skills",
         ...commonMiddleware,
@@ -161,6 +216,16 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/skills",
         ...commonMiddleware,
         uploadSkill,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/skills/import/preview",
+        ...commonMiddleware,
+        previewSkillGitImport,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/skills/import",
+        ...commonMiddleware,
+        confirmSkillGitImport,
       );
       webRouter.delete(
         "/project/:project_id/ai-reviewer/skills/:skill_id",

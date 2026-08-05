@@ -12,6 +12,8 @@ const FRONTMATTER_OPENING = /^---[\t ]*(?:\r?\n|$)/;
 const FRONTMATTER_CLOSING = /^(?:---|\.\.\.)[\t ]*\r?$/gm;
 const SCALAR_KEY = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const RESERVED_SCALAR_CHARACTERS = "[]{},&*!|>@`";
+const BLOCK_SCALAR_HEADER =
+  /^[|>](?:(?:[1-9][+-]?)|(?:[+-][1-9]?))?(?:[\t ]+#.*)?$/;
 
 function invalidFrontmatter(detail) {
   return new AiReviewerSkillParseError(
@@ -58,22 +60,113 @@ function plainScalar(input) {
   return value;
 }
 
+/** @param {string} input */
+function validateFlowSequence(input) {
+  let itemStart = 1;
+  /** @type {'"' | "'" | null} */
+  let quote = null;
+  let closing = -1;
+
+  /**
+   * @param {number} end
+   * @param {boolean} allowEmpty
+   */
+  const validateItem = (end, allowEmpty) => {
+    const item = input.slice(itemStart, end).trim();
+    if (item === "") {
+      if (allowEmpty) {
+        return;
+      }
+      throw invalidFrontmatter("only simple scalar values are supported.");
+    }
+    if (item.startsWith("#")) {
+      throw invalidFrontmatter("only simple scalar values are supported.");
+    }
+    const quoted = quotedScalar(item);
+    if (quoted == null) {
+      plainScalar(item);
+    }
+  };
+
+  for (let index = 1; index < input.length; index += 1) {
+    const character = input[index];
+    if (quote === '"') {
+      if (character === "\\") {
+        index += 1;
+      } else if (character === '"') {
+        quote = null;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'" && input[index + 1] === "'") {
+        index += 1;
+      } else if (character === "'") {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "[" || character === "{" || character === "}") {
+      throw invalidFrontmatter("only simple scalar values are supported.");
+    }
+    if (character === ",") {
+      validateItem(index, false);
+      itemStart = index + 1;
+      continue;
+    }
+    if (character === "]") {
+      const item = input.slice(itemStart, index).trim();
+      validateItem(
+        index,
+        item === "" && (itemStart === 1 || input[itemStart - 1] === ","),
+      );
+      closing = index;
+      break;
+    }
+  }
+
+  if (quote != null || closing < 0) {
+    throw invalidFrontmatter("only simple scalar values are supported.");
+  }
+  const remainder = input.slice(closing + 1).trim();
+  if (remainder !== "" && !remainder.startsWith("#")) {
+    throw invalidFrontmatter("only simple scalar values are supported.");
+  }
+}
+
 /**
  * services/web does not declare a YAML parser. Skills deliberately accept the
- * portable subset needed for metadata instead of relying on a hoisted
- * transitive package that could disappear after an unrelated dependency bump.
+ * portable scalar subset needed for name and description. Unused block values
+ * are skipped by indentation instead of relying on a hoisted transitive
+ * package that could disappear after an unrelated dependency bump.
  *
  * @param {string} source
  */
 function parseSimpleFrontmatter(source) {
   /** @type {Record<string, string>} */
   const values = {};
+  /** @type {Set<string>} */
+  const keys = new Set();
+  let skippingIndentedValue = false;
   for (const line of source.split(/\r?\n/)) {
     if (line.trim() === "" || line.trimStart().startsWith("#")) {
       continue;
     }
+    if (skippingIndentedValue && /^[\t ]/.test(line)) {
+      if (/^[ ]*\t/.test(line)) {
+        throw invalidFrontmatter("tabs cannot be used for indentation.");
+      }
+      continue;
+    }
+    skippingIndentedValue = false;
     if (/^[\t ]/.test(line)) {
-      throw invalidFrontmatter("nested or multiline values are not supported.");
+      throw invalidFrontmatter(
+        "indented content must belong to a skipped top-level value.",
+      );
     }
     const separator = line.indexOf(":");
     if (separator < 1) {
@@ -83,10 +176,36 @@ function parseSimpleFrontmatter(source) {
     if (!SCALAR_KEY.test(key)) {
       throw invalidFrontmatter(`the key ${JSON.stringify(key)} is malformed.`);
     }
-    if (Object.hasOwn(values, key)) {
+    if (keys.has(key)) {
       throw invalidFrontmatter(`the key ${JSON.stringify(key)} is duplicated.`);
     }
+    keys.add(key);
     const input = line.slice(separator + 1).trim();
+    if (input === "" || input.startsWith("#")) {
+      if (key === "name" || key === "description") {
+        values[key] = "";
+      }
+      skippingIndentedValue = true;
+      continue;
+    }
+    if (BLOCK_SCALAR_HEADER.test(input)) {
+      if (key === "name" || key === "description") {
+        throw invalidFrontmatter(
+          `the key ${JSON.stringify(key)} must be a simple scalar.`,
+        );
+      }
+      skippingIndentedValue = true;
+      continue;
+    }
+    if (input.startsWith("[")) {
+      validateFlowSequence(input);
+      if (key === "name" || key === "description") {
+        throw invalidFrontmatter(
+          `the key ${JSON.stringify(key)} must be a simple scalar.`,
+        );
+      }
+      continue;
+    }
     const quoted = quotedScalar(input);
     values[key] = quoted ?? plainScalar(input);
   }

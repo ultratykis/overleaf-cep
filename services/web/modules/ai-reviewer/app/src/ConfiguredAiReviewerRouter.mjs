@@ -26,6 +26,8 @@ export default createAiReviewerRouter({
   deleteConnection: AiReviewerController.deleteConnection,
   listSkills: AiReviewerController.listSkills,
   uploadSkill: AiReviewerController.uploadSkill,
+  previewSkillGitImport: AiReviewerController.previewSkillGitImport,
+  confirmSkillGitImport: AiReviewerController.confirmSkillGitImport,
   deleteSkill: AiReviewerController.deleteSkill,
   stream: AiReviewerController.stream,
   getWorkspace: AiReviewerController.getWorkspace,

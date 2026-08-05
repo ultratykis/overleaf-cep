@@ -51,7 +51,6 @@ const emptyLayoutSelectors = [
 ];
 const workspaceLayoutSelectors = [
   ...listLayoutSelectors,
-  ".ai-reviewer-panel-findings",
   ".ai-reviewer-run",
   ".ai-reviewer-artifact",
   ".ai-reviewer-discussion-row",
@@ -87,6 +86,8 @@ const settingsLayoutSelectors = [
   ".ai-reviewer-provider-settings-header",
   ".ai-reviewer-provider-settings-body",
   ".ai-reviewer-provider-settings-footer",
+  ".ai-reviewer-settings-tab-content",
+  ".ai-reviewer-settings-tab-pane",
   ".ai-reviewer-provider-settings-field",
   ".ai-reviewer-provider-advanced",
   ".ai-reviewer-provider-advanced-summary",
@@ -502,7 +503,27 @@ describe("AI reviewer panel width", function () {
     expect(composer.get("background")).to.equal("var(--bg-primary-themed)");
   });
 
-  it("keeps the connection table, form card, and dialog footer themed", function () {
+  it("keeps run provenance and compact artifact controls themed", function () {
+    const runModel = declarationsFor(".ai-reviewer-run-model");
+    expect(runModel.get("color")).to.equal("var(--content-secondary-themed)");
+
+    const resolvedArtifact = declarationsFor(".ai-reviewer-artifact-resolved");
+    expect(resolvedArtifact.get("color")).to.equal(
+      "var(--content-secondary-themed)",
+    );
+    expect(resolvedArtifact.get("background")).to.equal(
+      "var(--bg-tertiary-themed)",
+    );
+
+    const unresolvedJump = declarationsFor(
+      ".ai-reviewer-panel-unresolved-findings",
+    );
+    expect(unresolvedJump.get("color")).to.equal(
+      "var(--content-primary-themed)",
+    );
+  });
+
+  it("keeps the settings tabs, connection surfaces, and dialog footer themed", function () {
     const body = declarationsFor(
       ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-body",
     );
@@ -528,6 +549,52 @@ describe("AI reviewer panel width", function () {
       "var(--border-divider-themed)",
     );
 
+    // The selector has to mirror the shape tabs.scss uses, or the product's
+    // light-theme colour outranks ours and the selected tab's label vanishes
+    // against a themed background. Pin the shape, not just the value.
+    const activeTab = declarationsFor(
+      ".ai-reviewer-provider-settings .ol-tabs .nav-tabs-container .ai-reviewer-settings-tabs li > a.active",
+    );
+    expect(activeTab.get("color")).to.equal("var(--content-primary-themed)");
+    const tabHover = declarationsFor(
+      ".ai-reviewer-provider-settings .ol-tabs .nav-tabs-container .ai-reviewer-settings-tabs li > a:hover",
+    );
+    expect(tabHover.get("background-color")).to.equal(
+      "var(--bg-secondary-themed)",
+    );
+
+    const skillGroup = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-skill-group",
+    );
+    expect(skillGroup.get("color")).to.equal("var(--content-primary-themed)");
+    expect(skillGroup.get("background")).to.equal("var(--bg-secondary-themed)");
+    const skillRow = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-skill-row",
+    );
+    expect(skillRow.get("color")).to.equal("var(--content-primary-themed)");
+    expect(skillRow.get("background")).to.equal("var(--bg-primary-themed)");
+    const skillGitImport = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-skill-git-import",
+    );
+    expect(skillGitImport.get("color")).to.equal(
+      "var(--content-primary-themed)",
+    );
+    expect(skillGitImport.get("background")).to.equal(
+      "var(--bg-secondary-themed)",
+    );
+    expect(skillGitImport.get("border")).to.contain(
+      "var(--border-divider-themed)",
+    );
+    const skillGitPreview = declarationsFor(
+      ".ai-reviewer-provider-settings .ai-reviewer-skill-git-preview",
+    );
+    expect(skillGitPreview.get("color")).to.equal(
+      "var(--content-primary-themed)",
+    );
+    expect(skillGitPreview.get("background")).to.equal(
+      "var(--bg-primary-themed)",
+    );
+
     const footer = declarationsFor(
       ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-footer",
     );
@@ -538,7 +605,7 @@ describe("AI reviewer panel width", function () {
     it(`keeps provider settings within ${width}px with recognisable option labels`, async function () {
       render(
         <AiIntegrationDetailsView
-          projectId={projectId}
+          scopeKey={projectId}
           onHide={() => {}}
           listConnections={async () => ({ connections: [settingsConnection] })}
           createConnection={async () => settingsConnection}
@@ -555,7 +622,15 @@ describe("AI reviewer panel width", function () {
             id: "layout-skill",
             name: "Layout skill",
             description: "A layout test skill.",
+            sizeBytes: 20,
+            referenceCount: 0,
           })}
+          previewSkillGitImport={async () => {
+            throw new Error("not used");
+          }}
+          confirmSkillGitImport={async () => {
+            throw new Error("not used");
+          }}
           deleteSkill={async () => ({ skills: [] })}
         />,
       );
@@ -703,8 +778,8 @@ describe("AI reviewer panel width", function () {
       expect(subject.textContent?.length ?? 0).to.be.greaterThan(116);
       assertEllipsis(subject);
 
-      // A resolved finding stays open in place, so its long copy is on screen
-      // at every width rather than hidden behind a disclosure.
+      // A resolved finding yields its height at every width, while its one-line
+      // summary remains legible and can restore the historical detail.
       const resolved = container.querySelector<HTMLElement>(
         ".ai-reviewer-artifact-resolved",
       );
@@ -712,7 +787,17 @@ describe("AI reviewer panel width", function () {
       if (resolved == null) {
         throw new Error("The resolved finding must render.");
       }
-      expect(resolved.querySelector("summary")).to.equal(null);
+      const disclosure = resolved.querySelector<HTMLDetailsElement>("details");
+      const summary = resolved.querySelector<HTMLElement>("summary");
+      const title = summary?.querySelector<HTMLElement>(
+        ".ai-reviewer-artifact-title",
+      );
+      expect(disclosure?.open).to.equal(false);
+      expect(summary).not.to.equal(null);
+      expect(title).not.to.equal(null);
+      assertEllipsis(title!);
+      fireEvent.click(summary!);
+      expect(disclosure?.open).to.equal(true);
       assertNarrowLayoutContract(width, workspaceLayoutSelectors);
 
       fireEvent.click(discussion);

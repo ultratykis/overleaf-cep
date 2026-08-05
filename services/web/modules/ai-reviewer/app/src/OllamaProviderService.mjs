@@ -640,6 +640,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
     /**
      * @param {unknown} input
      * @param {{
+     *   skills?: readonly unknown[],
      *   readProjectFile: Function,
      *   projectContext?: unknown,
      *   searchZotero?: Function,
@@ -648,7 +649,13 @@ export function createAiReviewerProviderService(dependencies = {}) {
      */
     createAgentGateway(
       input,
-      { readProjectFile, projectContext, searchZotero, validateEvidence },
+      {
+        skills,
+        readProjectFile,
+        projectContext,
+        searchZotero,
+        validateEvidence,
+      },
     ) {
       const config = parseAiReviewerProviderConfig(input);
       if (typeof readProjectFile !== "function") {
@@ -656,6 +663,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
       }
       return createTransport(config).createAgentGateway({
         contextLength: config.contextLength,
+        ...(skills === undefined ? {} : { skills }),
         readProjectFile,
         projectContext,
         searchZotero,

@@ -174,6 +174,8 @@ function connectionsPath(projectId: string) {
   return `/project/${projectId}/ai-reviewer/connections`;
 }
 
+const userConnectionsPath = "/user/ai-reviewer/connections";
+
 /**
  * Serialize exactly the fields the write routes accept. A draft carries render
  * state that must never reach the server, so each provider is spelled out.
@@ -268,6 +270,69 @@ export function deleteAiProviderConnection(
   return request(signal, () =>
     deleteJSON<AiProviderConnectionList>(
       `${connectionsPath(projectId)}/${connectionId}`,
+      {
+        body: { expectedRevision },
+        signal,
+        swallowAbortError: false,
+      },
+    ),
+  );
+}
+
+// These functions deliberately accept the view's opaque scope key but never
+// turn it into a user identifier. The server resolves the owner from the
+// authenticated session.
+export function getUserAiProviderConnections(
+  _scopeKey: string,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    getJSON<AiProviderConnectionList>(userConnectionsPath, {
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function createUserAiProviderConnection(
+  _scopeKey: string,
+  config: AiProviderConfigurationWrite,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    postJSON<AiProviderConnection>(userConnectionsPath, {
+      body: connectionBody(config),
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function updateUserAiProviderConnection(
+  _scopeKey: string,
+  connectionId: string,
+  expectedRevision: number,
+  config: AiProviderConfigurationWrite,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    putJSON<AiProviderConnection>(`${userConnectionsPath}/${connectionId}`, {
+      body: { ...connectionBody(config), expectedRevision },
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function deleteUserAiProviderConnection(
+  _scopeKey: string,
+  connectionId: string,
+  expectedRevision: number,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    deleteJSON<AiProviderConnectionList>(
+      `${userConnectionsPath}/${connectionId}`,
       {
         body: { expectedRevision },
         signal,

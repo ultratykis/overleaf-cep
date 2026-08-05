@@ -78,13 +78,20 @@ class FakeResponse {
   }
 }
 
-function routeFixture() {
+function routeFixture({ skillGitImporter } = {}) {
   let sequence = 0;
   const store = createAiReviewerSkillStore({
     model: inMemoryModel(),
     newSkillId: () => `skill-route-${++sequence}`,
   });
-  const controller = createAiReviewerSkillController({ skillStore: store });
+  const gitImporter = skillGitImporter ?? {
+    preview: vi.fn(),
+    confirm: vi.fn(),
+  };
+  const controller = createAiReviewerSkillController({
+    skillStore: store,
+    skillGitImporter: gitImporter,
+  });
   const routes = new Map();
   const webRouter = {};
   for (const method of ["get", "post", "put", "delete"]) {
@@ -116,6 +123,8 @@ function routeFixture() {
     deleteWorkspace: unused,
     listSkills: controller.listSkills,
     uploadSkill: controller.uploadSkill,
+    previewSkillGitImport: controller.previewGitImport,
+    confirmSkillGitImport: controller.confirmGitImport,
     deleteSkill: controller.deleteSkill,
   }).apply(webRouter);
 
@@ -131,6 +140,18 @@ function routeFixture() {
       invoke("GET", "/project/:project_id/ai-reviewer/skills", rawRequest),
     upload: (rawRequest) =>
       invoke("POST", "/project/:project_id/ai-reviewer/skills", rawRequest),
+    previewImport: (rawRequest) =>
+      invoke(
+        "POST",
+        "/project/:project_id/ai-reviewer/skills/import/preview",
+        rawRequest,
+      ),
+    confirmImport: (rawRequest) =>
+      invoke(
+        "POST",
+        "/project/:project_id/ai-reviewer/skills/import",
+        rawRequest,
+      ),
     remove: (rawRequest) =>
       invoke(
         "DELETE",
@@ -163,6 +184,8 @@ describe("AI reviewer skill routes", function () {
       id: "skill-route-1",
       name: "claim-check",
       description: "Check claims against their evidence.",
+      sizeBytes: 41,
+      referenceCount: 1,
     });
     expect(uploaded.body).not.toHaveProperty("body");
     expect(uploaded.body).not.toHaveProperty("referenceFiles");
@@ -184,6 +207,128 @@ describe("AI reviewer skill routes", function () {
     const deleted = await routes.remove(request({ skillId: uploaded.body.id }));
     expect(deleted.statusCode).toBe(200);
     expect(deleted.body).toEqual({ skills: [] });
+  });
+
+  it("stores nothing for a git preview and atomically stores several SHA-pinned skills only after confirmation", async function () {
+    const provenance = {
+      kind: "git",
+      service: "github",
+      host: "github.com",
+      repository: "owner/repository",
+      path: "skills/check/SKILL.md",
+      resolvedSha: "0123456789abcdef0123456789abcdef01234567",
+      pluginName: "research-skills",
+      pluginVersion: "3.19.0",
+      license: "CC-BY-NC-4.0",
+      owner: { name: "Cheng-I Wu" },
+    };
+    const preview = {
+      source: {
+        service: "github",
+        host: "github.com",
+        repository: "owner/repository",
+        requestedRevision: null,
+        resolvedSha: provenance.resolvedSha,
+      },
+      manifestFound: true,
+      plugins: [],
+      skills: [
+        {
+          path: provenance.path,
+          name: "claim-check",
+          description: "Check claims against their evidence.",
+          bodySizeBytes: 18,
+          totalSizeBytes: 41,
+          referenceFiles: [{ path: "references/rules.md", sizeBytes: 23 }],
+          skippedReferences: [],
+        },
+        {
+          path: "skills/style/SKILL.md",
+          name: "style-check",
+          description: "Check claims against their evidence.",
+          bodySizeBytes: 18,
+          totalSizeBytes: 18,
+          referenceFiles: [],
+          skippedReferences: [],
+        },
+      ],
+      contentHash: "1".repeat(64),
+    };
+    const importer = {
+      preview: vi.fn(async () => preview),
+      confirm: vi.fn(async () => ({
+        skills: [
+          {
+            skillMarkdown: skillMarkdown(),
+            referenceFiles: {
+              "references/rules.md": "Prefer primary sources.",
+            },
+            provenance,
+          },
+          {
+            skillMarkdown: skillMarkdown("style-check"),
+            referenceFiles: {},
+            provenance: {
+              ...provenance,
+              path: "skills/style/SKILL.md",
+            },
+          },
+        ],
+      })),
+    };
+    const routes = routeFixture({ skillGitImporter: importer });
+    const source = {
+      repository: "owner/repository",
+      gitHostType: "auto",
+      ref: "",
+    };
+
+    const previewResponse = await routes.previewImport(
+      request({ body: source }),
+    );
+
+    expect(previewResponse.body).toEqual(preview);
+    expect(importer.preview).toHaveBeenCalledWith(source);
+    expect(importer.confirm).not.toHaveBeenCalled();
+    expect((await routes.list(request())).body.skills).toEqual([]);
+
+    const confirmation = {
+      ...source,
+      resolvedSha: provenance.resolvedSha,
+      contentHash: preview.contentHash,
+      selectedPaths: [provenance.path, "skills/style/SKILL.md"],
+    };
+    const imported = await routes.confirmImport(
+      request({ body: confirmation }),
+    );
+
+    expect(importer.confirm).toHaveBeenCalledWith(confirmation);
+    expect(imported.body).toEqual({
+      skills: [
+        {
+          id: "skill-route-1",
+          name: "claim-check",
+          description: "Check claims against their evidence.",
+          sizeBytes: 41,
+          referenceCount: 1,
+          provenance,
+        },
+        {
+          id: "skill-route-2",
+          name: "style-check",
+          description: "Check claims against their evidence.",
+          sizeBytes: 18,
+          referenceCount: 0,
+          provenance: {
+            ...provenance,
+            path: "skills/style/SKILL.md",
+          },
+        },
+      ],
+    });
+    expect((await routes.list(request())).body.skills).toEqual(
+      imported.body.skills,
+    );
   });
 
   it.each([

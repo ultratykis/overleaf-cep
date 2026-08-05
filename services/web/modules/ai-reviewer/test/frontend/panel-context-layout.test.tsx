@@ -266,7 +266,9 @@ function composerField() {
 }
 
 async function chooseModel(name: string) {
-  fireEvent.click(await screen.findByRole("button", { name: "Model" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: /^Selected model/u }),
+  );
   fireEvent.click(screen.getByRole("menuitem", { name }));
 }
 
@@ -301,7 +303,8 @@ describe("AI reviewer: context-driven panel", function () {
     expect(await screen.findByTestId("ai-reviewer-onboarding")).to.exist;
     expect(screen.getByRole("button", { name: "Add connection" })).to.exist;
     expect(screen.queryByTestId("ai-reviewer-bottom-controls")).not.to.exist;
-    expect(screen.queryByRole("button", { name: "Model" })).not.to.exist;
+    expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
+      .exist;
     expect(screen.queryByRole("textbox")).not.to.exist;
     expect(screen.queryByRole("button", { name: "Review selection" })).not.to
       .exist;
@@ -314,7 +317,7 @@ describe("AI reviewer: context-driven panel", function () {
       captureSelectionSession: sinon.stub(),
       ...providerProps(),
     });
-    await screen.findByRole("button", { name: "Model" });
+    await screen.findByRole("button", { name: "Selected model — None" });
 
     const conversation = screen.getByTestId("ai-reviewer-conversation");
     expect(
@@ -372,14 +375,20 @@ describe("AI reviewer: context-driven panel", function () {
     expect(request).not.to.have.property("scope");
   });
 
-  it("hides the findings area while brainstorm mode is active", async function () {
+  it("keeps earlier run findings visible while brainstorm mode is active", async function () {
     await reviewedSelection();
-    expect(screen.getByTestId("ai-reviewer-findings")).to.exist;
+    const run = screen.getByRole("article", { name: "Review run 1" });
+    expect(within(run).getByRole("region", { name: "Review findings" })).to
+      .exist;
 
     fireEvent.click(screen.getByRole("button", { name: "Review mode" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm mode" }));
 
-    expect(screen.queryByTestId("ai-reviewer-findings")).not.to.exist;
+    expect(within(run).getByRole("region", { name: "Review findings" })).to
+      .exist;
+    expect(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    ).to.exist;
   });
 
   // Spec case 5
@@ -406,29 +415,48 @@ describe("AI reviewer: context-driven panel", function () {
   });
 
   // Spec case 6
-  it("keeps the findings out of the conversation as it grows", async function () {
+  it("keeps each finding in its run and jumps back from a growing discussion", async function () {
     await reviewedSelection();
 
-    const findings = screen.getByTestId("ai-reviewer-findings");
+    const run = screen.getByRole("article", { name: "Review run 1" });
+    const findings = within(run).getByRole("region", {
+      name: "Review findings",
+    });
     const conversation = screen.getByTestId("ai-reviewer-conversation");
     const finding = screen.getByText("Ambiguous phrase");
+    const findingCard = finding.closest<HTMLElement>(".ai-reviewer-artifact");
+    expect(findingCard).not.to.equal(null);
+    if (findingCard == null) {
+      throw new Error("The finding card must render in its source run.");
+    }
 
     expect(findings.contains(finding)).to.equal(true);
-    expect(conversation.contains(finding)).to.equal(false);
-    expect(findings.contains(conversation)).to.equal(false);
-    expect(conversation.contains(findings)).to.equal(false);
-    // The list is a separate scroller, so a long thread cannot carry it away.
-    expect(
-      findings.compareDocumentPosition(conversation) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).to.not.equal(0);
+    expect(run.contains(findings)).to.equal(true);
+    expect(conversation.contains(run)).to.equal(true);
+    expect(findings.classList.contains("ai-reviewer-run-artifacts")).to.equal(
+      true,
+    );
+    expect(document.querySelector(".ai-reviewer-panel-findings")).to.equal(
+      null,
+    );
+
+    const scrollIntoView = sinon.spy();
+    findingCard.scrollIntoView = scrollIntoView;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    );
+    await waitFor(() => expect(scrollIntoView.calledOnce).to.equal(true));
+    expect(document.activeElement).to.equal(findingCard);
 
     typeConversationMessage("Why is it ambiguous?");
     await screen.findByText("A precise explanation.");
 
-    expect(screen.getByTestId("ai-reviewer-findings").textContent).to.contain(
-      "Ambiguous phrase",
+    expect(screen.queryByRole("article", { name: "Review run 1" })).not.to
+      .exist;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
     );
+    expect(await screen.findByText("Ambiguous phrase")).to.exist;
   });
 
   it("renders markdown in review findings", async function () {
@@ -448,23 +476,38 @@ describe("AI reviewer: context-driven panel", function () {
   });
 
   // Spec case 7
-  it("keeps a dismissed finding in the list, dimmed", async function () {
+  it("collapses a dismissed finding to one line and expands on demand", async function () {
     await reviewedSelection();
 
     fireEvent.click(screen.getByRole("button", { name: "Discard finding" }));
 
     const finding = await screen.findByText("Ambiguous phrase");
-    const card = finding.closest(".ai-reviewer-artifact");
+    const card = finding.closest<HTMLElement>(".ai-reviewer-artifact");
     expect(card).not.to.equal(null);
-    expect(card?.classList.contains("ai-reviewer-artifact-resolved")).to.equal(
+    if (card == null) {
+      throw new Error("The dismissed finding must remain in its source run.");
+    }
+    expect(card.classList.contains("ai-reviewer-artifact-resolved")).to.equal(
       true,
     );
+    const disclosure = card.querySelector("details");
+    const summary = disclosure?.querySelector("summary");
+    expect(disclosure?.open).to.equal(false);
+    expect(summary?.textContent).to.contain("Ambiguous phrase");
+    expect(summary?.textContent).to.contain("Status: Discarded");
     expect(
-      screen.getByTestId("ai-reviewer-findings").contains(finding),
-    ).to.equal(true);
-    expect(screen.getByText("Status: Discarded")).to.exist;
-    // The heading counts only what still needs the reader.
-    expect(screen.getByText("Findings (0 unresolved)")).to.exist;
+      within(card)
+        .getByRole("button", { name: "Discuss finding" })
+        .closest(".ai-reviewer-artifact-body"),
+    ).not.to.equal(null);
+    fireEvent.click(summary!);
+    expect(disclosure?.open).to.equal(true);
+    expect(within(card).getByRole("button", { name: "Discuss finding" })).to
+      .exist;
+    const unresolved = screen.getByRole("button", {
+      name: "Go to unresolved findings (0)",
+    }) as HTMLButtonElement;
+    expect(unresolved.disabled).to.equal(true);
   });
 
   // Spec case 9
@@ -723,9 +766,17 @@ describe("AI reviewer: context-driven panel", function () {
     expect(quote.textContent).to.contain("What this is about");
     expect(quote.textContent).to.contain(`${path} (chars 6–10)`);
     expect(quote.textContent).to.contain(selectedText);
-    // The composer and the findings both survive the pin.
+    // The composer stays with the active discussion while the header keeps a
+    // direct route back to its unresolved source finding.
     expect(composerField()).to.exist;
-    expect(screen.getByTestId("ai-reviewer-findings")).to.exist;
+    expect(screen.queryByRole("article", { name: "Review run 1" })).not.to
+      .exist;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    );
+    expect(await screen.findByRole("article", { name: "Review run 1" })).to
+      .exist;
+    expect(document.activeElement?.textContent).to.contain("Ambiguous phrase");
   });
 
   it("uses the visible mode and omits scope in the pinned conversation", async function () {
@@ -775,6 +826,28 @@ describe("AI reviewer: context-driven panel", function () {
     expect(answer.textContent).to.contain("A precise explanation.");
   });
 
+  it("distinguishes the selected model from the model recorded by a run", async function () {
+    renderPanel({
+      createRequestId: () => "model-label-request",
+      now: () => createdAt,
+      captureSelectionSession: captureSelectionSession(),
+      selectionPreview,
+      streamRequest: unifiedStream(),
+      ...providerProps(),
+    });
+
+    await chooseModel(`Claude Sonnet (${claudeConnection.label})`);
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+    expect(
+      screen.getByRole("button", { name: "Selected model — Claude Sonnet" }),
+    ).to.exist;
+    expect(
+      within(run).getByText("Model used for this run: fake · deterministic-v1"),
+    ).to.exist;
+  });
+
   it("saves the chosen model and restores it after a reload", async function () {
     const store = new MemoryWorkspace();
     const first = renderPanel({
@@ -794,8 +867,12 @@ describe("AI reviewer: context-driven panel", function () {
     renderPanel({ workspacePersistence: store, ...providerProps() });
 
     expect(
-      (await screen.findByRole("button", { name: "Model" })).textContent,
-    ).to.equal("Claude Sonnet");
+      (
+        await screen.findByRole("button", {
+          name: "Selected model — Claude Sonnet",
+        })
+      ).textContent,
+    ).to.equal("Selected model — Claude Sonnet");
   });
 
   it("sends the same choice from a review, a transform, and a message", async function () {
@@ -845,8 +922,12 @@ describe("AI reviewer: context-driven panel", function () {
     });
 
     expect(
-      (await screen.findByRole("button", { name: "Model" })).textContent,
-    ).to.equal("Model");
+      (
+        await screen.findByRole("button", {
+          name: "Selected model — None",
+        })
+      ).textContent,
+    ).to.equal("Selected model — None");
     // The next workspace write omits the stale destination instead of choosing
     // another connection for the manuscript.
     await waitFor(() => {

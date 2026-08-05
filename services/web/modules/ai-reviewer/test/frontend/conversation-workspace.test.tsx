@@ -547,8 +547,13 @@ describe("AI reviewer: conversation workspace", function () {
     expect(turns.classList.contains("ai-reviewer-discussion-turns")).to.equal(
       true,
     );
-    // The conversation never replaces the rest of the panel.
-    expect(screen.getByTestId("ai-reviewer-findings")).to.exist;
+    // The active discussion replaces the list in the single scroller, while
+    // the header keeps the unresolved source reachable.
+    expect(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    ).to.exist;
+    expect(screen.queryByRole("article", { name: "Review run 1" })).not.to
+      .exist;
     expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
 
     for (let index = 1; index <= 13; index += 1) {
@@ -586,6 +591,17 @@ describe("AI reviewer: conversation workspace", function () {
     for (const link of workspace.container.querySelectorAll("a")) {
       expect(link.getAttribute("rel")).to.equal("noreferrer noopener");
     }
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    );
+    const sourceRun = await screen.findByRole("article", {
+      name: "Review run 1",
+    });
+    expect(within(sourceRun).getByText("Ambiguous discussion phrase")).to.exist;
+    expect(document.activeElement?.textContent).to.contain(
+      "Ambiguous discussion phrase",
+    );
   });
 
   it("routes a conversation suggestion through the existing preview/apply callback with the exact source session", async function () {

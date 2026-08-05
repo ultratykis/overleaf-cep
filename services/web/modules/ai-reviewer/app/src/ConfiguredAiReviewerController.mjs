@@ -16,6 +16,7 @@ import {
 } from "./AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
 import { createAiReviewerSkillController } from "./AiReviewerSkillController.mjs";
+import { createAiReviewerSkillGitImporter } from "./AiReviewerSkillGitImporter.mjs";
 import { createAiReviewerSkillStore } from "./AiReviewerSkillStore.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
@@ -111,18 +112,15 @@ function modelSelectionRequired() {
  * one connection remains: sending manuscript content requires an explicit
  * project choice.
  *
- * @param {any} configStore @param {any} context
+ * @param {any} configStore @param {any} context @param {string} userId
  */
-async function loadRunConnection(configStore, context) {
+async function loadRunConnection(configStore, context, userId) {
   const connectionId = context.request.connectionId ?? null;
   if (connectionId == null) {
     throw modelSelectionRequired();
   }
   try {
-    return await configStore.get(
-      authenticatedUserId(context.httpRequest),
-      connectionId,
-    );
+    return await configStore.get(userId, connectionId);
   } catch (error) {
     if (error instanceof AiReviewerConnectionNotFoundError) {
       return null;
@@ -137,8 +135,9 @@ async function loadRunConnection(configStore, context) {
  * for manuscript content on the user's behalf.
  *
  * @param {any} connection @param {any} context @param {any} providerService
+ * @param {string} userId
  */
-async function resolveRunModel(connection, context, providerService) {
+async function resolveRunModel(connection, context, providerService, userId) {
   const requestedModel = context.request.model ?? null;
   if (requestedModel == null) {
     throw modelSelectionRequired();
@@ -148,10 +147,7 @@ async function resolveRunModel(connection, context, providerService) {
     parseOpenAiCompatibleModelId(requestedModel);
     models = await providerService.listModels(connection, {
       signal: context.signal,
-      cacheKey: aiReviewerModelCacheKey(
-        authenticatedUserId(context.httpRequest),
-        connection.id ?? null,
-      ),
+      cacheKey: aiReviewerModelCacheKey(userId, connection.id ?? null),
     });
   } catch (error) {
     if (
@@ -170,9 +166,22 @@ async function resolveRunModel(connection, context, providerService) {
   return requestedModel;
 }
 
-/** @param {any} connection @param {any} context @param {any} providerService */
-async function resolveRunConfiguration(connection, context, providerService) {
-  const model = await resolveRunModel(connection, context, providerService);
+/**
+ * @param {any} connection @param {any} context @param {any} providerService
+ * @param {string} userId
+ */
+async function resolveRunConfiguration(
+  connection,
+  context,
+  providerService,
+  userId,
+) {
+  const model = await resolveRunModel(
+    connection,
+    context,
+    providerService,
+    userId,
+  );
   const resolution = await providerService.resolveContextLength(
     connection,
     model,
@@ -199,10 +208,25 @@ async function resolveRunConfiguration(connection, context, providerService) {
   });
 }
 
+/** @param {any} skillStore @param {string} userId */
+async function loadRunSkills(skillStore, userId) {
+  if (typeof skillStore?.listForReview !== "function") {
+    return [];
+  }
+  try {
+    return await skillStore.listForReview(userId);
+  } catch {
+    // A broken optional reference must not discard the review itself. The
+    // gateway receives an explicit empty set and keeps its no-skill behavior.
+    return [];
+  }
+}
+
 /** @param {any} dependencies */
 export function createConfiguredAiReviewerController({
   configStore,
   providerService,
+  skillStore,
   requestScopeReader,
   timeoutSignalFactory,
   now,
@@ -216,7 +240,12 @@ export function createConfiguredAiReviewerController({
         return await testGatewayFactory(context);
       }
 
-      const configuration = await loadRunConnection(configStore, context);
+      const userId = authenticatedUserId(context.httpRequest);
+      const configuration = await loadRunConnection(
+        configStore,
+        context,
+        userId,
+      );
       if (configuration == null) {
         throw new AgentGatewayError("No AI provider is configured.", {
           code: "AI_PROVIDER_NOT_CONFIGURED",
@@ -228,6 +257,7 @@ export function createConfiguredAiReviewerController({
         configuration,
         context,
         providerService,
+        userId,
       );
       context.setFailureProvider(
         runConfiguration.provider,
@@ -237,7 +267,9 @@ export function createConfiguredAiReviewerController({
         signal: context.signal,
         contextLength: runConfiguration.contextLength,
       });
+      const skills = await loadRunSkills(skillStore, userId);
       const gateway = providerService.createAgentGateway(runConfiguration, {
+        skills,
         readProjectFile: scope.readProjectFile,
         projectContext: scope.projectContext,
         searchZotero: scope.searchZotero,
@@ -328,10 +360,15 @@ const providerController = createAiReviewerProviderController({
   failureRecorder: recordAiReviewerFailure,
 });
 const skillStore = createAiReviewerSkillStore();
-const skillController = createAiReviewerSkillController({ skillStore });
+const skillGitImporter = createAiReviewerSkillGitImporter();
+const skillController = createAiReviewerSkillController({
+  skillStore,
+  skillGitImporter,
+});
 const configuredController = createConfiguredAiReviewerController({
   configStore,
   providerService,
+  skillStore,
   requestScopeReader,
   failureRecorder: recordAiReviewerFailure,
 });
@@ -352,6 +389,8 @@ export default {
   deleteConnection: expressify(providerController.deleteConnection),
   listSkills: expressify(skillController.listSkills),
   uploadSkill: expressify(skillController.uploadSkill),
+  previewSkillGitImport: expressify(skillController.previewGitImport),
+  confirmSkillGitImport: expressify(skillController.confirmGitImport),
   deleteSkill: expressify(skillController.deleteSkill),
   stream: expressify(configuredController.stream),
   getWorkspace: expressify(workspaceController.getWorkspace),

@@ -1733,6 +1733,15 @@ describe("AI reviewer provider configuration", function () {
   });
 
   it("passes the credential only into transport construction", async function () {
+    const skills = [
+      {
+        name: "Evidence audit",
+        description: "Check whether claims are supported.",
+        body: "Compare claims with evidence.",
+        referenceFiles: {},
+      },
+    ];
+    const readProjectFile = vi.fn();
     const transport = {
       createAgentGateway: vi.fn(() => ({ kind: "review" })),
     };
@@ -1741,7 +1750,8 @@ describe("AI reviewer provider configuration", function () {
 
     expect(
       service.createAgentGateway(credentialConfiguration, {
-        readProjectFile: vi.fn(),
+        skills,
+        readProjectFile,
       }),
     ).toEqual({ kind: "review" });
     expect(transportFactory).toHaveBeenCalledOnce();
@@ -1757,6 +1767,14 @@ describe("AI reviewer provider configuration", function () {
         "modelTag",
       ]);
     }
+    expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
+      contextLength,
+      skills,
+      readProjectFile,
+      projectContext: undefined,
+      searchZotero: undefined,
+      validateEvidence: undefined,
+    });
   });
 
   it.each([
@@ -2474,6 +2492,111 @@ describe("AI reviewer provider configuration", function () {
     );
   });
 
+  it("loads only the authenticated request owner's skills for a review", async function () {
+    const ownSkill = {
+      name: "Owner evidence audit",
+      description: "Check the request owner's evidence.",
+      body: "OWNER_SKILL_BODY",
+      referenceFiles: {},
+    };
+    const otherSkill = {
+      name: "Other evidence audit",
+      description: "This belongs to another user.",
+      body: "OTHER_USER_SKILL_BODY",
+      referenceFiles: {},
+    };
+    const configStore = { get: vi.fn(async () => otherConnection) };
+    const skillStore = {
+      listForReview: vi.fn(async (requestedUserId) =>
+        requestedUserId === userId ? [ownSkill] : [otherSkill],
+      ),
+    };
+    const providerService = {
+      ...runModelStubs(),
+      createAgentGateway: vi.fn(() => ({
+        async *stream() {
+          yield* streamEvents();
+        },
+      })),
+    };
+    const requestScopeReader = {
+      read: vi.fn(async () => ({
+        userId: otherUserId,
+        kind: "selection",
+        readProjectFile: vi.fn(),
+      })),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore,
+      providerService,
+      skillStore,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "event-owner-skill",
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(configStore.get).toHaveBeenCalledExactlyOnceWith(
+      userId,
+      storedConnectionId,
+    );
+    expect(skillStore.listForReview).toHaveBeenCalledExactlyOnceWith(userId);
+    const gatewayOptions = providerService.createAgentGateway.mock.calls[0][1];
+    expect(gatewayOptions.skills).toEqual([ownSkill]);
+    expect(JSON.stringify(gatewayOptions.skills)).not.toContain(
+      "OTHER_USER_SKILL_BODY",
+    );
+    expect(parseNdjson(response)).toEqual(streamEvents());
+  });
+
+  it("continues the review without skills when their bounded read fails", async function () {
+    const privateFailure = "PRIVATE_SKILL_STORAGE_FAILURE";
+    const providerService = {
+      ...runModelStubs(),
+      createAgentGateway: vi.fn(() => ({
+        async *stream() {
+          yield* streamEvents();
+        },
+      })),
+    };
+    const skillStore = {
+      listForReview: vi.fn(async () => {
+        throw new Error(privateFailure);
+      }),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConnection) },
+      providerService,
+      skillStore,
+      requestScopeReader: {
+        read: vi.fn(async () => ({
+          kind: "selection",
+          readProjectFile: vi.fn(),
+        })),
+      },
+      now: () => createdAt,
+      eventId: () => "event-skill-read-failure",
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(skillStore.listForReview).toHaveBeenCalledExactlyOnceWith(userId);
+    expect(providerService.createAgentGateway.mock.calls[0][1].skills).toEqual(
+      [],
+    );
+    expect(parseNdjson(response)).toEqual(streamEvents());
+    expect(response.chunks.join("")).not.toContain(privateFailure);
+  });
+
   it("withholds the Zotero seam from a selection when no library is linked", async function () {
     const requestScopeReader = createRequestScopeReader({
       isZoteroLinked: vi.fn(async () => false),
@@ -2528,6 +2651,7 @@ describe("AI reviewer provider configuration", function () {
     expect(requestScopeReader.read).toHaveBeenCalledOnce();
     expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
+      skills: [],
       readProjectFile,
       projectContext: undefined,
       searchZotero: undefined,

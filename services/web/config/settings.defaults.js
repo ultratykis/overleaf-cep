@@ -1200,7 +1200,12 @@ module.exports = {
     usGovBanner: [],
     rollingBuildsUpdatedAlert: [],
     offlineModeToolbarButtons: [],
-    settingsEntries: [],
+    settingsEntries: [
+      Path.resolve(
+        __dirname,
+        '../modules/ai-reviewer/frontend/js/components/ai-reviewer-account-settings.tsx'
+      ),
+    ],
     autoCompleteExtensions: [
       Path.resolve(
         __dirname,

@@ -9,6 +9,9 @@ export type AiReviewerSkill = {
   id: string;
   name: string;
   description: string;
+  sizeBytes: number;
+  referenceCount: number;
+  provenance?: AiReviewerSkillGitProvenance;
 };
 
 export type AiReviewerSkillList = {
@@ -18,6 +21,77 @@ export type AiReviewerSkillList = {
 export type AiReviewerSkillUpload = {
   skillMarkdown: string;
   referenceFiles: Record<string, string>;
+};
+
+export type AiReviewerSkillGitHostType = "auto" | "github" | "gitlab";
+
+export type AiReviewerSkillGitSource = {
+  repository: string;
+  gitHostType: AiReviewerSkillGitHostType;
+  ref: string;
+};
+
+export type AiReviewerSkillGitOwner = {
+  name: string;
+  url?: string;
+};
+
+export type AiReviewerSkillGitProvenance = {
+  kind: "git";
+  service: "github" | "gitlab";
+  host: string;
+  repository: string;
+  path: string;
+  resolvedSha: string;
+  pluginName?: string;
+  pluginVersion?: string;
+  license?: string;
+  owner?: AiReviewerSkillGitOwner;
+  homepage?: string;
+};
+
+export type AiReviewerSkillGitSkippedReferenceReason =
+  | "outside-skill-directory"
+  | "not-reference-file"
+  | "not-readable"
+  | "size-limit";
+
+export type AiReviewerSkillGitPreview = {
+  source: {
+    service: "github" | "gitlab";
+    host: string;
+    repository: string;
+    requestedRevision: string | null;
+    resolvedSha: string;
+  };
+  manifestFound: boolean;
+  plugins: Array<{
+    name: string;
+    version: string | null;
+    license: string | null;
+    owner: AiReviewerSkillGitOwner | null;
+    homepage: string | null;
+  }>;
+  skills: Array<{
+    path: string;
+    name: string;
+    description: string;
+    bodySizeBytes: number;
+    totalSizeBytes: number;
+    referenceFiles: Array<{ path: string; sizeBytes: number }>;
+    skippedReferences: Array<{
+      path: string;
+      reason: AiReviewerSkillGitSkippedReferenceReason;
+    }>;
+    pluginName?: string;
+  }>;
+  contentHash: string;
+};
+
+export type AiReviewerSkillGitConfirmation = AiReviewerSkillGitSource & {
+  resolvedSha: string;
+  contentHash: string;
+  selectedPaths: string[];
 };
 
 export class AiReviewerSkillClientError extends Error {
@@ -53,6 +127,44 @@ async function request<T>(
 
 function skillsPath(projectId: string) {
   return `/project/${projectId}/ai-reviewer/skills`;
+}
+
+const userSkillsPath = "/user/ai-reviewer/skills";
+
+function previewPath(basePath: string) {
+  return `${basePath}/import/preview`;
+}
+
+function importPath(basePath: string) {
+  return `${basePath}/import`;
+}
+
+function previewGitImport(
+  basePath: string,
+  source: AiReviewerSkillGitSource,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    postJSON<AiReviewerSkillGitPreview>(previewPath(basePath), {
+      body: source,
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+function confirmGitImport(
+  basePath: string,
+  confirmation: AiReviewerSkillGitConfirmation,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    postJSON<AiReviewerSkillList>(importPath(basePath), {
+      body: confirmation,
+      signal,
+      swallowAbortError: false,
+    }),
+  );
 }
 
 export function getAiReviewerSkills(projectId: string, signal: AbortSignal) {
@@ -92,4 +204,78 @@ export function deleteAiReviewerSkill(
       swallowAbortError: false,
     }),
   );
+}
+
+export function previewAiReviewerSkillGitImport(
+  projectId: string,
+  source: AiReviewerSkillGitSource,
+  signal: AbortSignal,
+) {
+  return previewGitImport(skillsPath(projectId), source, signal);
+}
+
+export function confirmAiReviewerSkillGitImport(
+  projectId: string,
+  confirmation: AiReviewerSkillGitConfirmation,
+  signal: AbortSignal,
+) {
+  return confirmGitImport(skillsPath(projectId), confirmation, signal);
+}
+
+export function getUserAiReviewerSkills(
+  _scopeKey: string,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    getJSON<AiReviewerSkillList>(userSkillsPath, {
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function uploadUserAiReviewerSkill(
+  _scopeKey: string,
+  upload: AiReviewerSkillUpload,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    postJSON<AiReviewerSkill>(userSkillsPath, {
+      body: {
+        skillMarkdown: upload.skillMarkdown,
+        referenceFiles: upload.referenceFiles,
+      },
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function deleteUserAiReviewerSkill(
+  _scopeKey: string,
+  skillId: string,
+  signal: AbortSignal,
+) {
+  return request(signal, () =>
+    deleteJSON<AiReviewerSkillList>(`${userSkillsPath}/${skillId}`, {
+      signal,
+      swallowAbortError: false,
+    }),
+  );
+}
+
+export function previewUserAiReviewerSkillGitImport(
+  _scopeKey: string,
+  source: AiReviewerSkillGitSource,
+  signal: AbortSignal,
+) {
+  return previewGitImport(userSkillsPath, source, signal);
+}
+
+export function confirmUserAiReviewerSkillGitImport(
+  _scopeKey: string,
+  confirmation: AiReviewerSkillGitConfirmation,
+  signal: AbortSignal,
+) {
+  return confirmGitImport(userSkillsPath, confirmation, signal);
 }

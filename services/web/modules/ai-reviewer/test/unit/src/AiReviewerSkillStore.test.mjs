@@ -33,7 +33,15 @@ function fakeQuery(work) {
 function inMemoryModel() {
   const records = new Map();
   const model = {
-    findOne: vi.fn((filter) => fakeQuery(() => records.get(filter._id))),
+    findOne: vi.fn((filter, projection) =>
+      fakeQuery(() => {
+        const record = records.get(filter._id);
+        const skillSlice = projection?.skills?.$slice;
+        return record == null || !Number.isSafeInteger(skillSlice)
+          ? record
+          : { ...record, skills: record.skills.slice(0, skillSlice) };
+      }),
+    ),
     findOneAndUpdate: vi.fn((filter, update, options) =>
       fakeQuery(() => {
         const current = records.get(filter._id);
@@ -106,6 +114,115 @@ Keep the claim precise.
     });
   });
 
+  it("parses the real academic-paper-reviewer frontmatter and skips metadata", () => {
+    expect(
+      parseAiReviewerSkill(`---
+name: academic-paper-reviewer
+description: "Multi-perspective academic paper review with dynamic reviewer personas. ..."
+metadata:
+  version: "1.10.0"
+  last_updated: "2026-07-11"
+  status: active
+  data_access_level: verified_only
+  task_type: open-ended
+  related_skills:
+    - academic-paper
+    - academic-pipeline
+---
+# Academic Paper Reviewer
+`),
+    ).toEqual({
+      name: "academic-paper-reviewer",
+      description:
+        "Multi-perspective academic paper review with dynamic reviewer personas. ...",
+      body: "# Academic Paper Reviewer\n",
+    });
+  });
+
+  it("skips block mappings, block scalars, and simple flow sequences", () => {
+    expect(
+      parseAiReviewerSkill(`---
+name: line-edit
+description: "Review claims: check their evidence."
+license: Apache-2.0
+allowed-tools: [Read, "Search: papers", 'Check''s notes']
+metadata:
+  name: nested-name-must-not-be-read
+  description: nested-description-must-not-be-read
+  related_skills:
+    - academic-paper
+notes: |-
+  This value is ignored.
+  name: still-not-top-level
+---
+Body`),
+    ).toEqual({
+      name: "line-edit",
+      description: "Review claims: check their evidence.",
+      body: "Body",
+    });
+  });
+
+  it("rejects duplicate keys even when the first value is skipped", () => {
+    expect(() =>
+      parseAiReviewerSkill(`---
+name: line-edit
+description: Review wording.
+metadata:
+  version: "1.0"
+metadata: local
+---
+Body`),
+    ).toThrowError('the key "metadata" is duplicated.');
+  });
+
+  it("rejects required metadata when it is a block or sequence", () => {
+    expect(() =>
+      parseAiReviewerSkill(`---
+name:
+  nested: line-edit
+description: Review wording.
+---
+Body`),
+    ).toThrowError(/non-empty `name`/);
+    expect(() =>
+      parseAiReviewerSkill(`---
+name: line-edit
+description: [Review, wording]
+---
+Body`),
+    ).toThrowError('the key "description" must be a simple scalar.');
+  });
+
+  it("rejects orphan indentation and malformed top-level collections", () => {
+    expect(() =>
+      parseAiReviewerSkill(`---
+name: line-edit
+license: Apache-2.0
+  description: must-not-be-reinterpreted
+description: Review wording.
+---
+Body`),
+    ).toThrowError(
+      "indented content must belong to a skipped top-level value.",
+    );
+    expect(() =>
+      parseAiReviewerSkill(`---
+name: line-edit
+description: Review wording.
+allowed-tools: [Read, Write
+---
+Body`),
+    ).toThrowError("only simple scalar values are supported.");
+    expect(() =>
+      parseAiReviewerSkill(`---
+name: line-edit
+- description: Review wording.
+---
+Body`),
+    ).toThrowError('the key "- description" is malformed.');
+  });
+
   it("rejects content without frontmatter", () => {
     expect(() => parseAiReviewerSkill("# Instructions")).toThrowError(
       new AiReviewerSkillParseError(
@@ -169,6 +286,58 @@ describe("AI reviewer skill storage", () => {
     expect(AiReviewerSkillModelSchema.path("skills")).toBeDefined();
   });
 
+  it("bounds review reads by stored skill count before materializing them", async () => {
+    const { model, records } = inMemoryModel();
+    const store = createAiReviewerSkillStore({ model });
+    records.set(userId, {
+      _id: userId,
+      revision: 1,
+      skills: Array.from(
+        { length: AI_REVIEWER_SKILL_COUNT_LIMIT + 1 },
+        (_, index) => ({
+          id: `skill-${index}`,
+          name: `skill-${index}`,
+          description: "Review wording.",
+          body: "Body",
+          referenceFiles: {},
+        }),
+      ),
+    });
+
+    const loaded = await store.listForReview(userId);
+
+    expect(loaded).toHaveLength(AI_REVIEWER_SKILL_COUNT_LIMIT);
+    expect(loaded.at(-1).name).toBe(
+      `skill-${AI_REVIEWER_SKILL_COUNT_LIMIT - 1}`,
+    );
+    expect(model.findOne).toHaveBeenCalledExactlyOnceWith(
+      { _id: userId },
+      { skills: { $slice: AI_REVIEWER_SKILL_COUNT_LIMIT } },
+    );
+  });
+
+  it("rejects oversized persisted content at the bounded review read", async () => {
+    const { model, records } = inMemoryModel();
+    const store = createAiReviewerSkillStore({ model });
+    records.set(userId, {
+      _id: userId,
+      revision: 1,
+      skills: [
+        {
+          id: "skill-oversized",
+          name: "oversized",
+          description: "Review wording.",
+          body: "x".repeat(AI_REVIEWER_SKILL_MAX_BYTES + 1),
+          referenceFiles: {},
+        },
+      ],
+    });
+
+    expect(await captureError(store.listForReview(userId))).toBeInstanceOf(
+      AiReviewerSkillByteLimitError,
+    );
+  });
+
   it("stores parsed content and reference files keyed by relative path", async () => {
     const { model, records } = inMemoryModel();
     const store = createAiReviewerSkillStore({
@@ -208,6 +377,39 @@ describe("AI reviewer skill storage", () => {
     });
   });
 
+  it("stores validated git provenance with the pinned content", async () => {
+    const { model } = inMemoryModel();
+    const store = createAiReviewerSkillStore({
+      model,
+      newSkillId: () => "skill-git-0001",
+    });
+    const provenance = {
+      kind: "git",
+      service: "gitlab",
+      host: "git.company.example",
+      repository: "group/repository",
+      path: "skills/review/SKILL.md",
+      resolvedSha: "0123456789abcdef0123456789abcdef01234567",
+      pluginName: "research-skills",
+      pluginVersion: "3.19.0",
+      license: "CC-BY-NC-4.0",
+      owner: {
+        name: "Cheng-I Wu",
+        url: "https://github.com/Imbad0202",
+      },
+      homepage: "https://example.com/research-skills",
+    };
+
+    const stored = await store.create(userId, {
+      skillMarkdown: skillMarkdown(),
+      referenceFiles: {},
+      provenance,
+    });
+
+    expect(stored.provenance).toEqual(provenance);
+    expect((await store.list(userId))[0].provenance).toEqual(provenance);
+  });
+
   it("rejects body and reference content over the byte cap", async () => {
     const { model } = inMemoryModel();
     const store = createAiReviewerSkillStore({ model });
@@ -241,6 +443,36 @@ describe("AI reviewer skill storage", () => {
       }),
     );
     expect(error).toBeInstanceOf(AiReviewerSkillCountLimitError);
+  });
+
+  it("stores a multi-skill selection atomically and rejects the whole selection above the count cap", async () => {
+    const { model } = inMemoryModel();
+    const store = createAiReviewerSkillStore({
+      model,
+      newSkillId: deterministicIds(),
+    });
+
+    const imported = await store.createMany(userId, [
+      { skillMarkdown: skillMarkdown({ name: "one" }) },
+      { skillMarkdown: skillMarkdown({ name: "two" }) },
+    ]);
+    expect(imported.map(({ name }) => name)).toEqual(["one", "two"]);
+
+    for (let index = 2; index < AI_REVIEWER_SKILL_COUNT_LIMIT; index += 1) {
+      await store.create(userId, {
+        skillMarkdown: skillMarkdown({ name: `skill-${index}` }),
+      });
+    }
+    const before = await store.list(userId);
+    const error = await captureError(
+      store.createMany(userId, [
+        { skillMarkdown: skillMarkdown({ name: "too-many-one" }) },
+        { skillMarkdown: skillMarkdown({ name: "too-many-two" }) },
+      ]),
+    );
+
+    expect(error).toBeInstanceOf(AiReviewerSkillCountLimitError);
+    expect(await store.list(userId)).toEqual(before);
   });
 
   it("rejects duplicate stored names", async () => {

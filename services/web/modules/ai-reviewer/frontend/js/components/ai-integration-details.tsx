@@ -4,10 +4,12 @@ import OLButton from "@/shared/components/ol/ol-button";
 import OLButtonGroup from "@/shared/components/ol/ol-button-group";
 import OLCard from "@/shared/components/ol/ol-card";
 import OLForm from "@/shared/components/ol/ol-form";
+import OLFormCheckbox from "@/shared/components/ol/ol-form-checkbox";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormGroup from "@/shared/components/ol/ol-form-group";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
 import OLFormSelect from "@/shared/components/ol/ol-form-select";
+import OLFormText from "@/shared/components/ol/ol-form-text";
 import OLIconButton from "@/shared/components/ol/ol-icon-button";
 import {
   OLModal,
@@ -21,6 +23,7 @@ import OLTable from "@/shared/components/ol/ol-table";
 import GenericConfirmModal from "@/features/ide-react/components/modals/generic-confirm-modal";
 import { formatTimeBasedOnYear } from "@/features/utils/format-date";
 import type { TFunction } from "i18next";
+import { Nav, TabContainer, TabContent, TabPane } from "react-bootstrap";
 import {
   type FormEvent,
   type ChangeEvent,
@@ -45,18 +48,33 @@ import {
   type AiProviderConfigurationWrite,
   type AzureOpenAiRequestStyle,
   createAiProviderConnection,
+  createUserAiProviderConnection,
   deleteAiProviderConnection,
+  deleteUserAiProviderConnection,
   getAiProviderConnections,
+  getUserAiProviderConnections,
   testAiProviderConnection,
   updateAiProviderConnection,
+  updateUserAiProviderConnection,
 } from "../services/ai-provider-configuration";
 import {
   AiReviewerSkillClientError,
   type AiReviewerSkill,
+  type AiReviewerSkillGitHostType,
+  type AiReviewerSkillGitPreview,
+  type AiReviewerSkillGitSkippedReferenceReason,
+  type AiReviewerSkillGitSource,
   type AiReviewerSkillUpload,
+  confirmAiReviewerSkillGitImport,
+  confirmUserAiReviewerSkillGitImport,
   deleteAiReviewerSkill,
+  deleteUserAiReviewerSkill,
   getAiReviewerSkills,
+  getUserAiReviewerSkills,
+  previewAiReviewerSkillGitImport,
+  previewUserAiReviewerSkillGitImport,
   uploadAiReviewerSkill,
+  uploadUserAiReviewerSkill,
 } from "../services/ai-reviewer-skills";
 
 type OperationKind = "save" | "test" | "connections";
@@ -92,15 +110,18 @@ type ConfigurationField =
   | "credential";
 
 type Props = {
-  projectId: string;
+  scopeKey: string;
   onHide: () => void;
   listConnections: typeof getAiProviderConnections;
   createConnection: typeof createAiProviderConnection;
   updateConnection: typeof updateAiProviderConnection;
   deleteConnection: typeof deleteAiProviderConnection;
   testConnection: typeof testAiProviderConnection;
+  connectionTestEnabled?: boolean;
   listSkills: typeof getAiReviewerSkills;
   uploadSkill: typeof uploadAiReviewerSkill;
+  previewSkillGitImport: typeof previewAiReviewerSkillGitImport;
+  confirmSkillGitImport: typeof confirmAiReviewerSkillGitImport;
   deleteSkill: typeof deleteAiReviewerSkill;
 };
 
@@ -130,8 +151,125 @@ const providers: AiProvider[] = [
   "azure",
 ];
 const connectionLimit = 10;
+const skillCountLimit = 20;
+const emptySkillGitSource: AiReviewerSkillGitSource = {
+  repository: "",
+  gitHostType: "auto",
+  ref: "",
+};
 const azureDeploymentName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const azureApiVersion = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/u;
+
+function skippedReferenceReasonTranslation(
+  reason: AiReviewerSkillGitSkippedReferenceReason,
+) {
+  switch (reason) {
+    case "outside-skill-directory":
+      return "ai_reviewer_skill_git_skip_outside_directory";
+    case "not-reference-file":
+      return "ai_reviewer_skill_git_skip_not_reference";
+    case "not-readable":
+      return "ai_reviewer_skill_git_skip_not_readable";
+    case "size-limit":
+      return "ai_reviewer_skill_git_skip_size_limit";
+  }
+}
+
+function repositoryNeedsHostType(repository: string) {
+  try {
+    const url = new URL(repository);
+    return !["github.com", "gitlab.com"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+type AiReviewerSkillGroup =
+  | {
+      kind: "git";
+      key: string;
+      name: string;
+      provenance: NonNullable<AiReviewerSkill["provenance"]>;
+      ownerNames: string[];
+      pluginVersions: string[];
+      licenses: string[];
+      skills: AiReviewerSkill[];
+    }
+  | {
+      kind: "local";
+      key: "local-files";
+      name: "Local files";
+      skills: AiReviewerSkill[];
+    };
+
+function repositoryName(repository: string) {
+  const parts = repository.split("/").filter(Boolean);
+  return (parts[parts.length - 1] ?? repository).replace(/\.git$/u, "");
+}
+
+function addDistinctMetadata(values: string[], value: string | undefined) {
+  const storedValue = value ?? "";
+  if (!values.includes(storedValue)) values.push(storedValue);
+}
+
+function storedSkillGroupMetadata(values: string[], unknown: string) {
+  return values.map((value) => value || unknown).join(", ");
+}
+
+function storedSkillGroups(skills: AiReviewerSkill[]): AiReviewerSkillGroup[] {
+  const groups = new Map<string, AiReviewerSkillGroup>();
+  for (const skill of skills) {
+    const provenance = skill.provenance;
+    if (provenance == null) {
+      const current = groups.get("local-files");
+      if (current?.kind === "local") {
+        current.skills.push(skill);
+      } else {
+        groups.set("local-files", {
+          kind: "local",
+          key: "local-files",
+          name: "Local files",
+          skills: [skill],
+        });
+      }
+      continue;
+    }
+
+    // A repository may declare several plugins, so pluginName remains part of
+    // source identity. Different commits of that same plugin stay together;
+    // any differing saved terms are all shown in the group header.
+    const key = JSON.stringify([
+      "git",
+      provenance.service,
+      provenance.host,
+      provenance.repository,
+      provenance.pluginName ?? null,
+    ]);
+    const current = groups.get(key);
+    if (current?.kind === "git") {
+      current.skills.push(skill);
+      addDistinctMetadata(current.ownerNames, provenance.owner?.name);
+      addDistinctMetadata(current.pluginVersions, provenance.pluginVersion);
+      addDistinctMetadata(current.licenses, provenance.license);
+    } else {
+      groups.set(key, {
+        kind: "git",
+        key,
+        name: provenance.pluginName ?? repositoryName(provenance.repository),
+        provenance,
+        ownerNames: [provenance.owner?.name ?? ""],
+        pluginVersions: [provenance.pluginVersion ?? ""],
+        licenses: [provenance.license ?? ""],
+        skills: [skill],
+      });
+    }
+  }
+  return Array.from(groups.values());
+}
+
+function storedSkillCount(count: number) {
+  return `${count} ${count === 1 ? "skill" : "skills"}`;
+}
 
 function providerFromValue(value: string): AiProvider | null {
   switch (value) {
@@ -420,15 +558,18 @@ function noticeContent(notice: Notice, t: TFunction): string {
 }
 
 export function AiIntegrationDetailsView({
-  projectId,
+  scopeKey,
   onHide,
   listConnections,
   createConnection,
   updateConnection,
   deleteConnection,
   testConnection,
+  connectionTestEnabled = true,
   listSkills,
   uploadSkill,
+  previewSkillGitImport,
+  confirmSkillGitImport: confirmSkillGitImportRequest,
   deleteSkill,
 }: Props) {
   const { t } = useTranslation();
@@ -447,6 +588,19 @@ export function AiIntegrationDetailsView({
   const [skills, setSkills] = useState<AiReviewerSkill[] | undefined>();
   const [skillBusy, setSkillBusy] = useState(false);
   const [skillNotice, setSkillNotice] = useState<string | null>(null);
+  const [selectedSkillFileNames, setSelectedSkillFileNames] = useState<
+    string[]
+  >([]);
+  const [pendingSkillDeletion, setPendingSkillDeletion] =
+    useState<AiReviewerSkill | null>(null);
+  const [skillGitSource, setSkillGitSource] = useState({
+    ...emptySkillGitSource,
+  });
+  const [skillGitPreview, setSkillGitPreview] =
+    useState<AiReviewerSkillGitPreview | null>(null);
+  const [selectedSkillGitPaths, setSelectedSkillGitPaths] = useState<string[]>(
+    [],
+  );
   const skillOperationRef = useRef<AbortController | null>(null);
   const operationRef = useRef<{
     generation: number;
@@ -498,10 +652,11 @@ export function AiIntegrationDetailsView({
     setDraft({ ...emptyConfiguration });
     setPendingNavigation(null);
     setPendingDeletion(null);
+    setPendingSkillDeletion(null);
     setBusy(null);
     setNotice(null);
 
-    void listConnections(projectId, operation.controller.signal).then(
+    void listConnections(scopeKey, operation.controller.signal).then(
       (response) => {
         if (!complete(operation)) return;
         applyConnections(response.connections);
@@ -513,7 +668,7 @@ export function AiIntegrationDetailsView({
       },
     );
     return cancel;
-  }, [applyConnections, begin, cancel, complete, listConnections, projectId]);
+  }, [applyConnections, begin, cancel, complete, listConnections, scopeKey]);
 
   useEffect(() => {
     skillOperationRef.current?.abort();
@@ -522,7 +677,10 @@ export function AiIntegrationDetailsView({
     setSkills(undefined);
     setSkillBusy(false);
     setSkillNotice(null);
-    void listSkills(projectId, controller.signal).then(
+    setSelectedSkillFileNames([]);
+    setSkillGitSource({ ...emptySkillGitSource });
+    setSkillGitPreview(null);
+    void listSkills(scopeKey, controller.signal).then(
       (response) => {
         if (skillOperationRef.current !== controller) return;
         skillOperationRef.current = null;
@@ -546,7 +704,7 @@ export function AiIntegrationDetailsView({
       skillOperationRef.current?.abort();
       skillOperationRef.current = null;
     };
-  }, [listSkills, projectId]);
+  }, [listSkills, scopeKey]);
 
   const selected =
     connections?.find((entry) => entry.id === selectedId) ?? null;
@@ -745,9 +903,9 @@ export function AiIntegrationDetailsView({
     if (editedId != null && editedRevision == null) return;
     void run("save", (signal) =>
       editedId == null
-        ? createConnection(projectId, requested, signal)
+        ? createConnection(scopeKey, requested, signal)
         : updateConnection(
-            projectId,
+            scopeKey,
             editedId,
             editedRevision as number,
             requested,
@@ -779,6 +937,7 @@ export function AiIntegrationDetailsView({
   };
 
   const canTestConnection = (connection: AiProviderConnection) =>
+    connectionTestEnabled &&
     !formEditable &&
     busy === null &&
     (connection.config.provider === "openai-compatible" ||
@@ -787,7 +946,7 @@ export function AiIntegrationDetailsView({
   const handleTest = (connection: AiProviderConnection) => {
     if (!canTestConnection(connection)) return;
     void run("test", (signal) =>
-      testConnection(projectId, connection.id, signal),
+      testConnection(scopeKey, connection.id, signal),
     ).then((response) => {
       if (!response) return;
       setBusy(null);
@@ -862,7 +1021,7 @@ export function AiIntegrationDetailsView({
     if (connection == null || busy !== null) return;
     setPendingDeletion(null);
     void run("connections", (signal) =>
-      deleteConnection(projectId, connection.id, connection.revision, signal),
+      deleteConnection(scopeKey, connection.id, connection.revision, signal),
     ).then((response) => {
       if (!response) return;
       applyConnections(response.connections);
@@ -903,6 +1062,7 @@ export function AiIntegrationDetailsView({
     const selectedFiles = Array.from(input.files ?? []);
     input.value = "";
     if (selectedFiles.length === 0 || skillBusy) return;
+    setSelectedSkillFileNames(selectedFiles.map((file) => file.name));
 
     const skillFiles = selectedFiles.filter(
       (file) => file.name.toLowerCase() === "skill.md",
@@ -946,7 +1106,7 @@ export function AiIntegrationDetailsView({
     }
 
     const created = await runSkillRequest((signal) =>
-      uploadSkill(projectId, upload, signal),
+      uploadSkill(scopeKey, upload, signal),
     );
     if (created) {
       setSkills((current) => [...(current ?? []), created]);
@@ -955,8 +1115,88 @@ export function AiIntegrationDetailsView({
 
   const handleSkillDelete = (skill: AiReviewerSkill) => {
     if (skillBusy) return;
+    setPendingSkillDeletion(skill);
+  };
+
+  const updateSkillGitSource = <Field extends keyof AiReviewerSkillGitSource>(
+    field: Field,
+    value: AiReviewerSkillGitSource[Field],
+  ) => {
+    setSkillGitSource((current) => ({
+      ...current,
+      [field]: value,
+      ...(field === "repository" ? { gitHostType: "auto" as const } : {}),
+    }));
+    setSkillGitPreview(null);
+    setSelectedSkillGitPaths([]);
+    setSkillNotice(null);
+  };
+
+  const handleSkillGitPreview = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (skillBusy || skills === undefined) return;
+    const preview = await runSkillRequest((signal) =>
+      previewSkillGitImport(scopeKey, skillGitSource, signal),
+    );
+    if (preview) {
+      setSkillGitPreview(preview);
+      setSelectedSkillGitPaths(preview.skills.map((skill) => skill.path));
+    }
+  };
+
+  const setAllGitSkillsSelected = (selected: boolean) => {
+    setSelectedSkillGitPaths(
+      selected && skillGitPreview != null
+        ? skillGitPreview.skills.map((skill) => skill.path)
+        : [],
+    );
+  };
+
+  const setGitSkillSelected = (path: string, selected: boolean) => {
+    setSelectedSkillGitPaths((current) =>
+      selected
+        ? current.includes(path)
+          ? current
+          : [...current, path]
+        : current.filter((selectedPath) => selectedPath !== path),
+    );
+  };
+
+  const confirmSkillGitImport = async () => {
+    const preview = skillGitPreview;
+    if (
+      preview == null ||
+      skillBusy ||
+      selectedSkillGitPaths.length === 0 ||
+      (skills?.length ?? 0) + selectedSkillGitPaths.length > skillCountLimit
+    ) {
+      return;
+    }
+    const created = await runSkillRequest((signal) =>
+      confirmSkillGitImportRequest(
+        scopeKey,
+        {
+          ...skillGitSource,
+          resolvedSha: preview.source.resolvedSha,
+          contentHash: preview.contentHash,
+          selectedPaths: selectedSkillGitPaths,
+        },
+        signal,
+      ),
+    );
+    if (created) {
+      setSkills((current) => [...(current ?? []), ...created.skills]);
+      setSkillGitPreview(null);
+      setSelectedSkillGitPaths([]);
+    }
+  };
+
+  const confirmSkillDelete = () => {
+    const skill = pendingSkillDeletion;
+    if (skill == null || skillBusy) return;
+    setPendingSkillDeletion(null);
     void runSkillRequest((signal) =>
-      deleteSkill(projectId, skill.id, signal),
+      deleteSkill(scopeKey, skill.id, signal),
     ).then((response) => {
       if (response) setSkills(response.skills);
     });
@@ -972,6 +1212,20 @@ export function AiIntegrationDetailsView({
   ]
     .filter((value): value is string => value != null)
     .join(" ");
+  const skillUploadDisabled = skills === undefined || skillBusy;
+  const skillGitPreviewDisabled =
+    skills === undefined ||
+    skillBusy ||
+    skillGitSource.repository.length === 0 ||
+    (repositoryNeedsHostType(skillGitSource.repository) &&
+      skillGitSource.gitHostType === "auto");
+  const selectedGitSkillCountExceedsLimit =
+    (skills?.length ?? 0) + selectedSkillGitPaths.length > skillCountLimit;
+  const skillGitConfirmDisabled =
+    skillBusy ||
+    selectedSkillGitPaths.length === 0 ||
+    selectedGitSkillCountExceedsLimit;
+  const skillGroups = storedSkillGroups(skills ?? []);
 
   const settingsModal = (
     <OLModal
@@ -988,509 +1242,1010 @@ export function AiIntegrationDetailsView({
         <OLModalTitle>{t("ai_reviewer_title")}</OLModalTitle>
       </OLModalHeader>
       <OLModalBody className="ai-reviewer-provider-settings-body">
-        <section
-          className="ai-reviewer-connections"
-          aria-labelledby="ai-reviewer-connections-heading"
+        <TabContainer
+          id="ai-reviewer-settings-tabs"
+          defaultActiveKey="connections"
+          mountOnEnter
+          transition={false}
         >
-          <h3 id="ai-reviewer-connections-heading" className="h5">
-            {t("ai_reviewer_connections")}
-          </h3>
-          {connections != null && connections.length > 0 && (
-            <div className="ai-reviewer-connection-table-scroll">
-              <OLTable
-                container={false}
-                className="ai-reviewer-connection-table"
-                aria-label={t("ai_reviewer_connections")}
+          <div className="ol-tabs">
+            <div className="nav-tabs-container">
+              <Nav
+                as="ul"
+                variant="tabs"
+                className="ai-reviewer-settings-tabs"
+                aria-label={t("ai_reviewer_title")}
               >
-                <colgroup>
-                  <col className="ai-reviewer-connection-name-column" />
-                  <col className="ai-reviewer-connection-credential-column" />
-                  <col className="ai-reviewer-connection-actions-column" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    {/* "Display name" is what the form calls the field the user
+                <Nav.Item as="li">
+                  <Nav.Link eventKey="connections">
+                    {t("ai_reviewer_connections")}
+                  </Nav.Link>
+                </Nav.Item>
+                <Nav.Item as="li">
+                  <Nav.Link eventKey="skills">
+                    {t("ai_reviewer_skills")}
+                  </Nav.Link>
+                </Nav.Item>
+              </Nav>
+            </div>
+            <TabContent className="ai-reviewer-settings-tab-content">
+              <TabPane
+                eventKey="connections"
+                className="ai-reviewer-settings-tab-pane"
+              >
+                <section
+                  className="ai-reviewer-connections"
+                  aria-labelledby="ai-reviewer-connections-heading"
+                >
+                  <h3 id="ai-reviewer-connections-heading" className="h5">
+                    {t("ai_reviewer_connections")}
+                  </h3>
+                  {connections != null && connections.length > 0 && (
+                    <div className="ai-reviewer-connection-table-scroll">
+                      <OLTable
+                        container={false}
+                        className="ai-reviewer-connection-table"
+                        aria-label={t("ai_reviewer_connections")}
+                      >
+                        <colgroup>
+                          <col className="ai-reviewer-connection-name-column" />
+                          <col className="ai-reviewer-connection-credential-column" />
+                          <col className="ai-reviewer-connection-actions-column" />
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            {/* "Display name" is what the form calls the field the user
                         types into. As a column heading it names the wrong thing:
                         this column identifies the destination. */}
-                    <th scope="col">{t("ai_reviewer_provider")}</th>
-                    <th scope="col">{t("ai_reviewer_provider_credential")}</th>
-                    <th scope="col">
-                      <span className="visually-hidden">{t("actions")}</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {connections.map((connection) => (
-                    <tr
-                      key={connection.id}
-                      className="ai-reviewer-connection-row"
-                      data-testid="ai-reviewer-connection-row"
-                    >
-                      {/* The name and its provider are one fact about one
+                            <th scope="col">{t("ai_reviewer_provider")}</th>
+                            <th scope="col">
+                              {t("ai_reviewer_provider_credential")}
+                            </th>
+                            <th scope="col">
+                              <span className="visually-hidden">
+                                {t("actions")}
+                              </span>
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {connections.map((connection) => (
+                            <tr
+                              key={connection.id}
+                              className="ai-reviewer-connection-row"
+                              data-testid="ai-reviewer-connection-row"
+                            >
+                              {/* The name and its provider are one fact about one
                           destination, so they share a column. Whether the
                           endpoint is loopback or not still drives policy, but
                           it means nothing to a reader: both are reached over
                           the network. */}
-                      <th
-                        scope="row"
-                        className="ai-reviewer-connection-name-cell"
+                              <th
+                                scope="row"
+                                className="ai-reviewer-connection-name-cell"
+                              >
+                                <span
+                                  className="ai-reviewer-connection-name"
+                                  title={connection.label}
+                                >
+                                  {connection.label}
+                                </span>
+                                <span className="ai-reviewer-connection-provider">
+                                  {providerTableLabel(
+                                    connection.config.provider,
+                                    t,
+                                  )}
+                                </span>
+                              </th>
+                              <td className="ai-reviewer-connection-credential-cell">
+                                <OLBadge
+                                  bg={
+                                    connection.config.credentialSet
+                                      ? "success"
+                                      : "secondary"
+                                  }
+                                >
+                                  {connection.config.credentialSet
+                                    ? t("ai_reviewer_provider_credential_set")
+                                    : t(
+                                        "ai_reviewer_provider_credential_not_set",
+                                      )}
+                                </OLBadge>
+                                {connection.config.credentialUpdatedAt && (
+                                  <time
+                                    dateTime={
+                                      connection.config.credentialUpdatedAt
+                                    }
+                                    title={
+                                      connection.config.credentialUpdatedAt
+                                    }
+                                  >
+                                    {t("ai_reviewer_last_updated", {
+                                      updatedAt: formatTimeBasedOnYear(
+                                        connection.config.credentialUpdatedAt,
+                                      ),
+                                    })}
+                                  </time>
+                                )}
+                              </td>
+                              <td className="ai-reviewer-connection-actions-cell">
+                                <OLButtonGroup aria-label={t("actions")}>
+                                  <OLIconButton
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    icon="network_check"
+                                    accessibilityLabel={t(
+                                      "ai_reviewer_connection_test_named",
+                                      { connection: connection.label },
+                                    )}
+                                    disabled={!canTestConnection(connection)}
+                                    onClick={() => handleTest(connection)}
+                                  />
+                                  <OLIconButton
+                                    type="button"
+                                    size="sm"
+                                    variant="secondary"
+                                    icon="edit"
+                                    accessibilityLabel={t(
+                                      "ai_reviewer_connection_edit_named",
+                                      { connection: connection.label },
+                                    )}
+                                    disabled={busy !== null}
+                                    onClick={() =>
+                                      requestNavigation({
+                                        kind: "edit",
+                                        connectionId: connection.id,
+                                      })
+                                    }
+                                  />
+                                  <OLIconButton
+                                    type="button"
+                                    size="sm"
+                                    variant="danger"
+                                    icon="delete"
+                                    accessibilityLabel={t(
+                                      "ai_reviewer_connection_delete_named",
+                                      { connection: connection.label },
+                                    )}
+                                    disabled={busy !== null}
+                                    onClick={() => handleDelete(connection)}
+                                  />
+                                </OLButtonGroup>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </OLTable>
+                    </div>
+                  )}
+                  {connections != null && (
+                    <div className="ai-reviewer-connection-footer">
+                      <span>
+                        {t("ai_reviewer_connection_count", {
+                          count: connections.length,
+                          limit: connectionLimit,
+                        })}
+                      </span>
+                      <OLButton
+                        type="button"
+                        variant="link"
+                        className="btn-inline-link ai-reviewer-connection-add"
+                        disabled={busy !== null || connectionLimitReached}
+                        aria-describedby={
+                          connectionLimitReached
+                            ? "ai-reviewer-connection-limit-help"
+                            : undefined
+                        }
+                        onClick={() => requestNavigation({ kind: "add" })}
                       >
-                        <span
-                          className="ai-reviewer-connection-name"
-                          title={connection.label}
-                        >
-                          {connection.label}
-                        </span>
-                        <span className="ai-reviewer-connection-provider">
-                          {providerTableLabel(connection.config.provider, t)}
-                        </span>
-                      </th>
-                      <td className="ai-reviewer-connection-credential-cell">
-                        <OLBadge
-                          bg={
-                            connection.config.credentialSet
-                              ? "success"
-                              : "secondary"
-                          }
-                        >
-                          {connection.config.credentialSet
-                            ? t("ai_reviewer_provider_credential_set")
-                            : t("ai_reviewer_provider_credential_not_set")}
-                        </OLBadge>
-                        {connection.config.credentialUpdatedAt && (
-                          <time
-                            dateTime={connection.config.credentialUpdatedAt}
-                            title={connection.config.credentialUpdatedAt}
-                          >
-                            {t("ai_reviewer_last_updated", {
-                              updatedAt: formatTimeBasedOnYear(
-                                connection.config.credentialUpdatedAt,
-                              ),
-                            })}
-                          </time>
-                        )}
-                      </td>
-                      <td className="ai-reviewer-connection-actions-cell">
-                        <OLButtonGroup aria-label={t("actions")}>
-                          <OLIconButton
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            icon="network_check"
-                            accessibilityLabel={t(
-                              "ai_reviewer_connection_test_named",
-                              { connection: connection.label },
-                            )}
-                            disabled={!canTestConnection(connection)}
-                            onClick={() => handleTest(connection)}
-                          />
-                          <OLIconButton
-                            type="button"
-                            size="sm"
-                            variant="secondary"
-                            icon="edit"
-                            accessibilityLabel={t(
-                              "ai_reviewer_connection_edit_named",
-                              { connection: connection.label },
-                            )}
-                            disabled={busy !== null}
-                            onClick={() =>
-                              requestNavigation({
-                                kind: "edit",
-                                connectionId: connection.id,
-                              })
-                            }
-                          />
-                          <OLIconButton
-                            type="button"
-                            size="sm"
-                            variant="danger"
-                            icon="delete"
-                            accessibilityLabel={t(
-                              "ai_reviewer_connection_delete_named",
-                              { connection: connection.label },
-                            )}
-                            disabled={busy !== null}
-                            onClick={() => handleDelete(connection)}
-                          />
-                        </OLButtonGroup>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </OLTable>
-            </div>
-          )}
-          {connections != null && (
-            <div className="ai-reviewer-connection-footer">
-              <span>
-                {t("ai_reviewer_connection_count", {
-                  count: connections.length,
-                  limit: connectionLimit,
-                })}
-              </span>
-              <OLButton
-                type="button"
-                variant="link"
-                className="btn-inline-link ai-reviewer-connection-add"
-                disabled={busy !== null || connectionLimitReached}
-                aria-describedby={
-                  connectionLimitReached
-                    ? "ai-reviewer-connection-limit-help"
-                    : undefined
-                }
-                onClick={() => requestNavigation({ kind: "add" })}
-              >
-                {t("ai_reviewer_connection_add")}
-              </OLButton>
-            </div>
-          )}
-          {connectionLimitReached && (
-            <p
-              id="ai-reviewer-connection-limit-help"
-              className="ai-reviewer-provider-settings-hint"
-            >
-              {t("ai_reviewer_connection_limit_reached")}
-            </p>
-          )}
-          {!formEditable && notice && (
-            <OLNotification
-              type={notice.type}
-              content={noticeContent(notice, t)}
-            />
-          )}
-        </section>
-
-        {formEditable && (
-          <OLCard className="ai-reviewer-provider-form-card">
-            <OLForm
-              onSubmit={handleSave}
-              className="ai-reviewer-provider-settings-form"
-            >
-              <h3 className="h5 ai-reviewer-provider-form-heading">
-                {formMode === "create"
-                  ? t("ai_reviewer_connection_add")
-                  : t("ai_reviewer_connection_edit_heading", {
-                      connection: selected?.label ?? "",
-                    })}
-              </h3>
-              <p
-                id="ai-reviewer-connection-form-help"
-                className="ai-reviewer-provider-settings-state"
-              >
-                {formMode === "create"
-                  ? t("ai_reviewer_connection_create_help")
-                  : t("ai_reviewer_connection_edit_help")}
-              </p>
-              <OLFormGroup
-                controlId="ai-reviewer-provider"
-                className="ai-reviewer-provider-settings-field"
-              >
-                <OLFormLabel>{t("ai_reviewer_provider")}</OLFormLabel>
-                <OLFormSelect
-                  value={draft.provider}
-                  onChange={(event) => updateProvider(event.target.value)}
-                  disabled={saved === undefined || formMode !== "create"}
-                  aria-describedby={providerHelp || undefined}
-                  className="ai-reviewer-provider-settings-control"
-                >
-                  {providers.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {providerLabel(provider, t)}
-                    </option>
-                  ))}
-                </OLFormSelect>
-                {draft.provider === "azure" && (
-                  <p
-                    id="ai-reviewer-azure-provider-help"
-                    className="ai-reviewer-provider-advanced-help mt-1 mb-0"
-                  >
-                    {t("ai_reviewer_provider_azure_help")}
-                  </p>
-                )}
-              </OLFormGroup>
-              {draft.provider === "azure" && (
-                <OLFormGroup
-                  controlId="ai-reviewer-requestStyle"
-                  className="ai-reviewer-provider-settings-field mt-3"
-                >
-                  <OLFormLabel>
-                    {t("ai_reviewer_provider_azure_request_style")}
-                  </OLFormLabel>
-                  <OLFormSelect
-                    value={draft.requestStyle}
-                    onChange={(event) =>
-                      updateAzureRequestStyle(event.target.value)
-                    }
-                    disabled={saved === undefined || !formEditable}
-                    className="ai-reviewer-provider-settings-control"
-                  >
-                    <option value="v1">
-                      {t("ai_reviewer_provider_azure_request_style_v1")}
-                    </option>
-                    <option value="deployment">
-                      {t("ai_reviewer_provider_azure_request_style_deployment")}
-                    </option>
-                  </OLFormSelect>
-                </OLFormGroup>
-              )}
-              {fields
-                .filter(
-                  (field) =>
-                    (field !== "baseUrl" ||
-                      draft.provider === "openai-compatible" ||
-                      draft.provider === "azure") &&
-                    (field !== "apiVersion" ||
-                      (draft.provider === "azure" &&
-                        draft.requestStyle === "deployment")) &&
-                    (field !== "deployments" || draft.provider === "azure"),
-                )
-                .map((field) => (
-                  <OLFormGroup
-                    key={field}
-                    controlId={`ai-reviewer-${field}`}
-                    className="ai-reviewer-provider-settings-field mt-3"
-                  >
-                    <OLFormLabel>
-                      {field === "baseUrl" && draft.provider === "azure"
-                        ? t("ai_reviewer_provider_azure_endpoint")
-                        : fieldLabel(field, t)}
-                      {field === "apiVersion" && (
-                        <>
-                          {" "}
-                          <span className="fw-normal">({t("optional")})</span>
-                        </>
-                      )}
-                    </OLFormLabel>
-                    <OLFormControl
-                      as={field === "deployments" ? "textarea" : undefined}
-                      type={field === "credential" ? "password" : "text"}
-                      value={draft[field]}
-                      onChange={(event) =>
-                        updateDraft(field, event.target.value)
-                      }
-                      disabled={saved === undefined || !formEditable}
-                      autoComplete={
-                        field === "credential" ? "new-password" : "off"
-                      }
-                      placeholder={
-                        field === "baseUrl" &&
-                        draft.provider === "openai-compatible"
-                          ? "http://127.0.0.1:11434/v1"
-                          : undefined
-                      }
-                      aria-describedby={
-                        field === "apiVersion"
-                          ? "ai-reviewer-apiVersion-help"
-                          : field === "baseUrl" &&
-                              draft.provider === "openai-compatible"
-                            ? `ai-reviewer-baseUrl-help${
-                                openAiBaseUrlHasCompletionPath
-                                  ? " ai-reviewer-baseUrl-error"
-                                  : ""
-                              }`
-                            : field === "baseUrl" && draft.provider === "azure"
-                              ? "ai-reviewer-azure-endpoint-help"
-                              : undefined
-                      }
-                      aria-invalid={
-                        field === "baseUrl" && openAiBaseUrlHasCompletionPath
-                          ? true
-                          : undefined
-                      }
-                      required={field === "credential" && credentialRequired}
-                      aria-required={
-                        field === "credential" ? credentialRequired : undefined
-                      }
-                      className="ai-reviewer-provider-settings-control"
+                        {t("ai_reviewer_connection_add")}
+                      </OLButton>
+                    </div>
+                  )}
+                  {connectionLimitReached && (
+                    <p
+                      id="ai-reviewer-connection-limit-help"
+                      className="ai-reviewer-provider-settings-hint"
+                    >
+                      {t("ai_reviewer_connection_limit_reached")}
+                    </p>
+                  )}
+                  {!formEditable && notice && (
+                    <OLNotification
+                      type={notice.type}
+                      content={noticeContent(notice, t)}
                     />
-                    {field === "apiVersion" && (
+                  )}
+                </section>
+
+                {formEditable && (
+                  <OLCard className="ai-reviewer-provider-form-card">
+                    <OLForm
+                      onSubmit={handleSave}
+                      className="ai-reviewer-provider-settings-form"
+                    >
+                      <h3 className="h5 ai-reviewer-provider-form-heading">
+                        {formMode === "create"
+                          ? t("ai_reviewer_connection_add")
+                          : t("ai_reviewer_connection_edit_heading", {
+                              connection: selected?.label ?? "",
+                            })}
+                      </h3>
                       <p
-                        id="ai-reviewer-apiVersion-help"
-                        className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                        id="ai-reviewer-connection-form-help"
+                        className="ai-reviewer-provider-settings-state"
                       >
-                        {t("ai_reviewer_provider_azure_api_version_help")}
+                        {formMode === "create"
+                          ? t("ai_reviewer_connection_create_help")
+                          : t("ai_reviewer_connection_edit_help")}
                       </p>
-                    )}
-                    {field === "baseUrl" &&
-                      draft.provider === "openai-compatible" && (
-                        <>
+                      <OLFormGroup
+                        controlId="ai-reviewer-provider"
+                        className="ai-reviewer-provider-settings-field"
+                      >
+                        <OLFormLabel>{t("ai_reviewer_provider")}</OLFormLabel>
+                        <OLFormSelect
+                          value={draft.provider}
+                          onChange={(event) =>
+                            updateProvider(event.target.value)
+                          }
+                          disabled={
+                            saved === undefined || formMode !== "create"
+                          }
+                          aria-describedby={providerHelp || undefined}
+                          className="ai-reviewer-provider-settings-control"
+                        >
+                          {providers.map((provider) => (
+                            <option key={provider} value={provider}>
+                              {providerLabel(provider, t)}
+                            </option>
+                          ))}
+                        </OLFormSelect>
+                        {draft.provider === "azure" && (
                           <p
-                            id="ai-reviewer-baseUrl-help"
+                            id="ai-reviewer-azure-provider-help"
                             className="ai-reviewer-provider-advanced-help mt-1 mb-0"
                           >
-                            {t("ai_reviewer_provider_base_url_help")}
+                            {t("ai_reviewer_provider_azure_help")}
                           </p>
-                          {openAiBaseUrlHasCompletionPath && (
+                        )}
+                      </OLFormGroup>
+                      {draft.provider === "azure" && (
+                        <OLFormGroup
+                          controlId="ai-reviewer-requestStyle"
+                          className="ai-reviewer-provider-settings-field mt-3"
+                        >
+                          <OLFormLabel>
+                            {t("ai_reviewer_provider_azure_request_style")}
+                          </OLFormLabel>
+                          <OLFormSelect
+                            value={draft.requestStyle}
+                            onChange={(event) =>
+                              updateAzureRequestStyle(event.target.value)
+                            }
+                            disabled={saved === undefined || !formEditable}
+                            className="ai-reviewer-provider-settings-control"
+                          >
+                            <option value="v1">
+                              {t("ai_reviewer_provider_azure_request_style_v1")}
+                            </option>
+                            <option value="deployment">
+                              {t(
+                                "ai_reviewer_provider_azure_request_style_deployment",
+                              )}
+                            </option>
+                          </OLFormSelect>
+                        </OLFormGroup>
+                      )}
+                      {fields
+                        .filter(
+                          (field) =>
+                            (field !== "baseUrl" ||
+                              draft.provider === "openai-compatible" ||
+                              draft.provider === "azure") &&
+                            (field !== "apiVersion" ||
+                              (draft.provider === "azure" &&
+                                draft.requestStyle === "deployment")) &&
+                            (field !== "deployments" ||
+                              draft.provider === "azure"),
+                        )
+                        .map((field) => (
+                          <OLFormGroup
+                            key={field}
+                            controlId={`ai-reviewer-${field}`}
+                            className="ai-reviewer-provider-settings-field mt-3"
+                          >
+                            <OLFormLabel>
+                              {field === "baseUrl" && draft.provider === "azure"
+                                ? t("ai_reviewer_provider_azure_endpoint")
+                                : fieldLabel(field, t)}
+                              {field === "apiVersion" && (
+                                <>
+                                  {" "}
+                                  <span className="fw-normal">
+                                    ({t("optional")})
+                                  </span>
+                                </>
+                              )}
+                            </OLFormLabel>
+                            <OLFormControl
+                              as={
+                                field === "deployments" ? "textarea" : undefined
+                              }
+                              type={
+                                field === "credential" ? "password" : "text"
+                              }
+                              value={draft[field]}
+                              onChange={(event) =>
+                                updateDraft(field, event.target.value)
+                              }
+                              disabled={saved === undefined || !formEditable}
+                              autoComplete={
+                                field === "credential" ? "new-password" : "off"
+                              }
+                              placeholder={
+                                field === "baseUrl" &&
+                                draft.provider === "openai-compatible"
+                                  ? "http://127.0.0.1:11434/v1"
+                                  : undefined
+                              }
+                              aria-describedby={
+                                field === "apiVersion"
+                                  ? "ai-reviewer-apiVersion-help"
+                                  : field === "baseUrl" &&
+                                      draft.provider === "openai-compatible"
+                                    ? `ai-reviewer-baseUrl-help${
+                                        openAiBaseUrlHasCompletionPath
+                                          ? " ai-reviewer-baseUrl-error"
+                                          : ""
+                                      }`
+                                    : field === "baseUrl" &&
+                                        draft.provider === "azure"
+                                      ? "ai-reviewer-azure-endpoint-help"
+                                      : undefined
+                              }
+                              aria-invalid={
+                                field === "baseUrl" &&
+                                openAiBaseUrlHasCompletionPath
+                                  ? true
+                                  : undefined
+                              }
+                              required={
+                                field === "credential" && credentialRequired
+                              }
+                              aria-required={
+                                field === "credential"
+                                  ? credentialRequired
+                                  : undefined
+                              }
+                              className="ai-reviewer-provider-settings-control"
+                            />
+                            {field === "apiVersion" && (
+                              <p
+                                id="ai-reviewer-apiVersion-help"
+                                className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                              >
+                                {t(
+                                  "ai_reviewer_provider_azure_api_version_help",
+                                )}
+                              </p>
+                            )}
+                            {field === "baseUrl" &&
+                              draft.provider === "openai-compatible" && (
+                                <>
+                                  <p
+                                    id="ai-reviewer-baseUrl-help"
+                                    className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                                  >
+                                    {t("ai_reviewer_provider_base_url_help")}
+                                  </p>
+                                  {openAiBaseUrlHasCompletionPath && (
+                                    <p
+                                      id="ai-reviewer-baseUrl-error"
+                                      className="form-text text-danger mt-1 mb-0"
+                                      role="alert"
+                                    >
+                                      {t(
+                                        "ai_reviewer_provider_base_url_chat_completions_error",
+                                      )}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            {field === "baseUrl" &&
+                              draft.provider === "azure" && (
+                                <p
+                                  id="ai-reviewer-azure-endpoint-help"
+                                  className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                                >
+                                  {t(
+                                    "ai_reviewer_provider_azure_endpoint_help",
+                                  )}
+                                </p>
+                              )}
+                          </OLFormGroup>
+                        ))}
+                      {(draft.provider === "openai-compatible" ||
+                        draft.provider === "azure") && (
+                        <p
+                          className="ai-reviewer-provider-request-preview mt-3 mb-0"
+                          aria-live="polite"
+                          aria-atomic="true"
+                        >
+                          <span>{t("ai_reviewer_provider_request_url")}</span>
+                          {requestUrls == null ? (
+                            <span className="ai-reviewer-provider-request-url">
+                              {t(
+                                "ai_reviewer_provider_request_url_unavailable",
+                              )}
+                            </span>
+                          ) : (
+                            requestUrls.map((requestUrl) => (
+                              <span
+                                key={requestUrl}
+                                className="ai-reviewer-provider-request-url"
+                                title={requestUrl}
+                              >
+                                {requestUrl}
+                              </span>
+                            ))
+                          )}
+                        </p>
+                      )}
+                      <details className="ai-reviewer-provider-advanced mt-3">
+                        <summary className="ai-reviewer-provider-advanced-summary">
+                          {t("ai_reviewer_provider_advanced_settings")}
+                        </summary>
+                        <div className="ai-reviewer-provider-advanced-content mt-2">
+                          <OLFormGroup
+                            controlId="ai-reviewer-contextLengthOverride"
+                            className="ai-reviewer-provider-settings-field"
+                          >
+                            <OLFormLabel>
+                              {fieldLabel("contextLengthOverride", t)}
+                            </OLFormLabel>
+                            <OLFormControl
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={draft.contextLengthOverride}
+                              onChange={(event) =>
+                                updateDraft(
+                                  "contextLengthOverride",
+                                  event.target.value,
+                                )
+                              }
+                              disabled={saved === undefined || !formEditable}
+                              autoComplete="off"
+                              aria-describedby="ai-reviewer-contextLengthOverride-help"
+                              className="ai-reviewer-provider-settings-control"
+                            />
                             <p
-                              id="ai-reviewer-baseUrl-error"
-                              className="form-text text-danger mt-1 mb-0"
-                              role="alert"
+                              id="ai-reviewer-contextLengthOverride-help"
+                              className="ai-reviewer-provider-advanced-help mt-1 mb-0"
                             >
                               {t(
-                                "ai_reviewer_provider_base_url_chat_completions_error",
+                                "ai_reviewer_provider_context_length_override_help",
                               )}
                             </p>
-                          )}
-                        </>
+                          </OLFormGroup>
+                        </div>
+                      </details>
+                      {notice && (
+                        <OLNotification
+                          type={notice.type}
+                          content={noticeContent(notice, t)}
+                        />
                       )}
-                    {field === "baseUrl" && draft.provider === "azure" && (
-                      <p
-                        id="ai-reviewer-azure-endpoint-help"
-                        className="ai-reviewer-provider-advanced-help mt-1 mb-0"
-                      >
-                        {t("ai_reviewer_provider_azure_endpoint_help")}
-                      </p>
-                    )}
-                  </OLFormGroup>
-                ))}
-              {(draft.provider === "openai-compatible" ||
-                draft.provider === "azure") && (
-                <p
-                  className="ai-reviewer-provider-request-preview mt-3 mb-0"
-                  aria-live="polite"
-                  aria-atomic="true"
-                >
-                  <span>{t("ai_reviewer_provider_request_url")}</span>
-                  {requestUrls == null ? (
-                    <span className="ai-reviewer-provider-request-url">
-                      {t("ai_reviewer_provider_request_url_unavailable")}
-                    </span>
-                  ) : (
-                    requestUrls.map((requestUrl) => (
-                      <span
-                        key={requestUrl}
-                        className="ai-reviewer-provider-request-url"
-                        title={requestUrl}
-                      >
-                        {requestUrl}
-                      </span>
-                    ))
-                  )}
-                </p>
-              )}
-              <details className="ai-reviewer-provider-advanced mt-3">
-                <summary className="ai-reviewer-provider-advanced-summary">
-                  {t("ai_reviewer_provider_advanced_settings")}
-                </summary>
-                <div className="ai-reviewer-provider-advanced-content mt-2">
-                  <OLFormGroup
-                    controlId="ai-reviewer-contextLengthOverride"
-                    className="ai-reviewer-provider-settings-field"
-                  >
-                    <OLFormLabel>
-                      {fieldLabel("contextLengthOverride", t)}
-                    </OLFormLabel>
-                    <OLFormControl
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={draft.contextLengthOverride}
-                      onChange={(event) =>
-                        updateDraft("contextLengthOverride", event.target.value)
-                      }
-                      disabled={saved === undefined || !formEditable}
-                      autoComplete="off"
-                      aria-describedby="ai-reviewer-contextLengthOverride-help"
-                      className="ai-reviewer-provider-settings-control"
-                    />
-                    <p
-                      id="ai-reviewer-contextLengthOverride-help"
-                      className="ai-reviewer-provider-advanced-help mt-1 mb-0"
-                    >
-                      {t("ai_reviewer_provider_context_length_override_help")}
-                    </p>
-                  </OLFormGroup>
-                </div>
-              </details>
-              {notice && (
-                <OLNotification
-                  type={notice.type}
-                  content={noticeContent(notice, t)}
-                />
-              )}
-              <div className="ai-reviewer-provider-form-actions">
-                {busy === null && (
-                  <span
-                    className="ai-reviewer-provider-settings-hint"
-                    data-testid="ai-reviewer-unsaved-hint"
-                  >
-                    {t("ai_reviewer_provider_save_before_checking")}
-                  </span>
+                      <div className="ai-reviewer-provider-form-actions">
+                        {busy === null && (
+                          <span
+                            className="ai-reviewer-provider-settings-hint"
+                            data-testid="ai-reviewer-unsaved-hint"
+                          >
+                            {t("ai_reviewer_provider_save_before_checking")}
+                          </span>
+                        )}
+                        <OLButtonGroup>
+                          <OLButton
+                            type="button"
+                            variant="secondary"
+                            onClick={() =>
+                              requestNavigation({ kind: "cancel" })
+                            }
+                          >
+                            {t("cancel")}
+                          </OLButton>
+                          <OLButton
+                            type="submit"
+                            variant="primary"
+                            disabled={!canSave}
+                          >
+                            {t("ai_reviewer_provider_save")}
+                          </OLButton>
+                        </OLButtonGroup>
+                      </div>
+                    </OLForm>
+                  </OLCard>
                 )}
-                <OLButtonGroup>
-                  <OLButton
-                    type="button"
-                    variant="secondary"
-                    onClick={() => requestNavigation({ kind: "cancel" })}
-                  >
-                    {t("cancel")}
-                  </OLButton>
-                  <OLButton type="submit" variant="primary" disabled={!canSave}>
-                    {t("ai_reviewer_provider_save")}
-                  </OLButton>
-                </OLButtonGroup>
-              </div>
-            </OLForm>
-          </OLCard>
-        )}
+              </TabPane>
 
-        <section
-          className="ai-reviewer-skills"
-          aria-labelledby="ai-reviewer-skills-heading"
-        >
-          <h3 id="ai-reviewer-skills-heading" className="h5">
-            {t("ai_reviewer_skills", "Skills")}
-          </h3>
-          {skills != null && skills.length > 0 && (
-            <ul
-              className="ai-reviewer-skill-list"
-              aria-label={t("ai_reviewer_skills", "Skills")}
-            >
-              {skills.map((skill) => (
-                <li
-                  key={skill.id}
-                  className="ai-reviewer-skill-row"
-                  data-testid="ai-reviewer-skill-row"
+              <TabPane
+                eventKey="skills"
+                className="ai-reviewer-settings-tab-pane"
+              >
+                <section
+                  className="ai-reviewer-skills"
+                  aria-labelledby="ai-reviewer-skills-heading"
                 >
-                  <div className="ai-reviewer-skill-summary">
-                    <strong>{skill.name}</strong>
-                    <p className="mb-0">{skill.description}</p>
-                  </div>
-                  <OLButton
-                    type="button"
-                    variant="link"
-                    className="btn-inline-link ai-reviewer-skill-delete"
-                    disabled={skillBusy}
-                    aria-label={`${t("delete")} ${skill.name}`}
-                    onClick={() => handleSkillDelete(skill)}
+                  <h3 id="ai-reviewer-skills-heading" className="h5">
+                    {t("ai_reviewer_skills")}
+                  </h3>
+                  <p className="ai-reviewer-skills-description">
+                    {t("ai_reviewer_skills_description")}
+                  </p>
+                  {skills != null && skills.length === 0 && (
+                    <p className="ai-reviewer-skills-empty">
+                      {t("ai_reviewer_skills_empty")}
+                    </p>
+                  )}
+                  {skills != null && skills.length > 0 && (
+                    <ul
+                      className="ai-reviewer-skill-group-list"
+                      aria-label={t("ai_reviewer_skills")}
+                    >
+                      {skillGroups.map((group) => (
+                        <li
+                          key={group.key}
+                          className="ai-reviewer-skill-group-item"
+                        >
+                          <details
+                            className="ai-reviewer-skill-group"
+                            data-testid="ai-reviewer-skill-group"
+                          >
+                            <summary className="ai-reviewer-skill-group-summary">
+                              <span className="ai-reviewer-skill-group-header">
+                                <span className="ai-reviewer-skill-group-identity">
+                                  <strong>{group.name}</strong>
+                                  <span className="ai-reviewer-skill-group-source">
+                                    {group.kind === "local"
+                                      ? "Uploaded from local files"
+                                      : `${group.provenance.host} · ${group.provenance.repository}`}
+                                  </span>
+                                </span>
+                                <span className="ai-reviewer-skill-group-metadata">
+                                  {group.kind === "git" && (
+                                    <>
+                                      <span>
+                                        {t(
+                                          "ai_reviewer_skill_git_preview_owner",
+                                        )}
+                                        :{" "}
+                                        {storedSkillGroupMetadata(
+                                          group.ownerNames,
+                                          t("ai_reviewer_skill_git_unknown"),
+                                        )}
+                                      </span>
+                                      <span>
+                                        {t(
+                                          "ai_reviewer_skill_git_preview_version",
+                                        )}
+                                        :{" "}
+                                        {storedSkillGroupMetadata(
+                                          group.pluginVersions,
+                                          t("ai_reviewer_skill_git_unknown"),
+                                        )}
+                                      </span>
+                                      <span>
+                                        {t(
+                                          "ai_reviewer_skill_git_preview_license",
+                                        )}
+                                        :{" "}
+                                        {storedSkillGroupMetadata(
+                                          group.licenses,
+                                          t("ai_reviewer_skill_git_unknown"),
+                                        )}
+                                      </span>
+                                    </>
+                                  )}
+                                  <span>
+                                    {storedSkillCount(group.skills.length)}
+                                  </span>
+                                </span>
+                              </span>
+                            </summary>
+                            <ul className="ai-reviewer-skill-list">
+                              {group.skills.map((skill) => (
+                                <li
+                                  key={skill.id}
+                                  className="ai-reviewer-skill-item"
+                                >
+                                  <details
+                                    className="ai-reviewer-skill-row"
+                                    data-testid="ai-reviewer-skill-row"
+                                  >
+                                    <summary className="ai-reviewer-skill-summary">
+                                      <strong>{skill.name}</strong>
+                                    </summary>
+                                    <div className="ai-reviewer-skill-detail">
+                                      <p className="mb-0">
+                                        {skill.description}
+                                      </p>
+                                      <p className="ai-reviewer-skill-metadata mb-0">
+                                        {t("ai_reviewer_skill_stored_bytes", {
+                                          count: skill.sizeBytes,
+                                          size: String(skill.sizeBytes),
+                                        })}
+                                      </p>
+                                      <p className="ai-reviewer-skill-metadata mb-0">
+                                        {t(
+                                          "ai_reviewer_skill_git_preview_references",
+                                        )}
+                                        : {skill.referenceCount}
+                                      </p>
+                                      <OLButton
+                                        type="button"
+                                        variant="danger"
+                                        className="ai-reviewer-skill-delete"
+                                        disabled={skillBusy}
+                                        aria-label={`${t("delete")} ${skill.name}`}
+                                        onClick={() => handleSkillDelete(skill)}
+                                      >
+                                        {t("delete")}
+                                      </OLButton>
+                                    </div>
+                                  </details>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <section
+                    className="ai-reviewer-skill-git-import"
+                    aria-labelledby="ai-reviewer-skill-git-import-heading"
                   >
-                    {t("delete")}
-                  </OLButton>
-                </li>
-              ))}
-            </ul>
-          )}
-          <OLFormGroup
-            controlId="ai-reviewer-skill-files"
-            className="ai-reviewer-skill-upload mt-2"
-          >
-            <OLFormLabel>
-              {t(
-                "ai_reviewer_skill_upload_label",
-                "Upload SKILL.md and optional reference Markdown files",
-              )}
-            </OLFormLabel>
-            <OLFormControl
-              type="file"
-              accept=".md,text/markdown"
-              multiple
-              disabled={skills === undefined || skillBusy}
-              onChange={handleSkillUpload}
-            />
-          </OLFormGroup>
-          {skillNotice && <OLNotification type="error" content={skillNotice} />}
-        </section>
+                    <h4
+                      id="ai-reviewer-skill-git-import-heading"
+                      className="h6"
+                    >
+                      {t("ai_reviewer_skill_git_import_title")}
+                    </h4>
+                    <p className="ai-reviewer-skill-git-import-help">
+                      {t("ai_reviewer_skill_git_import_help")}
+                    </p>
+                    <OLForm onSubmit={handleSkillGitPreview}>
+                      <OLFormGroup controlId="ai-reviewer-skill-git-repository">
+                        <OLFormLabel>
+                          {t("ai_reviewer_skill_git_repository")}
+                        </OLFormLabel>
+                        <OLFormControl
+                          type="text"
+                          value={skillGitSource.repository}
+                          disabled={skillBusy}
+                          placeholder={t(
+                            "ai_reviewer_skill_git_repository_placeholder",
+                          )}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            updateSkillGitSource(
+                              "repository",
+                              event.currentTarget.value,
+                            )
+                          }
+                        />
+                        <OLFormText>
+                          {t("ai_reviewer_skill_git_repository_help")}
+                        </OLFormText>
+                      </OLFormGroup>
+                      <div className="ai-reviewer-skill-git-fields">
+                        {repositoryNeedsHostType(skillGitSource.repository) && (
+                          <OLFormGroup controlId="ai-reviewer-skill-git-host-type">
+                            <OLFormLabel>
+                              {t("ai_reviewer_skill_git_host_type")}
+                            </OLFormLabel>
+                            <OLFormSelect
+                              value={skillGitSource.gitHostType}
+                              disabled={skillBusy}
+                              onChange={(event) =>
+                                updateSkillGitSource(
+                                  "gitHostType",
+                                  event.currentTarget
+                                    .value as AiReviewerSkillGitHostType,
+                                )
+                              }
+                            >
+                              <option value="auto">
+                                {t("ai_reviewer_skill_git_host_auto")}
+                              </option>
+                              <option value="github">
+                                {t("ai_reviewer_skill_git_host_github")}
+                              </option>
+                              <option value="gitlab">
+                                {t("ai_reviewer_skill_git_host_gitlab")}
+                              </option>
+                            </OLFormSelect>
+                          </OLFormGroup>
+                        )}
+                        <OLFormGroup controlId="ai-reviewer-skill-git-ref">
+                          <OLFormLabel>
+                            {t("ai_reviewer_skill_git_ref")}
+                          </OLFormLabel>
+                          <OLFormControl
+                            type="text"
+                            value={skillGitSource.ref}
+                            disabled={skillBusy}
+                            placeholder={t(
+                              "ai_reviewer_skill_git_ref_placeholder",
+                            )}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              updateSkillGitSource(
+                                "ref",
+                                event.currentTarget.value,
+                              )
+                            }
+                          />
+                          <OLFormText>
+                            {t("ai_reviewer_skill_git_ref_help")}
+                          </OLFormText>
+                        </OLFormGroup>
+                      </div>
+                      <div className="ai-reviewer-skill-git-actions">
+                        <OLButton
+                          type="submit"
+                          variant="secondary"
+                          disabled={skillGitPreviewDisabled}
+                        >
+                          {t("ai_reviewer_skill_git_preview")}
+                        </OLButton>
+                      </div>
+                    </OLForm>
+                    {skillGitPreview && (
+                      <div
+                        className="ai-reviewer-skill-git-preview"
+                        role="region"
+                        aria-label={t("ai_reviewer_skill_git_preview_heading")}
+                      >
+                        <h5 className="h6">
+                          {t("ai_reviewer_skill_git_preview_heading")}
+                        </h5>
+                        <p className="ai-reviewer-skill-git-source">
+                          {t("ai_reviewer_skill_git_understood_host", {
+                            service: t(
+                              skillGitPreview.source.service === "github"
+                                ? "ai_reviewer_skill_git_host_github"
+                                : "ai_reviewer_skill_git_host_gitlab",
+                            ),
+                            host: skillGitPreview.source.host,
+                          })}
+                        </p>
+                        <dl className="ai-reviewer-skill-git-preview-details">
+                          <dt>{t("ai_reviewer_skill_git_preview_sha")}</dt>
+                          <dd>
+                            <code>{skillGitPreview.source.resolvedSha}</code>
+                          </dd>
+                        </dl>
+                        {skillGitPreview.manifestFound ? (
+                          <div className="ai-reviewer-skill-git-plugins">
+                            {skillGitPreview.plugins.map((plugin) => (
+                              <section key={plugin.name}>
+                                <h6>{plugin.name}</h6>
+                                <dl className="ai-reviewer-skill-git-preview-details">
+                                  <dt>
+                                    {t("ai_reviewer_skill_git_preview_version")}
+                                  </dt>
+                                  <dd>
+                                    {plugin.version ??
+                                      t("ai_reviewer_skill_git_unknown")}
+                                  </dd>
+                                  <dt>
+                                    {t("ai_reviewer_skill_git_preview_license")}
+                                  </dt>
+                                  <dd>
+                                    {plugin.license ??
+                                      t("ai_reviewer_skill_git_unknown")}
+                                  </dd>
+                                  <dt>
+                                    {t("ai_reviewer_skill_git_preview_owner")}
+                                  </dt>
+                                  <dd>
+                                    {plugin.owner == null
+                                      ? t("ai_reviewer_skill_git_unknown")
+                                      : plugin.owner.url == null
+                                        ? plugin.owner.name
+                                        : `${plugin.owner.name} (${plugin.owner.url})`}
+                                  </dd>
+                                  <dt>
+                                    {t(
+                                      "ai_reviewer_skill_git_preview_homepage",
+                                    )}
+                                  </dt>
+                                  <dd>
+                                    {plugin.homepage ??
+                                      t("ai_reviewer_skill_git_unknown")}
+                                  </dd>
+                                </dl>
+                              </section>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="ai-reviewer-skill-git-no-manifest">
+                            {t("ai_reviewer_skill_git_no_manifest")}
+                          </p>
+                        )}
+                        <div className="ai-reviewer-skill-git-selection">
+                          <OLFormCheckbox
+                            id="ai-reviewer-skill-git-select-all"
+                            checked={
+                              selectedSkillGitPaths.length ===
+                              skillGitPreview.skills.length
+                            }
+                            disabled={skillBusy}
+                            label={t("ai_reviewer_skill_git_select_all")}
+                            onChange={(event) =>
+                              setAllGitSkillsSelected(
+                                event.currentTarget.checked,
+                              )
+                            }
+                          />
+                          {skillGitPreview.skills.map((skill) => (
+                            <section
+                              key={skill.path}
+                              className="ai-reviewer-skill-git-preview-skill"
+                            >
+                              <OLFormCheckbox
+                                id={`ai-reviewer-skill-git-${skill.path.replace(/[^A-Za-z0-9_-]/gu, "-")}`}
+                                checked={selectedSkillGitPaths.includes(
+                                  skill.path,
+                                )}
+                                disabled={skillBusy}
+                                label={skill.name}
+                                onChange={(event) =>
+                                  setGitSkillSelected(
+                                    skill.path,
+                                    event.currentTarget.checked,
+                                  )
+                                }
+                              />
+                              <p>{skill.description}</p>
+                              <dl className="ai-reviewer-skill-git-preview-details">
+                                <dt>
+                                  {t("ai_reviewer_skill_git_preview_path")}
+                                </dt>
+                                <dd>
+                                  <code>{skill.path}</code>
+                                </dd>
+                                <dt>
+                                  {t("ai_reviewer_skill_git_preview_body_size")}
+                                </dt>
+                                <dd>
+                                  {t("ai_reviewer_skill_git_bytes", {
+                                    count: skill.bodySizeBytes,
+                                    size: String(skill.bodySizeBytes),
+                                  })}
+                                </dd>
+                                <dt>
+                                  {t(
+                                    "ai_reviewer_skill_git_preview_references",
+                                  )}
+                                </dt>
+                                <dd>
+                                  {skill.referenceFiles.length === 0
+                                    ? t("ai_reviewer_skill_git_no_references")
+                                    : skill.referenceFiles.map((reference) => (
+                                        <span
+                                          className="d-block"
+                                          key={reference.path}
+                                        >
+                                          <code>{reference.path}</code>{" "}
+                                          {t("ai_reviewer_skill_git_bytes", {
+                                            count: reference.sizeBytes,
+                                            size: String(reference.sizeBytes),
+                                          })}
+                                        </span>
+                                      ))}
+                                </dd>
+                                <dt>
+                                  {t(
+                                    "ai_reviewer_skill_git_preview_skipped_mentions",
+                                  )}
+                                </dt>
+                                <dd>
+                                  {skill.skippedReferences.length === 0
+                                    ? t(
+                                        "ai_reviewer_skill_git_no_skipped_mentions",
+                                      )
+                                    : skill.skippedReferences.map(
+                                        (reference) => (
+                                          <span
+                                            className="d-block"
+                                            key={reference.path}
+                                          >
+                                            <code>{reference.path}</code>{" "}
+                                            {t(
+                                              skippedReferenceReasonTranslation(
+                                                reference.reason,
+                                              ),
+                                            )}
+                                          </span>
+                                        ),
+                                      )}
+                                </dd>
+                              </dl>
+                            </section>
+                          ))}
+                        </div>
+                        {selectedGitSkillCountExceedsLimit && (
+                          <p className="text-danger" role="alert">
+                            {t("ai_reviewer_skill_git_count_limit", {
+                              limit: String(skillCountLimit),
+                            })}
+                          </p>
+                        )}
+                        <OLButton
+                          type="button"
+                          variant="primary"
+                          disabled={skillGitConfirmDisabled}
+                          onClick={confirmSkillGitImport}
+                        >
+                          {t("ai_reviewer_skill_git_confirm")}
+                        </OLButton>
+                      </div>
+                    )}
+                  </section>
+                  <OLFormGroup
+                    controlId="ai-reviewer-skill-files"
+                    className="ai-reviewer-skill-upload"
+                  >
+                    <div className="ai-reviewer-skill-upload-control">
+                      <OLFormControl
+                        type="file"
+                        className="visually-hidden ai-reviewer-skill-file-input"
+                        accept=".md,text/markdown"
+                        multiple
+                        disabled={skillUploadDisabled}
+                        aria-describedby="ai-reviewer-skill-upload-help ai-reviewer-skill-upload-selection"
+                        onChange={handleSkillUpload}
+                      />
+                      <OLFormLabel
+                        className={`ai-reviewer-skill-file-label btn btn-secondary d-inline-grid${
+                          skillUploadDisabled ? " disabled" : ""
+                        }`}
+                        aria-disabled={skillUploadDisabled}
+                      >
+                        <span className="button-content">
+                          {t("ai_reviewer_skill_upload_label")}
+                        </span>
+                      </OLFormLabel>
+                      <span
+                        id="ai-reviewer-skill-upload-selection"
+                        className="ai-reviewer-skill-upload-selection"
+                        role="status"
+                      >
+                        {selectedSkillFileNames.length > 0 && (
+                          <>
+                            {`${selectedSkillFileNames.length} ${t(
+                              "files_selected",
+                            )}`}{" "}
+                            {selectedSkillFileNames.join(", ")}
+                          </>
+                        )}
+                      </span>
+                    </div>
+                    <OLFormText id="ai-reviewer-skill-upload-help">
+                      {t("ai_reviewer_skill_upload_help")}
+                    </OLFormText>
+                  </OLFormGroup>
+                  {skillNotice && (
+                    <OLNotification type="error" content={skillNotice} />
+                  )}
+                </section>
+              </TabPane>
+            </TabContent>
+          </div>
+        </TabContainer>
       </OLModalBody>
       <OLModalFooter className="ai-reviewer-provider-settings-footer">
         <OLButton type="button" variant="secondary" onClick={handleHide}>
@@ -1536,6 +2291,19 @@ export function AiIntegrationDetailsView({
           onConfirm={confirmDelete}
         />
       )}
+      {pendingSkillDeletion != null && (
+        <GenericConfirmModal
+          show
+          title={t("ai_reviewer_skill_delete_confirmation_title")}
+          message={t("ai_reviewer_skill_delete_confirmation_message", {
+            skill: pendingSkillDeletion.name,
+          })}
+          confirmLabel={t("delete")}
+          primaryVariant="danger"
+          onHide={() => setPendingSkillDeletion(null)}
+          onConfirm={confirmSkillDelete}
+        />
+      )}
     </>
   );
 }
@@ -1548,7 +2316,7 @@ export default function AiIntegrationDetails({
   const { projectId } = useProjectContext();
   return (
     <AiIntegrationDetailsView
-      projectId={projectId}
+      scopeKey={projectId}
       onHide={onHide}
       listConnections={getAiProviderConnections}
       createConnection={createAiProviderConnection}
@@ -1557,7 +2325,38 @@ export default function AiIntegrationDetails({
       testConnection={testAiProviderConnection}
       listSkills={getAiReviewerSkills}
       uploadSkill={uploadAiReviewerSkill}
+      previewSkillGitImport={previewAiReviewerSkillGitImport}
+      confirmSkillGitImport={confirmAiReviewerSkillGitImport}
       deleteSkill={deleteAiReviewerSkill}
+    />
+  );
+}
+
+const accountSettingsScopeKey = "session-user";
+const unavailableAccountConnectionTest = async () => {
+  throw new Error("Connection tests require project context.");
+};
+
+export function AiReviewerAccountSettingsDetails({
+  onHide,
+}: {
+  onHide: () => void;
+}) {
+  return (
+    <AiIntegrationDetailsView
+      scopeKey={accountSettingsScopeKey}
+      onHide={onHide}
+      listConnections={getUserAiProviderConnections}
+      createConnection={createUserAiProviderConnection}
+      updateConnection={updateUserAiProviderConnection}
+      deleteConnection={deleteUserAiProviderConnection}
+      testConnection={unavailableAccountConnectionTest}
+      connectionTestEnabled={false}
+      listSkills={getUserAiReviewerSkills}
+      uploadSkill={uploadUserAiReviewerSkill}
+      previewSkillGitImport={previewUserAiReviewerSkillGitImport}
+      confirmSkillGitImport={confirmUserAiReviewerSkillGitImport}
+      deleteSkill={deleteUserAiReviewerSkill}
     />
   );
 }

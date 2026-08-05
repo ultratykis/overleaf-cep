@@ -202,7 +202,9 @@ function runSelectionReview() {
 }
 
 async function openModelChip() {
-  const chip = await screen.findByRole("button", { name: "Model" });
+  const chip = await screen.findByRole("button", {
+    name: /^Selected model/u,
+  });
   fireEvent.click(chip);
   return chip;
 }
@@ -413,7 +415,11 @@ describe("AI reviewer: panel layout", function () {
     expect(streamRequest.firstCall.args[0].request.connectionId).to.equal(
       localConnection.id,
     );
-    expect(screen.getByText(`openai-compatible · ${selectedModel}`)).to.exist;
+    expect(
+      screen.getByText(
+        `Model used for this run: openai-compatible · ${selectedModel}`,
+      ),
+    ).to.exist;
   });
 
   it("offers the models of every connection in one dropdown", async function () {
@@ -564,7 +570,8 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByTestId("ai-reviewer-bottom-controls")).not.to.exist;
     expect(screen.queryByRole("button", { name: "Review whole project" })).not
       .to.exist;
-    expect(screen.queryByRole("button", { name: "Model" })).not.to.exist;
+    expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
+      .exist;
     expect(screen.queryByTestId("ai-reviewer-model-failures")).not.to.exist;
     expect(streamRequest.called).to.equal(false);
   });

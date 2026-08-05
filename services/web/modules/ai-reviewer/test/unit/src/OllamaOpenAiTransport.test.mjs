@@ -508,8 +508,17 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
   it("creates the production gateway without exposing an SDK model getter", function () {
     const fixture = transportFixture();
     const readProjectFile = vi.fn();
+    const skills = [
+      {
+        name: "Evidence audit",
+        description: "Check whether claims are supported.",
+        body: "PRIVATE_SKILL_BODY",
+        referenceFiles: {},
+      },
+    ];
     const gateway = fixture.transport.createAgentGateway({
       contextLength: 8_192,
+      skills,
       readProjectFile,
       now: () => "2026-07-25T00:00:00.000Z",
       createId: () => "synthetic-id",
@@ -524,6 +533,13 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           reasoningEffort: "none",
         },
       },
+      skills: [
+        expect.objectContaining({
+          name: "Evidence audit",
+          description: "Check whether claims are supported.",
+          body: "PRIVATE_SKILL_BODY",
+        }),
+      ],
       readProjectFile,
     });
     expect("languageModel" in fixture.transport).toBe(false);

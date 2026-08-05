@@ -355,7 +355,7 @@ async function settlesWithin(promise, milliseconds = 50) {
 }
 
 describe("AI reviewer: module shell authenticated route", function () {
-  it("registers each authenticated project-read route once and in middleware order", function () {
+  it("registers project and user routes once with their distinct middleware order", function () {
     const login = vi.fn();
     const blockRestricted = vi.fn();
     const ensureCanRead = vi.fn();
@@ -376,6 +376,8 @@ describe("AI reviewer: module shell authenticated route", function () {
     const deleteConnection = vi.fn();
     const listSkills = vi.fn();
     const uploadSkill = vi.fn();
+    const previewSkillGitImport = vi.fn();
+    const confirmSkillGitImport = vi.fn();
     const deleteSkill = vi.fn();
     const requireLogin = vi.fn(() => login);
     const get = vi.fn();
@@ -412,6 +414,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       deleteConnection,
       listSkills,
       uploadSkill,
+      previewSkillGitImport,
+      confirmSkillGitImport,
       deleteSkill,
     });
 
@@ -512,6 +516,34 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
     expect(get).toHaveBeenNthCalledWith(
       4,
+      "/user/ai-reviewer/connections",
+      login,
+      rateLimit,
+      listConnections,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/user/ai-reviewer/connections",
+      login,
+      rateLimit,
+      createConnection,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      3,
+      "/user/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      updateConnection,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      4,
+      "/user/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      deleteConnection,
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      5,
       "/project/:project_id/ai-reviewer/connections",
       login,
       rateLimit,
@@ -520,7 +552,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       listConnections,
     );
     expect(post).toHaveBeenNthCalledWith(
-      3,
+      4,
       "/project/:project_id/ai-reviewer/connections",
       login,
       rateLimit,
@@ -529,7 +561,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       createConnection,
     );
     expect(put).toHaveBeenNthCalledWith(
-      3,
+      4,
       "/project/:project_id/ai-reviewer/connections/:connection_id",
       login,
       rateLimit,
@@ -538,7 +570,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       updateConnection,
     );
     expect(remove).toHaveBeenNthCalledWith(
-      4,
+      5,
       "/project/:project_id/ai-reviewer/connections/:connection_id",
       login,
       rateLimit,
@@ -547,7 +579,42 @@ describe("AI reviewer: module shell authenticated route", function () {
       deleteConnection,
     );
     expect(get).toHaveBeenNthCalledWith(
+      6,
+      "/user/ai-reviewer/skills",
+      login,
+      rateLimit,
+      listSkills,
+    );
+    expect(post).toHaveBeenNthCalledWith(
       5,
+      "/user/ai-reviewer/skills",
+      login,
+      rateLimit,
+      uploadSkill,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      6,
+      "/user/ai-reviewer/skills/import/preview",
+      login,
+      rateLimit,
+      previewSkillGitImport,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      7,
+      "/user/ai-reviewer/skills/import",
+      login,
+      rateLimit,
+      confirmSkillGitImport,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      6,
+      "/user/ai-reviewer/skills/:skill_id",
+      login,
+      rateLimit,
+      deleteSkill,
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      7,
       "/project/:project_id/ai-reviewer/skills",
       login,
       rateLimit,
@@ -556,7 +623,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       listSkills,
     );
     expect(post).toHaveBeenNthCalledWith(
-      4,
+      8,
       "/project/:project_id/ai-reviewer/skills",
       login,
       rateLimit,
@@ -564,8 +631,26 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       uploadSkill,
     );
+    expect(post).toHaveBeenNthCalledWith(
+      9,
+      "/project/:project_id/ai-reviewer/skills/import/preview",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      previewSkillGitImport,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      10,
+      "/project/:project_id/ai-reviewer/skills/import",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      confirmSkillGitImport,
+    );
     expect(remove).toHaveBeenNthCalledWith(
-      5,
+      7,
       "/project/:project_id/ai-reviewer/skills/:skill_id",
       login,
       rateLimit,
@@ -573,10 +658,10 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       deleteSkill,
     );
-    expect(anotherRouter.get).toHaveBeenCalledTimes(5);
-    expect(anotherRouter.put).toHaveBeenCalledTimes(3);
-    expect(anotherRouter.post).toHaveBeenCalledTimes(4);
-    expect(anotherRouter.delete).toHaveBeenCalledTimes(5);
+    expect(anotherRouter.get).toHaveBeenCalledTimes(7);
+    expect(anotherRouter.put).toHaveBeenCalledTimes(4);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(10);
+    expect(anotherRouter.delete).toHaveBeenCalledTimes(7);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
     expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);

@@ -20,6 +20,9 @@ export {
 };
 
 const MAX_SKILL_STORE_MUTATION_RETRIES = 5;
+const REVIEW_SKILL_LOAD_COUNT_LIMIT = AI_REVIEWER_SKILL_COUNT_LIMIT;
+const REVIEW_SKILL_LOAD_MAX_BYTES =
+  REVIEW_SKILL_LOAD_COUNT_LIMIT * AI_REVIEWER_SKILL_MAX_BYTES;
 const CONTROL_OR_LINE_SEPARATOR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 const HAS_CONTROL_OR_LINE_SEPARATOR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
@@ -163,16 +166,123 @@ function referenceFiles(input) {
   return files;
 }
 
+/** @param {unknown} input */
+function gitProvenance(input) {
+  if (input == null) {
+    return null;
+  }
+  if (
+    typeof input !== "object" ||
+    Array.isArray(input) ||
+    Object.getPrototypeOf(input) !== Object.prototype
+  ) {
+    throw new AiReviewerSkillValidationError(
+      "The AI reviewer skill provenance is invalid.",
+    );
+  }
+  const value = /** @type {Record<string, unknown>} */ (input);
+  const service = value.service;
+  const resolvedSha = value.resolvedSha;
+  if (
+    value.kind !== "git" ||
+    (service !== "github" && service !== "gitlab") ||
+    typeof resolvedSha !== "string" ||
+    !/^[0-9a-f]{40}$/u.test(resolvedSha)
+  ) {
+    throw new AiReviewerSkillValidationError(
+      "The AI reviewer skill provenance is invalid.",
+    );
+  }
+  const fields = ["host", "repository", "path"];
+  for (const field of fields) {
+    const fieldValue = value[field];
+    if (
+      typeof fieldValue !== "string" ||
+      fieldValue.length === 0 ||
+      fieldValue.length > 1_000 ||
+      HAS_CONTROL_OR_LINE_SEPARATOR.test(fieldValue)
+    ) {
+      throw new AiReviewerSkillValidationError(
+        "The AI reviewer skill provenance is invalid.",
+      );
+    }
+  }
+  const optionalFields = ["pluginName", "pluginVersion", "license", "homepage"];
+  /** @type {Record<string, string>} */
+  const optionalMetadata = {};
+  for (const field of optionalFields) {
+    const fieldValue = value[field];
+    if (fieldValue == null) continue;
+    if (
+      typeof fieldValue !== "string" ||
+      fieldValue.length === 0 ||
+      fieldValue.length > 1_000 ||
+      HAS_CONTROL_OR_LINE_SEPARATOR.test(fieldValue)
+    ) {
+      throw new AiReviewerSkillValidationError(
+        "The AI reviewer skill provenance is invalid.",
+      );
+    }
+    optionalMetadata[field] = fieldValue;
+  }
+  let owner;
+  if (value.owner != null) {
+    if (
+      typeof value.owner !== "object" ||
+      Array.isArray(value.owner) ||
+      Object.getPrototypeOf(value.owner) !== Object.prototype
+    ) {
+      throw new AiReviewerSkillValidationError(
+        "The AI reviewer skill provenance is invalid.",
+      );
+    }
+    const ownerValue = /** @type {Record<string, unknown>} */ (value.owner);
+    const ownerName = ownerValue.name;
+    const ownerUrl = ownerValue.url;
+    if (
+      typeof ownerName !== "string" ||
+      ownerName.length === 0 ||
+      ownerName.length > 1_000 ||
+      HAS_CONTROL_OR_LINE_SEPARATOR.test(ownerName) ||
+      (ownerUrl != null &&
+        (typeof ownerUrl !== "string" ||
+          ownerUrl.length === 0 ||
+          ownerUrl.length > 1_000 ||
+          HAS_CONTROL_OR_LINE_SEPARATOR.test(ownerUrl)))
+    ) {
+      throw new AiReviewerSkillValidationError(
+        "The AI reviewer skill provenance is invalid.",
+      );
+    }
+    owner = Object.freeze({
+      name: ownerName,
+      ...(ownerUrl == null ? {} : { url: ownerUrl }),
+    });
+  }
+  return Object.freeze({
+    kind: /** @type {const} */ ("git"),
+    service,
+    host: /** @type {string} */ (value.host),
+    repository: /** @type {string} */ (value.repository),
+    path: /** @type {string} */ (value.path),
+    resolvedSha,
+    ...optionalMetadata,
+    ...(owner == null ? {} : { owner }),
+  });
+}
+
 /** @param {string} body @param {Record<string, string>} files */
-function assertByteLimit(body, files) {
+export function aiReviewerSkillContentBytes(body, files) {
   let bytes = Buffer.byteLength(body, "utf8");
   for (const content of Object.values(files)) {
     bytes += Buffer.byteLength(content, "utf8");
-    if (bytes > AI_REVIEWER_SKILL_MAX_BYTES) {
-      throw new AiReviewerSkillByteLimitError();
-    }
   }
-  if (bytes > AI_REVIEWER_SKILL_MAX_BYTES) {
+  return bytes;
+}
+
+/** @param {string} body @param {Record<string, string>} files */
+function assertByteLimit(body, files) {
+  if (aiReviewerSkillContentBytes(body, files) > AI_REVIEWER_SKILL_MAX_BYTES) {
     throw new AiReviewerSkillByteLimitError();
   }
 }
@@ -221,6 +331,7 @@ function storedSkill(value) {
     );
   }
   const files = referenceFiles(value.referenceFiles);
+  const provenance = gitProvenance(value.provenance);
   assertByteLimit(value.body, files);
   return Object.freeze({
     id,
@@ -228,6 +339,41 @@ function storedSkill(value) {
     description,
     body: value.body,
     referenceFiles: Object.freeze(files),
+    ...(provenance == null ? {} : { provenance }),
+  });
+}
+
+/**
+ * Parse and validate the exact content that would be stored without assigning
+ * an identifier or mutating persistence. Git previews call the same boundary
+ * as local uploads so their displayed metadata matches the eventual record.
+ *
+ * @param {{ skillMarkdown?: unknown, referenceFiles?: unknown, provenance?: unknown }} input
+ */
+export function prepareAiReviewerSkill(input) {
+  if (typeof input !== "object" || input == null || Array.isArray(input)) {
+    throw new AiReviewerSkillValidationError(
+      "The AI reviewer skill input is invalid.",
+    );
+  }
+  const parsed = parseAiReviewerSkill(input.skillMarkdown);
+  const files = referenceFiles(input.referenceFiles ?? {});
+  const provenance = gitProvenance(input.provenance);
+  assertByteLimit(parsed.body, files);
+  return Object.freeze({
+    name: promptListMetadata(
+      parsed.name,
+      AI_REVIEWER_SKILL_NAME_MAX_LENGTH,
+      "name",
+    ),
+    description: promptListMetadata(
+      parsed.description,
+      AI_REVIEWER_SKILL_DESCRIPTION_MAX_LENGTH,
+      "description",
+    ),
+    body: parsed.body,
+    referenceFiles: Object.freeze(files),
+    ...(provenance == null ? {} : { provenance }),
   });
 }
 
@@ -305,11 +451,85 @@ export function createAiReviewerSkillStore({
     );
   }
 
+  /**
+   * @param {unknown} userIdInput
+   * @param {unknown} inputs
+   */
+  async function createMany(userIdInput, inputs) {
+    const userId = identifier(userIdInput, "user identifier");
+    if (!Array.isArray(inputs) || inputs.length === 0) {
+      throw new AiReviewerSkillValidationError(
+        "At least one AI reviewer skill is required.",
+      );
+    }
+    if (inputs.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
+      throw new AiReviewerSkillCountLimitError();
+    }
+    const added = inputs.map((input) =>
+      storedSkill({
+        id: identifier(newSkillId(), "identifier"),
+        ...prepareAiReviewerSkill(input),
+      }),
+    );
+    const addedNames = new Set();
+    for (const skill of added) {
+      if (addedNames.has(skill.name)) {
+        throw new AiReviewerSkillDuplicateNameError(skill.name);
+      }
+      addedNames.add(skill.name);
+    }
+    await commit(userId, (skills) => {
+      if (skills.length + added.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
+        throw new AiReviewerSkillCountLimitError();
+      }
+      for (const skill of added) {
+        if (skills.some((stored) => stored.name === skill.name)) {
+          throw new AiReviewerSkillDuplicateNameError(skill.name);
+        }
+      }
+      return [...skills, ...added];
+    });
+    return added;
+  }
+
   return {
     /** @param {unknown} userIdInput */
     async list(userIdInput) {
       const userId = identifier(userIdInput, "user identifier");
       return storedSkills(await lean(model.findOne({ _id: userId })));
+    },
+
+    /**
+     * Bound the execution read at the persistence query as well as at the
+     * gateway. The stored order is retained so the prompt metadata and
+     * read_skill lookup describe the same finite prefix.
+     *
+     * @param {unknown} userIdInput
+     */
+    async listForReview(userIdInput) {
+      const userId = identifier(userIdInput, "user identifier");
+      const skills = storedSkills(
+        await lean(
+          model.findOne(
+            { _id: userId },
+            { skills: { $slice: REVIEW_SKILL_LOAD_COUNT_LIMIT } },
+          ),
+        ),
+      );
+      const bounded = [];
+      let loadedBytes = 0;
+      for (const skill of skills) {
+        const skillBytes = aiReviewerSkillContentBytes(
+          skill.body,
+          skill.referenceFiles,
+        );
+        if (skillBytes > REVIEW_SKILL_LOAD_MAX_BYTES - loadedBytes) {
+          break;
+        }
+        loadedBytes += skillBytes;
+        bounded.push(skill);
+      }
+      return Object.freeze(bounded);
     },
 
     /**
@@ -325,44 +545,21 @@ export function createAiReviewerSkillStore({
 
     /**
      * @param {unknown} userIdInput
-     * @param {{ skillMarkdown?: unknown, referenceFiles?: unknown }} input
+     * @param {{ skillMarkdown?: unknown, referenceFiles?: unknown, provenance?: unknown }} input
      */
     async create(userIdInput, input) {
-      const userId = identifier(userIdInput, "user identifier");
-      if (typeof input !== "object" || input == null || Array.isArray(input)) {
-        throw new AiReviewerSkillValidationError(
-          "The AI reviewer skill input is invalid.",
-        );
-      }
-      const parsed = parseAiReviewerSkill(input.skillMarkdown);
-      const files = referenceFiles(input.referenceFiles ?? {});
-      assertByteLimit(parsed.body, files);
-      const skill = storedSkill({
-        id: identifier(newSkillId(), "identifier"),
-        name: promptListMetadata(
-          parsed.name,
-          AI_REVIEWER_SKILL_NAME_MAX_LENGTH,
-          "name",
-        ),
-        description: promptListMetadata(
-          parsed.description,
-          AI_REVIEWER_SKILL_DESCRIPTION_MAX_LENGTH,
-          "description",
-        ),
-        body: parsed.body,
-        referenceFiles: files,
-      });
-      await commit(userId, (skills) => {
-        if (skills.length >= AI_REVIEWER_SKILL_COUNT_LIMIT) {
-          throw new AiReviewerSkillCountLimitError();
-        }
-        if (skills.some((stored) => stored.name === skill.name)) {
-          throw new AiReviewerSkillDuplicateNameError(skill.name);
-        }
-        return [...skills, skill];
-      });
-      return skill;
+      return (await createMany(userIdInput, [input]))[0];
     },
+
+    /**
+     * Import a selection in one CAS mutation. A count or duplicate-name
+     * failure rejects the whole selection, so a multi-skill repository cannot
+     * be left partially imported.
+     *
+     * @param {unknown} userIdInput
+     * @param {unknown} inputs
+     */
+    createMany,
 
     /**
      * @param {unknown} userIdInput

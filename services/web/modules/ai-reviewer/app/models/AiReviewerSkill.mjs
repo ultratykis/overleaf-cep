@@ -9,6 +9,35 @@ export const AI_REVIEWER_SKILL_COUNT_LIMIT = 20;
 export const AI_REVIEWER_SKILL_NAME_MAX_LENGTH = 100;
 export const AI_REVIEWER_SKILL_DESCRIPTION_MAX_LENGTH = 500;
 
+export const AiReviewerSkillGitOwnerSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    url: { type: String, required: false },
+  },
+  { _id: false, strict: "throw", versionKey: false },
+);
+
+export const AiReviewerSkillGitProvenanceSchema = new mongoose.Schema(
+  {
+    kind: { type: String, required: true, enum: ["git"] },
+    service: { type: String, required: true, enum: ["github", "gitlab"] },
+    host: { type: String, required: true },
+    repository: { type: String, required: true },
+    path: { type: String, required: true },
+    resolvedSha: { type: String, required: true, match: /^[0-9a-f]{40}$/u },
+    pluginName: { type: String, required: false },
+    pluginVersion: { type: String, required: false },
+    license: { type: String, required: false },
+    owner: {
+      type: AiReviewerSkillGitOwnerSchema,
+      required: false,
+      default: undefined,
+    },
+    homepage: { type: String, required: false },
+  },
+  { _id: false, strict: "throw", versionKey: false },
+);
+
 export const AiReviewerStoredSkillSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
@@ -24,6 +53,11 @@ export const AiReviewerStoredSkillSchema = new mongoose.Schema(
     },
     body: { type: String, default: "" },
     referenceFiles: { type: Mixed, required: true },
+    provenance: {
+      type: AiReviewerSkillGitProvenanceSchema,
+      required: false,
+      default: null,
+    },
   },
   { _id: false, strict: "throw", versionKey: false },
 );

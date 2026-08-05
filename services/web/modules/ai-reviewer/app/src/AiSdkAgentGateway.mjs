@@ -2465,8 +2465,8 @@ export class AiSdkAgentGateway {
     let zoteroSearchCallCount = 0;
     let reportedArtifactCount = 0;
     let reportedSubjectCount = 0;
-    /** @type {Set<string>} */
-    const observedToolCallIds = new Set();
+    /** @type {Map<string, string>} */
+    const observedToolCalls = new Map();
     // Reporting stays bound to the requested passage below, while reading uses
     // the same finite allowance regardless of how narrowly that passage was
     // selected.
@@ -2622,7 +2622,9 @@ export class AiSdkAgentGateway {
      * }} toolCall
      */
     const inspectToolCall = (toolCall) => {
-      observedToolCallIds.add(toolCall.toolCallId);
+      if (!observedToolCalls.has(toolCall.toolCallId)) {
+        observedToolCalls.set(toolCall.toolCallId, toolCall.toolName);
+      }
       const existing = deferredToolErrors.get(toolCall.toolCallId);
       if (existing != null) {
         return existing;
@@ -3337,13 +3339,18 @@ export class AiSdkAgentGateway {
               }
             : undefined,
       });
+      /** @type {Map<string, number>} */
+      const toolCallCounts = new Map();
+      for (const toolName of observedToolCalls.values()) {
+        toolCallCounts.set(toolName, (toolCallCounts.get(toolName) ?? 0) + 1);
+      }
       recordAiReviewerCompletion({
         requestId: request.requestId,
         provider: this.provider,
         model: this.modelId,
         scopeKind: scope?.kind ?? "none",
         findingToolOffered: findingsAllowed,
-        toolCallCount: observedToolCallIds.size,
+        toolCallCounts,
         pendingValidatedArtifactCount: reportedArtifacts.size,
       });
       yield completedEvent;
