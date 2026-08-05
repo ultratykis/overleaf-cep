@@ -1052,6 +1052,7 @@ export function AiIntegrationDetailsView({
     const editedId = selectedId;
     const editedRevision = selected?.revision;
     if (editedId != null && editedRevision == null) return;
+    connectionsChangedRef.current = true;
     void run("save", (signal) =>
       editedId == null
         ? createConnection(scopeKey, requested, signal)
@@ -1069,7 +1070,6 @@ export function AiIntegrationDetailsView({
         setNotice(genericErrorNotice());
         return;
       }
-      connectionsChangedRef.current = true;
       // A write returns only the written connection, so retain the usage count
       // from the listing while splicing it into place.
       const connectionWithUsage = {
@@ -1172,11 +1172,11 @@ export function AiIntegrationDetailsView({
     const connection = pendingDeletion;
     if (connection == null || busy !== null) return;
     setPendingDeletion(null);
+    connectionsChangedRef.current = true;
     void run("connections", (signal) =>
       deleteConnection(scopeKey, connection.id, connection.revision, signal),
     ).then((response) => {
       if (!response) return;
-      connectionsChangedRef.current = true;
       applyConnections(response.connections);
     });
   };

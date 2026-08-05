@@ -413,6 +413,71 @@ describe("AI reviewer: context-driven panel", function () {
     expect(loadProviderModels).to.have.been.calledOnce;
   });
 
+  it("offers a retry when the connection refresh fails after settings changed", async function () {
+    const loadProviderConnections = sinon.stub();
+    loadProviderConnections.onFirstCall().resolves({
+      connections: [localConnection],
+    });
+    loadProviderConnections.onSecondCall().rejects(new Error("HTTP 504"));
+    loadProviderConnections.resolves({ connections: [] });
+    const loadProviderModels = sinon.stub();
+    loadProviderModels.onFirstCall().resolves({
+      models: [defaultModel],
+      failures: [],
+    });
+    loadProviderModels.resolves({ models: [], failures: [] });
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        call.onEvent({
+          type: "error",
+          eventId: "context-too-small-before-deletion",
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          error: {
+            code: "AI_MODEL_CONTEXT_TOO_SMALL",
+            category: "configuration",
+            message: "Bounded server wording.",
+            retryable: false,
+          },
+        });
+      });
+    renderPanel({
+      captureSelectionSession: captureSelectionSession(),
+      selectionPreview,
+      streamRequest,
+      loadProviderConnections,
+      loadProviderModels,
+      providerSettingsComponent: ChangedProviderSettings,
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    ).to.exist;
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open connection settings" }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close changed settings" }),
+    );
+
+    expect(
+      (await screen.findByTestId("ai-reviewer-connection-catalog-error"))
+        .textContent,
+    ).to.equal("Connections could not be loaded.");
+    expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
+      .exist;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry loading connections" }),
+    );
+
+    expect(await screen.findByTestId("ai-reviewer-onboarding")).to.exist;
+    expect(loadProviderConnections.callCount).to.equal(3);
+    expect(loadProviderModels.callCount).to.equal(3);
+  });
+
   it("hides the sole connection's stale model when its refresh fails after deletion", async function () {
     const loadProviderConnections = sinon.stub();
     loadProviderConnections.onFirstCall().resolves({

@@ -1793,6 +1793,28 @@ describe("AI reviewer: provider configuration", function () {
     expect(onHide).to.have.been.calledOnceWithExactly(true);
   });
 
+  it("reports a possible connection change after a save request fails", async function () {
+    const onHide = sinon.stub();
+    const createConnection = sinon.stub().rejects(new Error("parse failed"));
+    renderConnections({ onHide, createConnection });
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "claude" } });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    fireEvent.click(button("Save"));
+
+    expect(
+      await screen.findByText(
+        "Something went wrong. Check the settings and try again.",
+      ),
+    ).to.exist;
+    expect(createConnection).to.have.been.calledOnce;
+    fireEvent.click(closeSettingsButton());
+    fireEvent.click(button("Discard changes"));
+
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
+  });
+
   it("confirms before discarding edits when switching rows or closing", async function () {
     const onHide = sinon.stub();
     const listConnections = sinon
@@ -1898,6 +1920,29 @@ describe("AI reviewer: provider configuration", function () {
       .exist;
     expect(screen.queryByLabelText("Provider")).not.to.exist;
     fireEvent.click(closeSettingsButton());
+    expect(onHide).to.have.been.calledOnceWithExactly(true);
+  });
+
+  it("reports a possible connection change after a delete request fails", async function () {
+    const onHide = sinon.stub();
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured] });
+    const deleteConnection = sinon.stub().rejects(new Error("parse failed"));
+    renderConnections({ onHide, listConnections, deleteConnection });
+    await waitUntilLoaded();
+
+    fireEvent.click(deleteConnectionButton(otherConfigured));
+    fireEvent.click(button("Delete"));
+
+    expect(
+      await screen.findByText(
+        "Something went wrong. Check the settings and try again.",
+      ),
+    ).to.exist;
+    expect(deleteConnection).to.have.been.calledOnce;
+    fireEvent.click(closeSettingsButton());
+
     expect(onHide).to.have.been.calledOnceWithExactly(true);
   });
 

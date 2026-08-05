@@ -1420,6 +1420,7 @@ export function AiReviewerPanelView({
   >(null);
   const [models, setModels] = useState<AiProviderModel[]>([]);
   const [modelQuery, setModelQuery] = useState("");
+  const [connectionCatalogError, setConnectionCatalogError] = useState(false);
   const [modelCatalogError, setModelCatalogError] = useState(false);
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
     [],
@@ -1446,6 +1447,7 @@ export function AiReviewerPanelView({
     setProviderCatalogRevision((revision) => revision + 1);
   }, []);
   const retryProviderCatalog = useCallback(() => {
+    setConnectionCatalogError(false);
     setModelCatalogError(false);
     refreshProviderCatalog();
   }, [refreshProviderCatalog]);
@@ -1530,10 +1532,13 @@ export function AiReviewerPanelView({
         if (!controller.signal.aborted) {
           setConnections(response.connections);
           setConnectionsLoaded(true);
+          setConnectionCatalogError(false);
         }
       })
       .catch(() => {
-        // Without an override a document review is simply not split.
+        if (!controller.signal.aborted) {
+          setConnectionCatalogError(true);
+        }
       });
     return () => controller.abort();
   }, [loadProviderConnections, projectId, providerCatalogRevision]);
@@ -5240,11 +5245,12 @@ export function AiReviewerPanelView({
   const workspaceIsEmpty =
     workspace.runs.length === 0 && discussions.length === 0;
   const workspaceDeletionDisabled = busy || workspaceIsEmpty || answerStreaming;
-  // Only a completed lookup proves there is nowhere to send a review. Without
-  // a lookup the panel cannot claim that, so it keeps offering its controls.
+  // Only a completed, current lookup proves there is nowhere to send a review.
+  // Without one the panel cannot claim that, so it keeps offering its controls.
   const noConnections =
     loadProviderConnections != null &&
     connectionsLoaded &&
+    !connectionCatalogError &&
     connections.length === 0;
   return (
     <section
@@ -5504,6 +5510,26 @@ export function AiReviewerPanelView({
                     .join(", "),
                 })}
               </p>
+            )}
+            {connectionCatalogError && (
+              <div className="ai-reviewer-panel-model-failures form-text mb-0">
+                <p
+                  className="mb-0"
+                  role="alert"
+                  data-testid="ai-reviewer-connection-catalog-error"
+                >
+                  {t("ai_reviewer_provider_connections_load_failed")}
+                </p>
+                <OLButton
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  className="btn-inline-link"
+                  onClick={retryProviderCatalog}
+                >
+                  {t("ai_reviewer_provider_connections_retry")}
+                </OLButton>
+              </div>
             )}
             {modelCatalogError && (
               <div className="ai-reviewer-panel-model-failures form-text mb-0">

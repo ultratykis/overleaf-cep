@@ -356,6 +356,8 @@
   "ai_reviewer_provider_configuration_persistence_failed": "AI Reviewer could not save the provider configuration on this server. Ask the server administrator to check AI Reviewer storage and permissions, then try again.",
   "ai_reviewer_provider_connection_conflict": "This connection changed elsewhere. Your change was not applied. Reload the settings and try again.",
   "ai_reviewer_provider_connection_successful": "Connection successful",
+  "ai_reviewer_provider_connections_load_failed": "Connections could not be loaded.",
+  "ai_reviewer_provider_connections_retry": "Retry loading connections",
   "ai_reviewer_provider_context_length_override": "Context length override (tokens)",
   "ai_reviewer_provider_context_length_override_help": "Leave blank to use the value reported by the provider. This override changes AI Reviewer budgeting only; it does not change the provider's runtime allocation.",
   "ai_reviewer_provider_credential": "API key",

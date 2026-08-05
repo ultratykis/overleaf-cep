@@ -325,6 +325,8 @@
   "ai_reviewer_provider_configuration_persistence_failed": "",
   "ai_reviewer_provider_connection_conflict": "",
   "ai_reviewer_provider_connection_successful": "",
+  "ai_reviewer_provider_connections_load_failed": "",
+  "ai_reviewer_provider_connections_retry": "",
   "ai_reviewer_provider_context_length_override": "",
   "ai_reviewer_provider_context_length_override_help": "",
   "ai_reviewer_provider_credential": "",
