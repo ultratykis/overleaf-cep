@@ -566,6 +566,33 @@ describe("AI reviewer provider connections", function () {
     expect(records.get(userId).connections).toHaveLength(2);
   });
 
+  it("round-trips reasoning model compatibility and defaults old connections to off", async function () {
+    const { records, store } = storeFixture();
+
+    const compatible = await store.create(userId, {
+      ...localConnection,
+      reasoningModelCompatibility: true,
+    });
+
+    expect(compatible.reasoningModelCompatibility).toBe(true);
+    expect(
+      (await store.get(userId, compatible.id)).reasoningModelCompatibility,
+    ).toBe(true);
+    expect(
+      publicAiReviewerProviderConnection(compatible).config
+        .reasoningModelCompatibility,
+    ).toBe(true);
+    expect(records.get(userId).connections[0]).toMatchObject({
+      reasoningModelCompatibility: true,
+    });
+
+    const existing = await store.create(otherUserId, localConnection);
+    expect(existing).not.toHaveProperty("reasoningModelCompatibility");
+    expect(await store.get(otherUserId, existing.id)).not.toHaveProperty(
+      "reasoningModelCompatibility",
+    );
+  });
+
   it("rejects changing a saved connection's provider without touching its destination", async function () {
     const { records, store } = storeFixture();
     const azure = await store.create(userId, azureConnection);

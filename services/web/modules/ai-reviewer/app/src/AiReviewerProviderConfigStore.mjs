@@ -170,6 +170,9 @@ function coreConnectionInput(value) {
     ...(value?.contextLengthOverride == null
       ? {}
       : { contextLengthOverride: value.contextLengthOverride }),
+    ...(value?.reasoningModelCompatibility === true
+      ? { reasoningModelCompatibility: true }
+      : {}),
   };
 }
 
@@ -500,6 +503,9 @@ export function createAiReviewerProviderConfigStore({
       ...(config.contextLengthOverrides == null
         ? {}
         : { contextLengthOverrides: config.contextLengthOverrides }),
+      ...(config.reasoningModelCompatibility === true
+        ? { reasoningModelCompatibility: true }
+        : {}),
       ...(replacingCredential
         ? {
             credentialEncrypted: encryptedCredential,

@@ -12,6 +12,8 @@ export const DISCUSSION_CONTEXT_TURN_LIMIT = 12;
 export const AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT = 20;
 export const AI_REVIEWER_WORKSPACE_TURN_LIMIT = 100;
 
+export const AiReviewerReasoningModelCompatibilitySchema = z.boolean();
+
 export const Sha256Schema = z
   .string()
   .regex(/^[a-f0-9]{64}$/, "Expected a lowercase SHA-256 digest");

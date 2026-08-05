@@ -6,6 +6,7 @@ import {
   AgentRequestSchema,
   AiReviewerModeInstructionsSchema,
   AiReviewerModeInstructionsSnapshotSchema,
+  AiReviewerReasoningModelCompatibilitySchema,
   AiReviewerWorkspaceSnapshotSchema,
   AiReviewerWorkspaceSchema,
   DiscussionSubjectSchema,
@@ -36,6 +37,9 @@ export type AiReviewerModeInstructions = z.infer<
 >;
 export type AiReviewerModeInstructionsSnapshot = z.infer<
   typeof AiReviewerModeInstructionsSnapshotSchema
+>;
+export type AiReviewerReasoningModelCompatibility = z.infer<
+  typeof AiReviewerReasoningModelCompatibilitySchema
 >;
 export type AiReviewerWorkspaceSnapshot = z.infer<
   typeof AiReviewerWorkspaceSnapshotSchema

@@ -256,6 +256,9 @@ async function resolveRunConfiguration(
     ...(typeof connection.credential === "string"
       ? { credential: connection.credential }
       : {}),
+    ...(connection.reasoningModelCompatibility === true
+      ? { reasoningModelCompatibility: true }
+      : {}),
     model,
     ...resolution,
   });

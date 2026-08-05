@@ -102,6 +102,7 @@ type ConfigurationDraft = {
   deployments: string;
   models: string;
   contextLengthOverride: string;
+  reasoningModelCompatibility: boolean;
   credential: string;
 };
 type ConfigurationField =
@@ -138,6 +139,7 @@ const emptyConfiguration: ConfigurationDraft = {
   deployments: "",
   models: "",
   contextLengthOverride: "",
+  reasoningModelCompatibility: false,
   credential: "",
 };
 
@@ -326,6 +328,9 @@ function copyPublicConfiguration(
 ): AiProviderConfiguration {
   const common = {
     contextLengthOverride: configuration.contextLengthOverride,
+    ...(configuration.reasoningModelCompatibility
+      ? { reasoningModelCompatibility: true }
+      : {}),
     credentialSet: configuration.credentialSet,
     credentialUpdatedAt: configuration.credentialUpdatedAt,
   };
@@ -394,6 +399,8 @@ function draftFromConnection(
       connection.config.contextLengthOverride == null
         ? ""
         : String(connection.config.contextLengthOverride),
+    reasoningModelCompatibility:
+      connection.config.reasoningModelCompatibility === true,
     credential: "",
   };
   switch (connection.config.provider) {
@@ -835,6 +842,8 @@ export function AiIntegrationDetailsView({
     (saved?.contextLengthOverride == null
       ? ""
       : String(saved.contextLengthOverride)) !== draft.contextLengthOverride ||
+    (saved?.reasoningModelCompatibility === true) !==
+      draft.reasoningModelCompatibility ||
     (draft.provider === "openai-compatible" &&
       (saved?.provider !== "openai-compatible" ||
         saved.baseUrl !== draft.baseUrl ||
@@ -857,7 +866,8 @@ export function AiIntegrationDetailsView({
   const newDraftDirty =
     draft.provider !== emptyConfiguration.provider ||
     fields.some((field) => draft[field] !== "") ||
-    draft.contextLengthOverride !== "";
+    draft.contextLengthOverride !== "" ||
+    draft.reasoningModelCompatibility;
   const dirty =
     (formMode === "edit" && editedDraftDirty) ||
     (formMode === "create" && newDraftDirty);
@@ -940,6 +950,17 @@ export function AiIntegrationDetailsView({
     setNotice(null);
   };
 
+  const updateReasoningModelCompatibility = (value: boolean) => {
+    if (!formEditable) return;
+    if (busy) cancelPotentialWrite();
+    setDraft((current) => ({
+      ...current,
+      reasoningModelCompatibility: value,
+    }));
+    setBusy(null);
+    setNotice(null);
+  };
+
   const updateAzureRequestStyle = (value: string) => {
     if (!formEditable || (value !== "v1" && value !== "deployment")) {
       return;
@@ -973,6 +994,7 @@ export function AiIntegrationDetailsView({
       baseUrl: "",
       credential: "",
       contextLengthOverride: "",
+      reasoningModelCompatibility: false,
     }));
     setBusy(null);
     setNotice(null);
@@ -1002,6 +1024,9 @@ export function AiIntegrationDetailsView({
     if (!canSave) return;
     const credential =
       draft.credential === "" ? {} : { credential: draft.credential };
+    const reasoningModelCompatibility = draft.reasoningModelCompatibility
+      ? { reasoningModelCompatibility: true }
+      : {};
     const label = draft.label.trim();
     let requested: AiProviderConfigurationWrite;
     switch (draft.provider) {
@@ -1012,6 +1037,7 @@ export function AiIntegrationDetailsView({
           models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
+          ...reasoningModelCompatibility,
           ...credential,
         };
         break;
@@ -1021,6 +1047,7 @@ export function AiIntegrationDetailsView({
           models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
+          ...reasoningModelCompatibility,
           ...credential,
         };
         break;
@@ -1030,6 +1057,7 @@ export function AiIntegrationDetailsView({
           models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
+          ...reasoningModelCompatibility,
           ...credential,
         };
         break;
@@ -1045,6 +1073,7 @@ export function AiIntegrationDetailsView({
           contextLengthOverrides: parsedAzureDeployments.contextLengthOverrides,
           label,
           contextLengthOverride: null,
+          ...reasoningModelCompatibility,
           ...credential,
         };
         break;
@@ -1946,12 +1975,12 @@ export function AiIntegrationDetailsView({
                           )}
                         </p>
                       )}
-                      {draft.provider !== "azure" && (
-                        <details className="ai-reviewer-provider-advanced mt-3">
-                          <summary className="ai-reviewer-provider-advanced-summary">
-                            {t("ai_reviewer_provider_advanced_settings")}
-                          </summary>
-                          <div className="ai-reviewer-provider-advanced-content mt-2">
+                      <details className="ai-reviewer-provider-advanced mt-3">
+                        <summary className="ai-reviewer-provider-advanced-summary">
+                          {t("ai_reviewer_provider_advanced_settings")}
+                        </summary>
+                        <div className="ai-reviewer-provider-advanced-content mt-2">
+                          {draft.provider !== "azure" && (
                             <OLFormGroup
                               controlId="ai-reviewer-contextLengthOverride"
                               className="ai-reviewer-provider-settings-field"
@@ -1984,9 +2013,31 @@ export function AiIntegrationDetailsView({
                                 )}
                               </p>
                             </OLFormGroup>
-                          </div>
-                        </details>
-                      )}
+                          )}
+                          <OLFormCheckbox
+                            id="ai-reviewer-reasoning-model-compatibility"
+                            checked={draft.reasoningModelCompatibility}
+                            disabled={saved === undefined || !formEditable}
+                            label={t(
+                              "ai_reviewer_provider_reasoning_model_compatibility",
+                            )}
+                            aria-describedby="ai-reviewer-reasoning-model-compatibility-help"
+                            onChange={(event) =>
+                              updateReasoningModelCompatibility(
+                                event.currentTarget.checked,
+                              )
+                            }
+                          />
+                          <p
+                            id="ai-reviewer-reasoning-model-compatibility-help"
+                            className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                          >
+                            {t(
+                              "ai_reviewer_provider_reasoning_model_compatibility_help",
+                            )}
+                          </p>
+                        </div>
+                      </details>
                       {notice && (
                         <OLNotification
                           type={notice.type}

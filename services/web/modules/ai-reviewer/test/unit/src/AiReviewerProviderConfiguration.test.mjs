@@ -1989,6 +1989,27 @@ describe("AI reviewer provider configuration", function () {
     });
   });
 
+  it("passes reasoning model compatibility into transport construction", function () {
+    const transport = { createAgentGateway: vi.fn(() => ({ kind: "review" })) };
+    const transportFactory = vi.fn(() => transport);
+    const service = createOllamaProviderService({ transportFactory });
+
+    service.createAgentGateway(
+      {
+        ...credentialConfiguration,
+        reasoningModelCompatibility: true,
+      },
+      { readProjectFile: vi.fn() },
+    );
+
+    expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: remoteBaseUrl,
+      credential,
+      modelTag: remoteModel,
+      reasoningModelCompatibility: true,
+    });
+  });
+
   it.each([
     {
       configuration: geminiConfiguration,

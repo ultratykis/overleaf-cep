@@ -5,6 +5,9 @@ import {
   postJSON,
   putJSON,
 } from "@/infrastructure/fetch-json";
+import type {
+  AiReviewerReasoningModelCompatibility,
+} from "../../../shared/contract-types";
 
 export type AiProvider = "openai-compatible" | "gemini" | "claude" | "azure";
 export type AzureOpenAiRequestStyle = "v1" | "deployment";
@@ -17,6 +20,7 @@ export type ModelContextLengthOverride = {
 // selected model is still chosen per review and is not part of this shape.
 type AiProviderConfigurationCommon = {
   contextLengthOverride: number | null;
+  reasoningModelCompatibility?: AiReviewerReasoningModelCompatibility;
   credentialSet: boolean;
   credentialUpdatedAt: string | null;
 };
@@ -48,6 +52,7 @@ type AiProviderConfigurationWriteCommon = {
   // An empty label asks the server to keep deriving one from the endpoint.
   label: string;
   contextLengthOverride: number | null;
+  reasoningModelCompatibility?: AiReviewerReasoningModelCompatibility;
   credential?: string | null;
 };
 
@@ -199,6 +204,9 @@ const userConnectionsPath = "/user/ai-reviewer/connections";
 function connectionBody(config: AiProviderConfigurationWrite) {
   const credential =
     config.credential === undefined ? {} : { credential: config.credential };
+  const reasoningModelCompatibility = config.reasoningModelCompatibility
+    ? { reasoningModelCompatibility: true }
+    : {};
   switch (config.provider) {
     case "openai-compatible":
       return {
@@ -207,6 +215,7 @@ function connectionBody(config: AiProviderConfigurationWrite) {
         models: [...config.models],
         label: config.label,
         contextLengthOverride: config.contextLengthOverride,
+        ...reasoningModelCompatibility,
         ...credential,
       };
     case "gemini":
@@ -216,6 +225,7 @@ function connectionBody(config: AiProviderConfigurationWrite) {
         models: [...config.models],
         label: config.label,
         contextLengthOverride: config.contextLengthOverride,
+        ...reasoningModelCompatibility,
         ...credential,
       };
     case "azure":
@@ -232,6 +242,7 @@ function connectionBody(config: AiProviderConfigurationWrite) {
         })),
         label: config.label,
         contextLengthOverride: null,
+        ...reasoningModelCompatibility,
         ...credential,
       };
   }

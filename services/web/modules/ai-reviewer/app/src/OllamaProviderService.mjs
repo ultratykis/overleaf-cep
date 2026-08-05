@@ -427,20 +427,20 @@ export function createAiReviewerProviderService(dependencies = {}) {
     dependencies.openAiCompatibleTransportFactory ??
     dependencies.transportFactory ??
     ((
-      /** @type {{ baseUrl: string, credential?: string, modelTag: string }} */ options,
+      /** @type {{ baseUrl: string, credential?: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options,
     ) => new OllamaOpenAiTransport(options));
   const geminiTransportFactory =
     dependencies.geminiTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string }} */ options) =>
+    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options) =>
       new GeminiAiSdkTransport(options));
   const claudeTransportFactory =
     dependencies.claudeTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string }} */ options) =>
+    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options) =>
       new ClaudeAiSdkTransport(options));
   const azureTransportFactory =
     dependencies.azureTransportFactory ??
     ((
-      /** @type {{ baseUrl: string, requestStyle: "v1" | "deployment", apiVersion?: string, credential: string, modelTag: string }} */ options,
+      /** @type {{ baseUrl: string, requestStyle: "v1" | "deployment", apiVersion?: string, credential: string, modelTag: string, reasoningModelCompatibility?: boolean }} */ options,
     ) => new AzureAiSdkTransport(options));
   const modelFetchImpl = dependencies.modelFetchImpl ?? globalThis.fetch;
   const modelCacheTtlMilliseconds =
@@ -549,16 +549,25 @@ export function createAiReviewerProviderService(dependencies = {}) {
           baseUrl: config.baseUrl,
           credential: config.credential ?? undefined,
           modelTag: config.model,
+          ...(config.reasoningModelCompatibility
+            ? { reasoningModelCompatibility: true }
+            : {}),
         });
       case "gemini":
         return geminiTransportFactory({
           credential: requireNativeCredential(config),
           modelTag: config.model,
+          ...(config.reasoningModelCompatibility
+            ? { reasoningModelCompatibility: true }
+            : {}),
         });
       case "claude":
         return claudeTransportFactory({
           credential: requireNativeCredential(config),
           modelTag: config.model,
+          ...(config.reasoningModelCompatibility
+            ? { reasoningModelCompatibility: true }
+            : {}),
         });
       case "azure":
         return azureTransportFactory({
@@ -567,6 +576,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
           apiVersion: config.apiVersion,
           credential: requireNativeCredential(config),
           modelTag: config.model,
+          ...(config.reasoningModelCompatibility
+            ? { reasoningModelCompatibility: true }
+            : {}),
         });
     }
   }
@@ -782,6 +794,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
           apiVersion: config.apiVersion,
           credential: requireNativeCredential(config),
           modelTag: config.deployments[0],
+          ...(config.reasoningModelCompatibility
+            ? { reasoningModelCompatibility: true }
+            : {}),
         }).generateChat(
           // A reasoning model spends its output budget thinking before it
           // writes anything, so a budget of one token makes the provider

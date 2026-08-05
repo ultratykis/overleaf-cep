@@ -3,6 +3,10 @@
 import { z } from "zod";
 
 import {
+  AiReviewerReasoningModelCompatibilitySchema,
+} from "../../shared/contracts.mjs";
+
+import {
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
@@ -320,6 +324,7 @@ const CONNECTION_KEYS = new Set([
   "label",
   "contextLengthOverride",
   "contextLengthOverrides",
+  "reasoningModelCompatibility",
   "credential",
   "credentialUpdatedAt",
 ]);
@@ -333,6 +338,7 @@ const CONNECTION_UPDATE_KEYS = new Set([
   "label",
   "contextLengthOverride",
   "contextLengthOverrides",
+  "reasoningModelCompatibility",
   "credential",
 ]);
 const CONNECTION_UPDATE_REQUEST_KEYS = new Set([
@@ -348,6 +354,7 @@ const RUN_CONFIG_KEYS = new Set([
   "model",
   "contextLength",
   "contextLengthSource",
+  "reasoningModelCompatibility",
   "credential",
   "credentialUpdatedAt",
 ]);
@@ -405,6 +412,14 @@ export function parseAiReviewerConnection(input) {
     value,
     destination,
   );
+  const reasoningModelCompatibility = Object.hasOwn(
+    value,
+    "reasoningModelCompatibility",
+  )
+    ? AiReviewerReasoningModelCompatibilitySchema.parse(
+        value.reasoningModelCompatibility,
+      )
+    : false;
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -421,6 +436,7 @@ export function parseAiReviewerConnection(input) {
     label,
     ...(contextLengthOverride == null ? {} : { contextLengthOverride }),
     ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
+    ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
   });
@@ -453,6 +469,14 @@ export function parseAiReviewerConnectionUpdate(input) {
     value,
     destination,
   );
+  const reasoningModelCompatibility = Object.hasOwn(
+    value,
+    "reasoningModelCompatibility",
+  )
+    ? AiReviewerReasoningModelCompatibilitySchema.parse(
+        value.reasoningModelCompatibility,
+      )
+    : false;
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -463,6 +487,7 @@ export function parseAiReviewerConnectionUpdate(input) {
     label,
     ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
     ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
+    ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
   });
 }
@@ -518,6 +543,14 @@ export function parseAiReviewerProviderConfig(input) {
   const contextLengthSource = Object.hasOwn(value, "contextLengthSource")
     ? ContextLengthSourceSchema.parse(value.contextLengthSource)
     : undefined;
+  const reasoningModelCompatibility = Object.hasOwn(
+    value,
+    "reasoningModelCompatibility",
+  )
+    ? AiReviewerReasoningModelCompatibilitySchema.parse(
+        value.reasoningModelCompatibility,
+      )
+    : false;
   if (
     contextLengthSource === "derived" &&
     config.provider === "openai-compatible"
@@ -552,6 +585,7 @@ export function parseAiReviewerProviderConfig(input) {
     model: config.model,
     contextLength,
     ...(contextLengthSource === undefined ? {} : { contextLengthSource }),
+    ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
   });
@@ -603,6 +637,9 @@ export function publicAiReviewerProviderConnection(input) {
           ? {}
           : { models: connection.models }),
       contextLengthOverride: connection.contextLengthOverride ?? null,
+      ...(connection.reasoningModelCompatibility
+        ? { reasoningModelCompatibility: true }
+        : {}),
       credentialSet: credentialSet === true,
       credentialUpdatedAt: connection.credentialUpdatedAt ?? null,
     }),

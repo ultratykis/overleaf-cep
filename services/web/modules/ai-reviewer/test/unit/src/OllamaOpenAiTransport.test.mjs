@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import logger from "@overleaf/logger";
+import Settings from "@overleaf/settings";
 import { APICallError } from "ai";
 import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
@@ -11,6 +13,9 @@ import {
   classifySdkError,
 } from "../../../app/src/AiSdkAgentGateway.mjs";
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import {
+  AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
+} from "../../../app/src/AiReviewerFailureLogger.mjs";
 import { OllamaOpenAiTransport } from "../../../app/src/OllamaOpenAiTransport.mjs";
 
 const appSourceDirectory = path.resolve(
@@ -664,7 +669,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
       providerOptions: {
         openaiCompatible: {
-          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -693,6 +697,73 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(Object.isFrozen(result)).toBe(true);
     expect(Object.isFrozen(result.toolCalls)).toBe(true);
     expect(Object.isFrozen(result.usage)).toBe(true);
+  });
+
+  it("omits sampling parameters in reasoning model compatibility mode", async function () {
+    const fixture = transportFixture({ reasoningModelCompatibility: true });
+    fixture.model.doGenerate.mockResolvedValue(plainGenerateResult());
+
+    await fixture.transport.generateChat({ prompt: "Return COMPAT_OK." });
+
+    expect(fixture.model.doGenerate).toHaveBeenCalledExactlyOnceWith({
+      prompt: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "Return COMPAT_OK." }],
+        },
+      ],
+      responseFormat: { type: "text" },
+      providerOptions: {
+        openaiCompatible: {
+          reasoningEffort: "none",
+          strictJsonSchema: true,
+        },
+      },
+      abortSignal: undefined,
+    });
+  });
+
+  it("uses the opt-in provider diagnostic for direct 400 responses", async function () {
+    const responseBody = JSON.stringify({
+      error: { message: "temperature does not support 0" },
+    });
+    const providerError = new APICallError({
+      message: "Provider rejected the request.",
+      url: `${baseUrl}/chat/completions`,
+      requestBodyValues: {},
+      statusCode: 400,
+      responseBody,
+      isRetryable: false,
+    });
+    const previousDebugSetting = Settings.aiReviewer?.debugProviderErrors;
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      Settings.aiReviewer.debugProviderErrors = false;
+      const hidden = transportFixture();
+      hidden.model.doGenerate.mockRejectedValue(providerError);
+      await expect(
+        hidden.transport.generateChat({ prompt: "Return COMPAT_OK." }),
+      ).rejects.toBeInstanceOf(AgentGatewayError);
+      expect(warn).not.toHaveBeenCalled();
+
+      Settings.aiReviewer.debugProviderErrors = true;
+      const visible = transportFixture();
+      visible.model.doGenerate.mockRejectedValue(providerError);
+      await expect(
+        visible.transport.generateChat({ prompt: "Return COMPAT_OK." }),
+      ).rejects.toBeInstanceOf(AgentGatewayError);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        {
+          provider: "openai-compatible",
+          model: modelTag,
+          detail: responseBody,
+        },
+        AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
+      );
+    } finally {
+      Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
+      warn.mockRestore();
+    }
   });
 
   it("generates one strict structured request and deep-freezes the validated JSON result", async function () {
@@ -727,7 +798,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
       providerOptions: {
         openaiCompatible: {
-          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -1441,7 +1511,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
       providerOptions: {
         openaiCompatible: {
-          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },
@@ -3164,7 +3233,6 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       },
       providerOptions: {
         openaiCompatible: {
-          parallel_tool_calls: false,
           reasoningEffort: "none",
           strictJsonSchema: true,
         },

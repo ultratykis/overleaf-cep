@@ -28,6 +28,7 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
+import { recordAiReviewerProviderDiagnostic } from "./AiReviewerFailureLogger.mjs";
 import { parseAzureOpenAiRunDestination } from "./AzureOpenAiEndpointPolicy.mjs";
 import { modelContextLengthFromFields } from "./ModelContextLength.mjs";
 
@@ -48,12 +49,23 @@ const MAX_TOOL_CALL_ID_CHARACTERS = 256;
 const INTRINSIC_PROMISE_THEN = Promise.prototype.then;
 const LOCAL_TRANSPORT_ERRORS = new WeakSet();
 const EMPTY_PROVIDER_OPTIONS = Object.freeze({});
+const DIRECT_SAMPLING_OPTIONS = Object.freeze({
+  temperature: 0,
+  topP: 1,
+  seed: 424242,
+});
 const OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS = Object.freeze({
   openaiCompatible: Object.freeze({
     reasoningEffort: "none",
   }),
 });
 const OPENAI_COMPATIBLE_PROVIDER_OPTIONS = Object.freeze({
+  openaiCompatible: Object.freeze({
+    reasoningEffort: "none",
+    strictJsonSchema: true,
+  }),
+});
+const OPENAI_COMPATIBLE_TOOL_PROVIDER_OPTIONS = Object.freeze({
   openaiCompatible: Object.freeze({
     parallel_tool_calls: false,
     reasoningEffort: "none",
@@ -2880,6 +2892,8 @@ export class HardenedAiSdkProviderTransport {
   #provider;
   #gatewayProviderOptions;
   #providerOptions;
+  #toolProviderOptions;
+  #directSamplingOptions;
   #proposalState = new WeakMap();
 
   /**
@@ -2889,6 +2903,8 @@ export class HardenedAiSdkProviderTransport {
    *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
    *   gatewayProviderOptions: Readonly<Record<string, unknown>>,
    *   providerOptions: Readonly<Record<string, unknown>>,
+   *   toolProviderOptions: Readonly<Record<string, unknown>>,
+   *   reasoningModelCompatibility: boolean,
    *   invalidModelMessage: string,
    * }} options
    */
@@ -2898,6 +2914,8 @@ export class HardenedAiSdkProviderTransport {
     provider,
     gatewayProviderOptions,
     providerOptions,
+    toolProviderOptions,
+    reasoningModelCompatibility,
     invalidModelMessage,
   }) {
     const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
@@ -2909,6 +2927,10 @@ export class HardenedAiSdkProviderTransport {
       providerOptions == null ||
       typeof providerOptions !== "object" ||
       Array.isArray(providerOptions) ||
+      toolProviderOptions == null ||
+      typeof toolProviderOptions !== "object" ||
+      Array.isArray(toolProviderOptions) ||
+      typeof reasoningModelCompatibility !== "boolean" ||
       typeof invalidModelMessage !== "string" ||
       invalidModelMessage.length === 0
     ) {
@@ -2951,6 +2973,10 @@ export class HardenedAiSdkProviderTransport {
     this.#provider = provider;
     this.#gatewayProviderOptions = gatewayProviderOptions;
     this.#providerOptions = providerOptions;
+    this.#toolProviderOptions = toolProviderOptions;
+    this.#directSamplingOptions = reasoningModelCompatibility
+      ? EMPTY_PROVIDER_OPTIONS
+      : DIRECT_SAMPLING_OPTIONS;
   }
 
   /**
@@ -2981,9 +3007,7 @@ export class HardenedAiSdkProviderTransport {
         ...(request.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: request.maxOutputTokens }),
-        temperature: 0,
-        topP: 1,
-        seed: 424242,
+        ...this.#directSamplingOptions,
         responseFormat: {
           type: "text",
         },
@@ -3037,9 +3061,7 @@ export class HardenedAiSdkProviderTransport {
         ...(request.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: request.maxOutputTokens }),
-        temperature: 0,
-        topP: 1,
-        seed: 424242,
+        ...this.#directSamplingOptions,
         responseFormat: {
           type: "text",
         },
@@ -3078,9 +3100,7 @@ export class HardenedAiSdkProviderTransport {
         ...(request.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: request.maxOutputTokens }),
-        temperature: 0,
-        topP: 1,
-        seed: 424242,
+        ...this.#directSamplingOptions,
         responseFormat: {
           type: "json",
           schema: request.schema,
@@ -3122,9 +3142,7 @@ export class HardenedAiSdkProviderTransport {
         ...(request.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: request.maxOutputTokens }),
-        temperature: 0,
-        topP: 1,
-        seed: 424242,
+        ...this.#directSamplingOptions,
         responseFormat: {
           type: "text",
         },
@@ -3140,7 +3158,7 @@ export class HardenedAiSdkProviderTransport {
           type: "tool",
           toolName: request.tool.name,
         },
-        providerOptions: this.#providerOptions,
+        providerOptions: this.#toolProviderOptions,
         abortSignal: signal,
       },
       (result, normalizeSignal) =>
@@ -3242,9 +3260,7 @@ export class HardenedAiSdkProviderTransport {
         ...(request.maxOutputTokens === undefined
           ? {}
           : { maxOutputTokens: request.maxOutputTokens }),
-        temperature: 0,
-        topP: 1,
-        seed: 424242,
+        ...this.#directSamplingOptions,
         responseFormat: {
           type: "text",
         },
@@ -3286,6 +3302,11 @@ export class HardenedAiSdkProviderTransport {
       }
       return normalizedResult;
     } catch (error) {
+      recordAiReviewerProviderDiagnostic({
+        provider: this.#provider,
+        model: this.#modelTag,
+        detail: error,
+      });
       throw classifyUntrustedProviderError(error, signal);
     }
   }
@@ -3416,6 +3437,11 @@ export class HardenedAiSdkProviderTransport {
       }
     }
     if (streamFailed) {
+      recordAiReviewerProviderDiagnostic({
+        provider: this.#provider,
+        model: this.#modelTag,
+        detail: streamError,
+      });
       throw classifyUntrustedProviderError(streamError, signal);
     }
   }
@@ -3476,6 +3502,7 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
    *   baseUrl: unknown,
    *   credential?: unknown,
    *   modelTag: unknown,
+   *   reasoningModelCompatibility?: unknown,
    *   fetchImpl?: typeof fetch,
    *   createProvider?: typeof createOpenAICompatible,
    * }} options
@@ -3484,6 +3511,7 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
     baseUrl,
     credential,
     modelTag,
+    reasoningModelCompatibility = false,
     fetchImpl = globalThis.fetch,
     createProvider = createOpenAICompatible,
   }) {
@@ -3502,6 +3530,9 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
     }
     if (typeof createProvider !== "function") {
       throw new TypeError("createProvider must be a function.");
+    }
+    if (typeof reasoningModelCompatibility !== "boolean") {
+      throw new TypeError("reasoningModelCompatibility must be a boolean.");
     }
 
     const provider = runProviderConstruction(() =>
@@ -3546,6 +3577,8 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       // level and under options. Its context allocation must be configured on
       // the Ollama server, so no ineffective num_ctx option is sent here.
       providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
+      toolProviderOptions: OPENAI_COMPATIBLE_TOOL_PROVIDER_OPTIONS,
+      reasoningModelCompatibility,
       invalidModelMessage:
         "The OpenAI-compatible provider must return a concrete Chat Completions model.",
     });
@@ -3565,6 +3598,7 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
    *   apiVersion?: unknown,
    *   credential: unknown,
    *   modelTag: unknown,
+   *   reasoningModelCompatibility?: unknown,
    *   fetchImpl?: typeof fetch,
    *   createProvider?: typeof createAzure,
    * }} options
@@ -3575,6 +3609,7 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
     apiVersion,
     credential,
     modelTag,
+    reasoningModelCompatibility = false,
     fetchImpl = globalThis.fetch,
     createProvider = createAzure,
   }) {
@@ -3591,6 +3626,9 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
     }
     if (typeof createProvider !== "function") {
       throw new TypeError("createProvider must be a function.");
+    }
+    if (typeof reasoningModelCompatibility !== "boolean") {
+      throw new TypeError("reasoningModelCompatibility must be a boolean.");
     }
     const effectiveApiVersion =
       destination.apiVersion ?? DEFAULT_AZURE_OPENAI_API_VERSION;
@@ -3630,6 +3668,8 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
       modelTag: destination.model,
       gatewayProviderOptions: EMPTY_PROVIDER_OPTIONS,
       providerOptions: EMPTY_PROVIDER_OPTIONS,
+      toolProviderOptions: EMPTY_PROVIDER_OPTIONS,
+      reasoningModelCompatibility,
       invalidModelMessage:
         "The Azure provider must return a concrete Chat Completions model.",
     });
@@ -3731,6 +3771,7 @@ export function createNativeProviderFetch({
  *   fetchImpl: typeof fetch,
  *   modelTag: unknown,
  *   provider: "gemini" | "claude",
+ *   reasoningModelCompatibility?: unknown,
  * }} options
  */
 function nativeTransportOptions({
@@ -3739,11 +3780,15 @@ function nativeTransportOptions({
   fetchImpl,
   modelTag,
   provider,
+  reasoningModelCompatibility = false,
 }) {
   const parsedCredential = parseAiReviewerProviderCredential(credential);
   const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
   if (typeof createProvider !== "function") {
     throw new TypeError("createProvider must be a function.");
+  }
+  if (typeof reasoningModelCompatibility !== "boolean") {
+    throw new TypeError("reasoningModelCompatibility must be a boolean.");
   }
   const endpoint = NATIVE_PROVIDER_ENDPOINTS[provider];
   const sdkProvider = runProviderConstruction(() =>
@@ -3772,6 +3817,8 @@ function nativeTransportOptions({
     provider,
     gatewayProviderOptions: EMPTY_PROVIDER_OPTIONS,
     providerOptions: EMPTY_PROVIDER_OPTIONS,
+    toolProviderOptions: EMPTY_PROVIDER_OPTIONS,
+    reasoningModelCompatibility,
     invalidModelMessage:
       "The native AI SDK provider must return a concrete language model.",
   };
@@ -3782,6 +3829,7 @@ export class GeminiAiSdkTransport extends HardenedAiSdkProviderTransport {
    * @param {{
    *   credential: unknown,
    *   modelTag: unknown,
+   *   reasoningModelCompatibility?: unknown,
    *   fetchImpl?: typeof fetch,
    *   createProvider?: typeof createGoogleGenerativeAI,
    * }} options
@@ -3789,6 +3837,7 @@ export class GeminiAiSdkTransport extends HardenedAiSdkProviderTransport {
   constructor({
     credential,
     modelTag,
+    reasoningModelCompatibility = false,
     fetchImpl = globalThis.fetch,
     createProvider = createGoogleGenerativeAI,
   }) {
@@ -3799,6 +3848,7 @@ export class GeminiAiSdkTransport extends HardenedAiSdkProviderTransport {
         fetchImpl,
         modelTag,
         provider: "gemini",
+        reasoningModelCompatibility,
       }),
     );
   }
@@ -3809,6 +3859,7 @@ export class ClaudeAiSdkTransport extends HardenedAiSdkProviderTransport {
    * @param {{
    *   credential: unknown,
    *   modelTag: unknown,
+   *   reasoningModelCompatibility?: unknown,
    *   fetchImpl?: typeof fetch,
    *   createProvider?: typeof createAnthropic,
    * }} options
@@ -3816,6 +3867,7 @@ export class ClaudeAiSdkTransport extends HardenedAiSdkProviderTransport {
   constructor({
     credential,
     modelTag,
+    reasoningModelCompatibility = false,
     fetchImpl = globalThis.fetch,
     createProvider = createAnthropic,
   }) {
@@ -3826,6 +3878,7 @@ export class ClaudeAiSdkTransport extends HardenedAiSdkProviderTransport {
         fetchImpl,
         modelTag,
         provider: "claude",
+        reasoningModelCompatibility,
       }),
     );
   }

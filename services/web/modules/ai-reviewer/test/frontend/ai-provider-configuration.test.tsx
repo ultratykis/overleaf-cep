@@ -510,6 +510,27 @@ describe("AI reviewer: provider configuration", function () {
     );
   });
 
+  it("serializes reasoning model compatibility when enabled", async function () {
+    const route = fetchMock.post(
+      `/project/${projectId}/ai-reviewer/connections`,
+      configured,
+    );
+    const candidate: AiProviderConfigurationWrite = {
+      ...configurationWrite,
+      reasoningModelCompatibility: true,
+    };
+
+    await createAiProviderConnection(
+      projectId,
+      candidate,
+      new AbortController().signal,
+    );
+
+    expect(
+      JSON.parse(String(route.callHistory.calls()[0].options.body)),
+    ).to.deep.equal(candidate);
+  });
+
   it("serializes only the Azure request style, endpoint, version, deployments, and common fields", async function () {
     const route = fetchMock.post(
       `/project/${projectId}/ai-reviewer/connections`,
@@ -1558,6 +1579,42 @@ describe("AI reviewer: provider configuration", function () {
     expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
       ...configurationWrite,
       contextLengthOverride: 65_536,
+    });
+  });
+
+  it("loads and clears reasoning model compatibility from advanced settings", async function () {
+    const compatible: AiProviderConnection = {
+      ...otherConfigured,
+      config: {
+        ...otherConfiguration,
+        reasoningModelCompatibility: true,
+      },
+    };
+    const saveConfiguration = sinon.stub().resolves(compatible);
+    renderDetails({
+      getConfiguration: sinon.stub().resolves(compatible),
+      saveConfiguration,
+    });
+    await waitUntilLoaded();
+
+    editConnection(compatible);
+    fireEvent.click(screen.getByText("Advanced settings"));
+    const compatibility = screen.getByRole("checkbox", {
+      name: "Reasoning model compatibility",
+    });
+    const compatibilityHelp = screen.getByText(
+      "Do not send temperature, top-p, or seed. Enable this for reasoning models such as GPT-5 and the o-series, which may reject sampling parameters.",
+    );
+    expect(compatibility.getAttribute("aria-describedby")).to.equal(
+      compatibilityHelp.id,
+    );
+    expect((compatibility as HTMLInputElement).checked).to.equal(true);
+    fireEvent.click(compatibility);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
+      ...otherConfigurationWrite,
     });
   });
 

@@ -338,7 +338,6 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
         url: `${baseUrl}/chat/completions`,
         body: {
           model: modelTag,
-          parallel_tool_calls: false,
           max_tokens: 32,
           temperature: 0,
           top_p: 1,
@@ -365,6 +364,31 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
       },
     });
     expect(JSON.stringify(result)).not.toContain("AI_REVIEWER_");
+  });
+
+  it("omits sampling fields from the wire in reasoning model compatibility mode", async function () {
+    let requestBody;
+    const transport = new OllamaOpenAiTransport({
+      baseUrl,
+      modelTag,
+      reasoningModelCompatibility: true,
+      fetchImpl: vi.fn(async (_input, init) => {
+        requestBody = JSON.parse(init.body);
+        return successfulChatResponse();
+      }),
+    });
+
+    await transport.generateChat({ prompt, maxOutputTokens: 32 });
+
+    expect(requestBody).not.toHaveProperty("parallel_tool_calls");
+    expect(requestBody).not.toHaveProperty("temperature");
+    expect(requestBody).not.toHaveProperty("top_p");
+    expect(requestBody).not.toHaveProperty("seed");
+    expect(requestBody).toMatchObject({
+      model: modelTag,
+      max_tokens: 32,
+      reasoning_effort: "none",
+    });
   });
 
   it("attaches a remote credential only as the Authorization header and redacts transport failure text", async function () {
@@ -450,13 +474,12 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
       redirect: "error",
       signal: controller.signal,
     });
-    expect(Buffer.byteLength(requests[0].body, "utf8")).toBe(3_453);
+    expect(Buffer.byteLength(requests[0].body, "utf8")).toBe(3_425);
     expect(
       crypto.createHash("sha256").update(requests[0].body).digest("hex"),
-    ).toBe("d445f5a19d0cfe4d9a938b017230f8e563a5f4f9c28c52f98e87a6aef7a981a0");
+    ).toBe("7a369ce2684502b69926560ac7ff4c1b1da89bc2fa0da01d4d572c3c291e4087");
     expect(JSON.parse(requests[0].body)).toEqual({
       model: modelTag,
-      parallel_tool_calls: false,
       max_tokens: 96,
       temperature: 0,
       top_p: 1,
@@ -522,7 +545,6 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
         url: `${baseUrl}/chat/completions`,
         body: {
           model: modelTag,
-          parallel_tool_calls: false,
           max_tokens: 48,
           temperature: 0,
           top_p: 1,
@@ -649,7 +671,6 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
       url: `${baseUrl}/chat/completions`,
       body: {
         model: modelTag,
-        parallel_tool_calls: false,
         max_tokens: 32,
         temperature: 0,
         top_p: 1,
