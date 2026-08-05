@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect } from "chai";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import postcss from "postcss";
+import postcss, { type Root } from "postcss";
 import React from "react";
 import * as sass from "sass";
 
@@ -28,6 +28,14 @@ const longFailureGuidance =
 const stylesheetPath = path.resolve(
   __dirname,
   "../../frontend/stylesheets/ai-reviewer.scss",
+);
+const hostStylesheetPath = path.resolve(
+  __dirname,
+  "../../../../frontend/stylesheets/main-style.scss",
+);
+const repositoryNodeModulesPath = path.resolve(
+  __dirname,
+  "../../../../../../node_modules",
 );
 const panelSourcePath = path.resolve(
   __dirname,
@@ -145,6 +153,24 @@ function installPanelStyles() {
   style.textContent = parsed.toString();
   document.head.append(style);
   return style;
+}
+
+function compileHostStyles() {
+  const css = sass.compile(hostStylesheetPath, {
+    loadPaths: [path.dirname(hostStylesheetPath), repositoryNodeModulesPath],
+  }).css;
+  return postcss.parse(css);
+}
+
+function hostDeclarationsFor(stylesheet: Root, selector: string) {
+  const declarations = new Map<string, string>();
+  stylesheet.walkRules((rule) => {
+    if (!rule.selectors.includes(selector)) return;
+    rule.walkDecls((declaration) => {
+      declarations.set(declaration.prop, declaration.value);
+    });
+  });
+  return declarations;
 }
 
 function hasZeroMinWidth(style: CSSStyleDeclaration) {
@@ -465,6 +491,7 @@ function persistenceFor(
 
 describe("AI reviewer panel width", function () {
   let panelStyles: HTMLStyleElement;
+  let hostStyles: Root;
 
   before(function () {
     expect(readFileSync(panelSourcePath, "utf8")).to.include(
@@ -474,11 +501,52 @@ describe("AI reviewer panel width", function () {
       'import "../../stylesheets/ai-reviewer.scss";',
     );
     panelStyles = installPanelStyles();
+    hostStyles = compileHostStyles();
   });
 
   after(function () {
     panelStyles.remove();
   });
+
+  for (const theme of ["default", "light"] as const) {
+    it(`keeps all portaled menu surfaces on the ${theme} theme tokens`, function () {
+      const root = hostDeclarationsFor(hostStyles, ":root");
+      const menu =
+        theme === "default"
+          ? hostDeclarationsFor(
+              hostStyles,
+              "[data-theme=default] .ide-redesign-main",
+            )
+          : root;
+      const input =
+        theme === "default"
+          ? hostDeclarationsFor(
+              hostStyles,
+              "[data-theme=default] .ide-redesign-main .form-control",
+            )
+          : root;
+      const themed =
+        theme === "light"
+          ? hostDeclarationsFor(hostStyles, "[data-theme=light]")
+          : root;
+      expect(menu.get("--dropdown-background")).to.equal(
+        theme === "default" ? "var(--bg-dark-primary)" : "var(--white)",
+      );
+      expect(input.get("--input-field-bg")).to.equal(
+        theme === "default"
+          ? "var(--bg-dark-primary)"
+          : "var(--bg-light-primary)",
+      );
+      expect(themed.get("--bg-primary-themed")).to.equal(
+        theme === "default"
+          ? "var(--bg-dark-primary)"
+          : "var(--bg-light-primary)",
+      );
+      const portaledMenu = declarationsFor(".ai-reviewer-panel-portaled-menu");
+      expect(portaledMenu.get("display")).to.equal("block");
+      expect(portaledMenu.get("height")).to.equal("auto");
+    });
+  }
 
   it("keeps discussion bubbles and the composer on themed color pairs", function () {
     const discussionBubble = declarationsFor(
@@ -533,6 +601,27 @@ describe("AI reviewer panel width", function () {
     );
     expect(unresolvedJump.get("color")).to.equal(
       "var(--content-primary-themed)",
+    );
+  });
+
+  it("collapses parser separator newlines while preserving preformatted code", function () {
+    const markdown = declarationsFor(".ai-reviewer-markdown");
+    expect(markdown.get("white-space")).to.equal("normal");
+
+    const pre = declarationsFor(".ai-reviewer-markdown pre");
+    expect(pre.get("white-space")).to.equal("pre");
+
+    const table = declarationsFor(".ai-reviewer-markdown table");
+    expect(table.get("white-space")).to.equal("normal");
+    expect(table.get("width")).to.equal("100%");
+    expect(table.get("table-layout")).to.equal("fixed");
+    expect(table.get("border-collapse")).to.equal("collapse");
+
+    const cell = declarationsFor(".ai-reviewer-markdown td");
+    expect(cell.get("white-space")).to.equal("normal");
+    expect(cell.get("overflow-wrap")).to.equal("anywhere");
+    expect(cell.get("border")).to.equal(
+      "1px solid var(--border-divider-themed)",
     );
   });
 
@@ -612,6 +701,10 @@ describe("AI reviewer panel width", function () {
     expect(skillGitPreview.get("background")).to.equal(
       "var(--bg-primary-themed)",
     );
+
+    const portaledMenu = declarationsFor(".ai-reviewer-panel-portaled-menu");
+    expect(portaledMenu.get("display")).to.equal("block");
+    expect(portaledMenu.get("height")).to.equal("auto");
 
     const footer = declarationsFor(
       ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-footer",

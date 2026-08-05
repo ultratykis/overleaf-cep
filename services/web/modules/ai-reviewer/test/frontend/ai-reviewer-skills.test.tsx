@@ -46,6 +46,20 @@ const gitPreview: AiReviewerSkillGitPreview = {
       homepage: "https://github.com/imbad0202/academic-research-skills",
     },
   ],
+  skippedPlugins: [
+    {
+      name: "external-reviewer",
+      reason: "external-source",
+      sourceUrl: "https://git.example.com/vendor/reviewer.git",
+      sourcePath: "skills/reviewer",
+    },
+    {
+      name: "broken-local",
+      reason: "no-readable-skills",
+      sourcePath: "broken-local",
+    },
+  ],
+  truncated: false,
   skills: [
     {
       path: "academic-paper/SKILL.md",
@@ -206,6 +220,8 @@ describe("AI reviewer skills settings", function () {
         "Skills give the AI reviewer reusable instructions for specific review tasks.",
       ),
     ).to.exist;
+    expect(screen.getByText("Used only in Review and Brainstorm modes.")).to
+      .exist;
     expect(
       screen.getByText(
         "No skills added yet. Upload Markdown files or preview a Git import below.",
@@ -389,6 +405,19 @@ describe("AI reviewer skills settings", function () {
         "https://github.com/imbad0202/academic-research-skills",
       ),
     ).to.exist;
+    expect(within(previewRegion).getByText("Skipped plugins and skills")).to
+      .exist;
+    expect(
+      within(previewRegion).getByText(
+        "https://git.example.com/vendor/reviewer.git",
+      ),
+    ).to.exist;
+    expect(previewRegion.textContent).to.contain(
+      "Stored in another repository. Import it separately:",
+    );
+    expect(previewRegion.textContent).to.contain(
+      "No readable SKILL.md found under:",
+    );
     expect(
       within(previewRegion).getByRole("checkbox", { name: "academic-paper" }),
     ).to.exist;
@@ -462,11 +491,40 @@ describe("AI reviewer skills settings", function () {
     expect(within(storedGroups[0]).getByText("2 skills")).to.exist;
   });
 
+  it("states when the preview omits skills at the retention limit", async function () {
+    const previewSkillGitImport = sinon.stub().resolves({
+      ...gitPreview,
+      truncated: true,
+      skills: gitPreview.skills.slice(0, 2),
+    });
+    renderSkills({ previewSkillGitImport });
+    openSkillsTab();
+    fireEvent.change(screen.getByLabelText("Repository"), {
+      target: { value: "owner/repository" },
+    });
+    const previewButton = screen.getByRole("button", {
+      name: "Preview import",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(previewButton.disabled).to.equal(false));
+    fireEvent.click(previewButton);
+
+    const previewRegion = await screen.findByRole("region", {
+      name: "Skill import preview",
+    });
+    expect(
+      within(previewRegion).getByText(
+        "Some skills are not shown because the 32 MiB preview limit was reached.",
+      ),
+    ).to.exist;
+    expect(within(previewRegion).getByRole("status")).to.exist;
+  });
+
   it("shows no-manifest metadata as unknown and blocks a selection above the twenty-skill limit", async function () {
     const fallbackPreview: AiReviewerSkillGitPreview = {
       ...gitPreview,
       manifestFound: false,
       plugins: [],
+      skippedPlugins: [],
       skills: gitPreview.skills.slice(0, 2),
     };
     const previewSkillGitImport = sinon.stub().resolves(fallbackPreview);
@@ -498,14 +556,20 @@ describe("AI reviewer skills settings", function () {
         "No skill manifest was found. Skills were discovered from SKILL.md files; plugin version and license are unknown.",
       ),
     ).to.exist;
-    expect(within(previewRegion).getByRole("alert").textContent).to.contain(
-      "This selection would exceed the 20-skill limit",
-    );
+    expect(within(previewRegion).queryByRole("alert")).not.to.exist;
     expect(
       within(previewRegion).getByRole("button", {
         name: "Import selected skills",
       }),
     ).to.have.property("disabled", true);
+    fireEvent.click(
+      within(previewRegion).getByRole("checkbox", { name: "academic-paper" }),
+    );
+    expect(
+      within(previewRegion).getByRole("button", {
+        name: "Import selected skills",
+      }),
+    ).to.have.property("disabled", false);
     expect(confirmSkillGitImport).not.to.have.been.called;
   });
 

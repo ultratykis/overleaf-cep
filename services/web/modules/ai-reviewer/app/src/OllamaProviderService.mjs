@@ -5,8 +5,13 @@ import {
   parseAiReviewerConnection,
   parseAiReviewerProviderConfig,
 } from "./AiReviewerProviderConfig.mjs";
-import { resolveModelContextLength } from "./ModelContextLength.mjs";
 import {
+  modelContextLengthFromFields,
+  resolveModelContextLength,
+  resolveModelContextLengthWithoutDetection,
+} from "./ModelContextLength.mjs";
+import {
+  assertOpenAiCompatibleCredentialTransport,
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
@@ -31,10 +36,11 @@ const NATIVE_MODEL_ENDPOINTS = Object.freeze({
   gemini: "https://generativelanguage.googleapis.com/v1beta/models",
   claude: "https://api.anthropic.com/v1/models",
 });
-const NON_GENERATION_OPENAI_MODEL =
-  /(?:^|[-_.:/])(audio|dall-e|embed(?:ding)?s?|image|moderation|realtime|speech|transcri(?:be|ption)|tts|whisper)(?:$|[-_.:/])/iu;
-const NON_GENERATION_CLAUDE_MODEL =
-  /(?:^|[-_.:/])(audio|embed(?:ding)?s?|image)(?:$|[-_.:/])/iu;
+// Standard model-list responses usually omit output modality and tool support.
+// Prefer advertised capabilities below; this version-independent family rule
+// removes only names that unambiguously identify non-review workloads.
+const NON_REVIEW_MODEL =
+  /(?:^|[\s._:/-])(audio|computer[\s._:/-]*use|dall-e|deep[\s._:/-]*research|embed(?:ding)?s?|image|imagen|lyria|moderation|music|nano[\s._:/-]*banana|realtime|robotics|speech|transcri(?:be|ption)|tts|whisper)(?:$|[\s._:/-])/iu;
 
 /** @param {AbortSignal | undefined} signal */
 function throwIfAborted(signal) {
@@ -236,8 +242,14 @@ function safeModelId(value) {
  * @param {ReturnType<typeof parseAiReviewerProviderConfig>["provider"]} provider
  * @param {unknown} input
  * @param {Map<string, string[]> | null} [capabilities]
+ * @param {Map<string, number> | null} [runningContextLengths]
  */
-function normalizeModels(provider, input, capabilities = null) {
+function normalizeModels(
+  provider,
+  input,
+  capabilities = null,
+  runningContextLengths = null,
+) {
   const root = /** @type {any} */ (input);
   const entries =
     provider === "openai-compatible"
@@ -269,12 +281,9 @@ function normalizeModels(provider, input, capabilities = null) {
         continue;
       }
     } else if (
-      (provider === "openai-compatible" &&
-        NON_GENERATION_OPENAI_MODEL.test(id)) ||
-      (provider === "gemini" &&
-        (!Array.isArray(candidate.supportedGenerationMethods) ||
-          !candidate.supportedGenerationMethods.includes("generateContent"))) ||
-      (provider === "claude" && NON_GENERATION_CLAUDE_MODEL.test(id))
+      provider === "gemini" &&
+      (!Array.isArray(candidate.supportedGenerationMethods) ||
+        !candidate.supportedGenerationMethods.includes("generateContent"))
     ) {
       continue;
     }
@@ -286,8 +295,17 @@ function normalizeModels(provider, input, capabilities = null) {
             ? candidate.display_name
             : candidate.name,
       ) ?? id;
+    if (NON_REVIEW_MODEL.test(`${id} ${displayName}`)) continue;
     seen.add(id);
-    models.push(Object.freeze({ id, displayName }));
+    const detectedContextLength =
+      runningContextLengths?.get(id) ?? modelContextLengthFromFields(candidate);
+    models.push(
+      Object.freeze({
+        id,
+        displayName,
+        ...(detectedContextLength == null ? {} : { detectedContextLength }),
+      }),
+    );
   }
   if (models.length === 0) {
     throw modelDiscoveryUnsupported();
@@ -337,6 +355,46 @@ async function fetchOllamaCapabilities(baseUrl, guardedFetch, signal) {
       );
     }
     return capabilities.size === 0 ? null : capabilities;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A loaded Ollama model reports the context actually allocated for this
+ * process. This is more useful than the model's larger theoretical limit.
+ *
+ * @param {string} baseUrl
+ * @param {(input: string, init: any) => Promise<Response>} guardedFetch
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<Map<string, number> | null>}
+ */
+async function fetchOllamaRunningContextLengths(baseUrl, guardedFetch, signal) {
+  try {
+    const response = await guardedFetch(`${baseUrl}/api/ps`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!response.ok) {
+      cancelResponseBody(response);
+      return null;
+    }
+    const body = /** @type {any} */ (
+      await readBoundedModelResponse(response, signal)
+    );
+    if (!Array.isArray(body?.models)) {
+      return null;
+    }
+    const contexts = new Map();
+    for (const entry of body.models) {
+      const id = safeModelId(entry?.name ?? entry?.model);
+      const contextLength = modelContextLengthFromFields(entry);
+      if (id != null && contextLength != null) {
+        contexts.set(id, contextLength);
+      }
+    }
+    return contexts.size === 0 ? null : contexts;
   } catch {
     return null;
   }
@@ -430,8 +488,101 @@ export function createAiReviewerProviderService(dependencies = {}) {
   const modelFetchImpl = dependencies.modelFetchImpl ?? globalThis.fetch;
   const modelCacheTtlMilliseconds =
     dependencies.modelCacheTtlMilliseconds ?? MODEL_CACHE_TTL_MILLISECONDS;
+  const contextLengthCacheTtlMilliseconds =
+    dependencies.contextLengthCacheTtlMilliseconds ??
+    MODEL_CACHE_TTL_MILLISECONDS;
   const modelNow = dependencies.modelNow ?? (() => Date.now());
   const modelCache = new Map();
+  const contextLengthCache = new Map();
+  const advertisedContextLengthCache = new Map();
+
+  /**
+   * @param {ReturnType<typeof parseAiReviewerConnection>} connection
+   * @param {string} model
+   */
+  function contextLengthResolutionInput(
+    connection,
+    model,
+    detectedContextLength = null,
+  ) {
+    const modelOverride =
+      connection.provider === "azure"
+        ? connection.contextLengthOverrides?.find(
+            (entry) => entry.model === model,
+          )?.contextLength
+        : undefined;
+    return {
+      provider: connection.provider,
+      ...(connection.provider === "openai-compatible" ||
+      connection.provider === "azure"
+        ? {
+            baseUrl: connection.baseUrl,
+            ...(connection.provider === "azure"
+              ? {
+                  requestStyle: connection.requestStyle,
+                  apiVersion: connection.apiVersion,
+                }
+              : {}),
+          }
+        : {}),
+      model,
+      ...(typeof connection.credential === "string"
+        ? { credential: connection.credential }
+        : {}),
+      contextLengthOverride:
+        modelOverride ?? connection.contextLengthOverride ?? null,
+      detectedContextLength,
+    };
+  }
+
+  /**
+   * Keep owner identity in the caller-provided prefix and credential material
+   * out of the key. A credential rotation changes its server-owned timestamp.
+   *
+   * @param {ReturnType<typeof parseAiReviewerConnection>} connection
+   * @param {string} model
+   * @param {string} cacheKey
+   */
+  function contextLengthCacheKey(connection, model, cacheKey) {
+    return [
+      cacheKey || connection.id || "",
+      connection.provider,
+      connection.provider === "openai-compatible" ||
+      connection.provider === "azure"
+        ? connection.baseUrl
+        : "",
+      connection.provider === "azure" ? connection.requestStyle : "",
+      connection.provider === "azure" ? (connection.apiVersion ?? "") : "",
+      connection.credentialUpdatedAt ?? "",
+      connection.contextLengthOverride ?? "",
+      JSON.stringify(
+        connection.provider === "azure"
+          ? (connection.contextLengthOverrides ?? [])
+          : [],
+      ),
+      model,
+    ].join("\u0000");
+  }
+
+  /** @param {string} key */
+  function cachedContextLength(key) {
+    const cached = contextLengthCache.get(key);
+    if (cached?.expiresAt > modelNow()) {
+      return cached.resolution;
+    }
+    contextLengthCache.delete(key);
+    return null;
+  }
+
+  /** @param {string} key */
+  function cachedAdvertisedContextLength(key) {
+    const cached = advertisedContextLengthCache.get(key);
+    if (cached?.expiresAt > modelNow()) {
+      return cached.contextLength;
+    }
+    advertisedContextLengthCache.delete(key);
+    return null;
+  }
 
   /** @param {ReturnType<typeof parseAiReviewerProviderConfig>} config */
   function createTransport(config) {
@@ -470,6 +621,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
   async function listModels(input, { signal, cacheKey = "" } = {}) {
     throwIfAborted(signal);
     const config = parseAiReviewerConnection(input);
+    if ("baseUrl" in config) {
+      // Check before cache lookup as well as before fetch: an entry populated by
+      // an older process must not keep any plaintext credential connection usable.
+      assertOpenAiCompatibleCredentialTransport(
+        config.baseUrl,
+        typeof config.credential === "string",
+      );
+    }
     if (config.provider === "azure") {
       // An Azure API key does not grant access to the management-plane
       // deployments listing. These are the deployment names the user entered,
@@ -537,7 +696,39 @@ export function createAiReviewerProviderService(dependencies = {}) {
             signal,
           )
         : null;
-    const models = normalizeModels(config.provider, body, capabilities);
+    const runningContextLengths =
+      config.provider === "openai-compatible" && nativeBaseUrl !== null
+        ? await fetchOllamaRunningContextLengths(
+            nativeBaseUrl,
+            createGuardedOpenAiCompatibleFetch({
+              baseUrl: nativeBaseUrl,
+              allowedRequestUrl: `${nativeBaseUrl}/api/ps`,
+              fetchImpl: modelFetchImpl,
+            }),
+            signal,
+          )
+        : null;
+    const normalizedModels = normalizeModels(
+      config.provider,
+      body,
+      capabilities,
+      runningContextLengths,
+    );
+    const models = Object.freeze(
+      normalizedModels.map(({ id, displayName }) =>
+        Object.freeze({ id, displayName }),
+      ),
+    );
+    for (const candidate of normalizedModels) {
+      if (candidate.detectedContextLength == null) continue;
+      advertisedContextLengthCache.set(
+        contextLengthCacheKey(config, candidate.id, cacheKey),
+        {
+          expiresAt: now + modelCacheTtlMilliseconds,
+          contextLength: candidate.detectedContextLength,
+        },
+      );
+    }
     modelCache.set(effectiveCacheKey, {
       expiresAt: now + modelCacheTtlMilliseconds,
       models,
@@ -549,44 +740,74 @@ export function createAiReviewerProviderService(dependencies = {}) {
     listModels,
 
     /**
-     * Resolve the context length of one (connection, model) pair. A connection
-     * no longer stores this, so every run resolves it again from the model it
-     * actually selected, and only the connection's escape hatch overrides it.
+     * Return a displayable value without starting metadata discovery. A prior
+     * selected-model resolution wins while its cache entry is live; otherwise
+     * the picker shows an override, an advertised value, or an unknown value.
      *
      * @param {unknown} input
      * @param {unknown} model
+     * @param {{ cacheKey?: string }} [options]
      */
-    async resolveContextLength(input, model) {
+    contextLengthForModelList(input, model, { cacheKey = "" } = {}) {
       const connection = parseAiReviewerConnection(input);
-      return await resolveModelContextLength(
+      const parsedModel = parseOpenAiCompatibleModelId(model);
+      const key = contextLengthCacheKey(connection, parsedModel, cacheKey);
+      const advertised = cachedAdvertisedContextLength(key);
+      return (
+        cachedContextLength(key) ??
+        resolveModelContextLengthWithoutDetection(
+          contextLengthResolutionInput(connection, parsedModel, advertised),
+        )
+      );
+    },
+
+    /**
+     * Resolve the context length of one (connection, model) pair. A connection
+     * no longer stores this, so only the model a run actually selected may
+     * start detection. A short-lived pair cache avoids repeating that request,
+     * and only the connection's escape hatch overrides it.
+     *
+     * @param {unknown} input
+     * @param {unknown} model
+     * @param {{ signal?: AbortSignal, cacheKey?: string }} [options]
+     */
+    async resolveContextLength(input, model, { signal, cacheKey = "" } = {}) {
+      throwIfAborted(signal);
+      const connection = parseAiReviewerConnection(input);
+      const parsedModel = parseOpenAiCompatibleModelId(model);
+      const key = contextLengthCacheKey(connection, parsedModel, cacheKey);
+      const cached = cachedContextLength(key);
+      if (cached != null) {
+        return cached;
+      }
+      const advertised = cachedAdvertisedContextLength(key);
+      const resolution = await resolveModelContextLength(
+        contextLengthResolutionInput(connection, parsedModel, advertised),
         {
-          provider: connection.provider,
-          ...(connection.provider === "openai-compatible" ||
-          connection.provider === "azure"
-            ? {
-                baseUrl: connection.baseUrl,
-                ...(connection.provider === "azure"
-                  ? {
-                      requestStyle: connection.requestStyle,
-                      apiVersion: connection.apiVersion,
-                    }
-                  : {}),
-              }
-            : {}),
-          model: parseOpenAiCompatibleModelId(model),
-          ...(typeof connection.credential === "string"
-            ? { credential: connection.credential }
-            : {}),
-          contextLengthOverride: connection.contextLengthOverride ?? null,
-        },
-        {
-          detectOpenAiCompatibleContextLength: async (candidate) =>
-            await contextLengthDetector({
+          detectOpenAiCompatibleContextLength: async (candidate) => {
+            const timeoutSignal = contextLengthDetectionSignalFactory();
+            const detectionSignal =
+              signal == null
+                ? timeoutSignal
+                : timeoutSignal == null
+                  ? signal
+                  : AbortSignal.any([signal, timeoutSignal]);
+            return await contextLengthDetector({
               ...candidate,
-              signal: contextLengthDetectionSignalFactory(),
-            }),
+              ...(detectionSignal == null ? {} : { signal: detectionSignal }),
+            });
+          },
         },
       );
+      // Detection is best-effort, but the caller's cancellation is not. The
+      // resolver may convert detector failures to an advertised or unknown
+      // value, so re-check the route signal before caching or starting a review.
+      throwIfAborted(signal);
+      contextLengthCache.set(key, {
+        expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,
+        resolution,
+      });
+      return resolution;
     },
 
     /**
@@ -599,6 +820,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
      */
     async testConnection(input, { signal, cacheKey } = {}) {
       const config = parseAiReviewerConnection(input);
+      if ("baseUrl" in config) {
+        // A connection test is an outbound credential path too, including the
+        // Azure probe that does not pass through model listing.
+        assertOpenAiCompatibleCredentialTransport(
+          config.baseUrl,
+          typeof config.credential === "string",
+        );
+      }
       if (config.provider === "azure") {
         await azureTransportFactory({
           baseUrl: config.baseUrl,
@@ -641,6 +870,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
      * @param {unknown} input
      * @param {{
      *   skills?: readonly unknown[],
+     *   modeInstructions?: unknown,
      *   readProjectFile: Function,
      *   projectContext?: unknown,
      *   searchZotero?: Function,
@@ -651,6 +881,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
       input,
       {
         skills,
+        modeInstructions,
         readProjectFile,
         projectContext,
         searchZotero,
@@ -665,6 +896,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
         contextLength: config.contextLength,
         contextLengthSource: config.contextLengthSource,
         ...(skills === undefined ? {} : { skills }),
+        ...(modeInstructions === undefined ? {} : { modeInstructions }),
         readProjectFile,
         projectContext,
         searchZotero,

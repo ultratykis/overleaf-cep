@@ -1,33 +1,25 @@
 // @ts-check
 
-export const DEFAULT_MODEL_CONTEXT_LENGTH = 4_096;
 export const MAX_DETECTED_MODEL_CONTEXT_LENGTH = 10_000_000;
 
-const GEMINI_ONE_MILLION_CONTEXT_MODELS = new Set([
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-3.1-pro-preview",
-  "gemini-3.1-pro-preview-customtools",
-  "gemini-3-flash-preview",
-  "gemini-3.1-flash-lite",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-3.6-flash",
+// Provider model-list APIs use different names for the same limit. Keep the
+// paths together so supporting another compatible server is a one-line change.
+export const MODEL_CONTEXT_LENGTH_FIELD_PATHS = Object.freeze([
+  Object.freeze(["max_input_tokens"]),
+  Object.freeze(["inputTokenLimit"]),
+  Object.freeze(["max_model_len"]),
+  Object.freeze(["max_context_length"]),
+  Object.freeze(["n_ctx"]),
+  Object.freeze(["context_window"]),
+  Object.freeze(["context_length"]),
+  Object.freeze(["metadata", "context_length"]),
+  Object.freeze(["contextLength"]),
 ]);
-const CLAUDE_ONE_MILLION_CONTEXT_MODELS = new Set([
-  "claude-opus-4-6",
-  "claude-opus-4-7",
-  "claude-opus-4-8",
-  "claude-sonnet-4-6",
-  "claude-fable-5",
-  "claude-opus-5",
-  "claude-sonnet-5",
-  "claude-mythos-5",
-  "claude-mythos-preview",
-]);
-const CLAUDE_TWO_HUNDRED_THOUSAND_CONTEXT_MODEL =
-  /^(?:claude-3(?:-(?:5|7))?-(?:haiku|sonnet|opus)(?:-\d{8})?|claude-(?:haiku|sonnet|opus)-4(?:-(?:1|5))?(?:-\d{8})?)$/u;
+
+const UNKNOWN_MODEL_CONTEXT_LENGTH = Object.freeze({
+  contextLength: null,
+  contextLengthSource: /** @type {const} */ ("unknown"),
+});
 
 /**
  * @param {unknown} value
@@ -44,51 +36,49 @@ export function isValidModelContextLength(
   );
 }
 
-/**
- * Keep this table explicit. A broad provider-family prefix can overstate a
- * specialised model such as a TTS model by orders of magnitude.
- *
- * @param {"gemini" | "claude"} provider
- * @param {string} model
- * @returns {number | null}
- */
-export function deriveNativeModelContextLength(provider, model) {
-  if (provider === "gemini") {
-    const canonicalModel = model.startsWith("models/")
-      ? model.slice("models/".length)
-      : model;
-    return GEMINI_ONE_MILLION_CONTEXT_MODELS.has(canonicalModel)
-      ? 1_048_576
-      : null;
+/** @param {unknown} value @param {string} key */
+function ownDataProperty(value, key) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
   }
-
-  if (CLAUDE_ONE_MILLION_CONTEXT_MODELS.has(model)) {
-    return 1_000_000;
-  }
-  return CLAUDE_TWO_HUNDRED_THOUSAND_CONTEXT_MODEL.test(model) ? 200_000 : null;
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor != null && Object.hasOwn(descriptor, "value")
+    ? descriptor.value
+    : undefined;
 }
 
 /**
+ * Read the first valid provider-advertised value in the shared path order.
+ * Accessors are ignored because model metadata is untrusted even in tests.
+ *
+ * @param {unknown} input
+ * @returns {number | null}
+ */
+export function modelContextLengthFromFields(input) {
+  for (const path of MODEL_CONTEXT_LENGTH_FIELD_PATHS) {
+    let value = input;
+    for (const key of path) {
+      value = ownDataProperty(value, key);
+    }
+    if (isValidModelContextLength(value, MAX_DETECTED_MODEL_CONTEXT_LENGTH)) {
+      return /** @type {number} */ (value);
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve values already available to the process. Model listing uses this
+ * path and never invents a fallback when neither metadata nor an override is
+ * present.
+ *
  * @param {{
- *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
- *   baseUrl?: string,
- *   model: string,
- *   credential?: unknown,
  *   contextLength?: number,
  *   contextLengthOverride?: number | null,
+ *   detectedContextLength?: number | null,
  * }} input
- * @param {{
- *   detectOpenAiCompatibleContextLength?: (input: {
- *     baseUrl: string,
- *     model: string,
- *     credential?: string,
- *   }) => Promise<unknown>,
- * }} [dependencies]
  */
-export async function resolveModelContextLength(
-  input,
-  { detectOpenAiCompatibleContextLength } = {},
-) {
+export function resolveModelContextLengthWithoutDetection(input) {
   const override = Object.hasOwn(input, "contextLengthOverride")
     ? input.contextLengthOverride
     : input.contextLength;
@@ -104,42 +94,73 @@ export async function resolveModelContextLength(
     });
   }
 
-  if (input.provider === "gemini" || input.provider === "claude") {
-    const derived = deriveNativeModelContextLength(input.provider, input.model);
-    if (derived != null) {
-      return Object.freeze({
-        contextLength: derived,
-        contextLengthSource: /** @type {const} */ ("derived"),
-      });
-    }
-  } else if (
-    input.provider === "openai-compatible" &&
-    typeof input.baseUrl === "string" &&
-    typeof detectOpenAiCompatibleContextLength === "function"
+  if (
+    isValidModelContextLength(
+      input.detectedContextLength,
+      MAX_DETECTED_MODEL_CONTEXT_LENGTH,
+    )
   ) {
-    try {
-      const detected = await detectOpenAiCompatibleContextLength({
-        baseUrl: input.baseUrl,
-        model: input.model,
-        ...(typeof input.credential === "string"
-          ? { credential: input.credential }
-          : {}),
-      });
-      if (
-        isValidModelContextLength(detected, MAX_DETECTED_MODEL_CONTEXT_LENGTH)
-      ) {
-        return Object.freeze({
-          contextLength: /** @type {number} */ (detected),
-          contextLengthSource: /** @type {const} */ ("detected"),
-        });
-      }
-    } catch {
-      // Detection is best-effort. An unusable response takes the safe default.
-    }
+    return Object.freeze({
+      contextLength: /** @type {number} */ (input.detectedContextLength),
+      contextLengthSource: /** @type {const} */ ("detected"),
+    });
   }
 
-  return Object.freeze({
-    contextLength: DEFAULT_MODEL_CONTEXT_LENGTH,
-    contextLengthSource: /** @type {const} */ ("default"),
-  });
+  return UNKNOWN_MODEL_CONTEXT_LENGTH;
+}
+
+/**
+ * @param {{
+ *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
+ *   baseUrl?: string,
+ *   model: string,
+ *   credential?: unknown,
+ *   contextLength?: number,
+ *   contextLengthOverride?: number | null,
+ *   detectedContextLength?: number | null,
+ * }} input
+ * @param {{
+ *   detectOpenAiCompatibleContextLength?: (input: {
+ *     baseUrl: string,
+ *     model: string,
+ *     credential?: string,
+ *   }) => Promise<unknown>,
+ * }} [dependencies]
+ */
+export async function resolveModelContextLength(
+  input,
+  { detectOpenAiCompatibleContextLength } = {},
+) {
+  const withoutDetection = resolveModelContextLengthWithoutDetection(input);
+  if (
+    withoutDetection.contextLengthSource === "override" ||
+    input.provider !== "openai-compatible" ||
+    typeof input.baseUrl !== "string" ||
+    typeof detectOpenAiCompatibleContextLength !== "function"
+  ) {
+    return withoutDetection;
+  }
+
+  try {
+    const detected = await detectOpenAiCompatibleContextLength({
+      baseUrl: input.baseUrl,
+      model: input.model,
+      ...(typeof input.credential === "string"
+        ? { credential: input.credential }
+        : {}),
+    });
+    if (
+      isValidModelContextLength(detected, MAX_DETECTED_MODEL_CONTEXT_LENGTH)
+    ) {
+      return Object.freeze({
+        contextLength: /** @type {number} */ (detected),
+        contextLengthSource: /** @type {const} */ ("detected"),
+      });
+    }
+  } catch {
+    // Runtime allocation discovery is best-effort. A list value remains usable,
+    // while an entirely unknown value is refused before any model request.
+  }
+
+  return withoutDetection;
 }

@@ -11,12 +11,14 @@ import {
   AiReviewerConnectionConflictError,
   AiReviewerConnectionLimitError,
   AiReviewerConnectionNotFoundError,
+  AiReviewerPlaintextCredentialError,
   AiReviewerProviderConfigInputError,
   createAiReviewerProviderConfigStore,
 } from "../../../app/src/AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
 import { createAiReviewerProviderController } from "../../../app/src/AiReviewerProviderController.mjs";
 import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
+import { assertOpenAiCompatibleCredentialTransport } from "../../../app/src/OllamaEndpointPolicy.mjs";
 import { AgentEventSchema } from "../../../shared/contracts.mjs";
 
 const userId = "user-connections-0001";
@@ -32,6 +34,7 @@ const geminiModel = "gemini-2.5-pro";
 const claudeModel = "claude-sonnet-4-20250514";
 const geminiCredential = "PRIVATE_GEMINI_CREDENTIAL";
 const claudeCredential = "PRIVATE_CLAUDE_CREDENTIAL";
+const plaintextCredential = "PRIVATE_PLAINTEXT_CREDENTIAL";
 
 // A connection is a destination: provider, endpoint, credential. No model.
 const localConnection = Object.freeze({
@@ -53,6 +56,10 @@ const azureConnection = Object.freeze({
   apiVersion: "2025-01-01-preview",
   deployments: ["reviewer-deployment"],
   credential: "PRIVATE_AZURE_CREDENTIAL",
+});
+const plaintextAzureConnection = Object.freeze({
+  ...azureConnection,
+  baseUrl: "http://host.docker.internal:11434/openai",
 });
 
 function fakeQuery(value) {
@@ -145,7 +152,7 @@ function storeFixture() {
     now: () => credentialUpdatedAt,
     newConnectionId: () => `connection-${(sequence += 1)}`,
   });
-  return { envelopes, modelDependency, records, store };
+  return { envelopes, manager, modelDependency, records, store };
 }
 
 function httpRequest({
@@ -271,13 +278,13 @@ function connectionModels(connection) {
   }
 }
 
-function streamFixture({ store, listModels }) {
+function streamFixture({ store, listModels, modeInstructionStore }) {
   const providerService = {
     listModels:
       listModels ?? vi.fn(async (connection) => connectionModels(connection)),
     resolveContextLength: vi.fn(async () => ({
       contextLength,
-      contextLengthSource: "default",
+      contextLengthSource: "detected",
     })),
     createAgentGateway: vi.fn(() => ({
       async *stream() {
@@ -297,6 +304,7 @@ function streamFixture({ store, listModels }) {
     controller: createConfiguredAiReviewerController({
       configStore: store,
       providerService,
+      modeInstructionStore,
       requestScopeReader,
       now: () => createdAt,
       eventId: () => "event-connections",
@@ -334,6 +342,149 @@ describe("AI reviewer provider connections", function () {
       provider: "openai-compatible",
       baseUrl: localBaseUrl,
       label: "127.0.0.1:11434",
+    });
+  });
+
+  it("refuses to save a credential for HTTP before encrypting it and allows HTTPS localhost", async function () {
+    const { envelopes, store } = storeFixture();
+    const blocked = await captureError(
+      store.create(userId, {
+        ...localConnection,
+        credential: plaintextCredential,
+      }),
+    );
+
+    expect(blocked).toBeInstanceOf(AiReviewerPlaintextCredentialError);
+    expect(blocked.message).toBe(
+      "API keys cannot be saved for HTTP endpoints. Use HTTPS or recreate the connection without a key.",
+    );
+    expect(envelopes.size).toBe(0);
+    expect(await store.list(userId)).toEqual([]);
+
+    const blockedAzure = await captureError(
+      store.create(userId, plaintextAzureConnection),
+    );
+    expect(blockedAzure).toBeInstanceOf(AiReviewerPlaintextCredentialError);
+    expect(envelopes.size).toBe(0);
+    expect(await store.list(userId)).toEqual([]);
+
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+    });
+    const response = new FakeResponse();
+    await controller.createConnection(
+      httpRequest({
+        body: { ...localConnection, credential: plaintextCredential },
+      }),
+      response,
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.body.error).toEqual({
+      code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+      category: "configuration",
+      message:
+        "API keys cannot be saved or sent to HTTP endpoints. Use HTTPS or recreate the connection without a key.",
+      retryable: false,
+    });
+    expect(envelopes.size).toBe(0);
+
+    const encryptedLocal = await store.create(userId, {
+      provider: "openai-compatible",
+      baseUrl: "https://localhost:8443/v1",
+      credential: plaintextCredential,
+    });
+    expect(encryptedLocal).toMatchObject({
+      baseUrl: "https://localhost:8443/v1",
+      credentialSet: true,
+    });
+    expect((await store.get(userId, encryptedLocal.id)).credential).toBe(
+      plaintextCredential,
+    );
+  });
+
+  it("keeps an existing HTTP credential but refuses to preserve or send it", async function () {
+    const { manager, records, store } = storeFixture();
+    const credentialEncrypted = await manager.encrypt({
+      provider: "openai-compatible",
+      baseUrl: localBaseUrl,
+      credential: plaintextCredential,
+    });
+    records.set(userId, {
+      revision: 1,
+      connections: [
+        {
+          _id: "connection-existing-plaintext",
+          revision: 7,
+          ...localConnection,
+          credentialEncrypted,
+          credentialUpdatedAt,
+        },
+      ],
+    });
+
+    expect(await store.list(userId)).toEqual([
+      expect.objectContaining({
+        id: "connection-existing-plaintext",
+        credentialSet: true,
+      }),
+    ]);
+    const loaded = await store.get(userId, "connection-existing-plaintext");
+    expect(loaded.credential).toBe(plaintextCredential);
+    expect(() =>
+      assertOpenAiCompatibleCredentialTransport(
+        loaded.baseUrl,
+        typeof loaded.credential === "string",
+      ),
+    ).toThrowError("The API key was not sent because the endpoint uses HTTP");
+
+    const preserved = await captureError(
+      store.update(
+        userId,
+        "connection-existing-plaintext",
+        { ...localConnection, label: "Still plaintext" },
+        7,
+      ),
+    );
+    expect(preserved).toBeInstanceOf(AiReviewerPlaintextCredentialError);
+    expect(records.get(userId).connections[0].credentialEncrypted).toBe(
+      credentialEncrypted,
+    );
+  });
+
+  it("stores manual fallback models on the connection that owns them", async function () {
+    const { records, store } = storeFixture();
+    const manualModels = ["reviewer/manual-v1", "reviewer/manual-v2"];
+
+    const local = await store.create(userId, {
+      ...localConnection,
+      models: manualModels,
+    });
+
+    expect(records.get(userId).connections[0].models).toEqual(manualModels);
+    expect(await store.get(userId, local.id)).toMatchObject({
+      id: local.id,
+      models: manualModels,
+    });
+    expect((await store.list(userId))[0].models).toEqual(manualModels);
+
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+    });
+    const response = new FakeResponse();
+    await controller.listConnections(httpRequest(), response);
+    expect(response.body.connections[0].config.models).toEqual(manualModels);
+
+    expect(
+      await captureError(
+        store.create(userId, {
+          ...localConnection,
+          models: [manualModels[0], manualModels[0]],
+        }),
+      ),
+    ).toMatchObject({
+      message: "AI provider fallback models must be unique.",
     });
   });
 
@@ -533,14 +684,18 @@ describe("AI reviewer provider connections", function () {
     });
   });
 
-  it("fails rather than discarding a stored connection it cannot convert", async function () {
+  it("keeps valid public connections when one stored connection cannot be converted", async function () {
     const { records, store } = storeFixture();
-    records.set(userId, {
+    const valid = await store.create(userId, geminiConnection);
+    records.get(userId).connections.unshift({
+      _id: "connection-unreadable",
       provider: "openai-compatible",
       baseUrl: "not-a-url",
     });
 
-    expect(await captureError(store.list(userId))).toBeInstanceOf(Error);
+    expect(await store.list(userId)).toEqual([
+      expect.objectContaining({ id: valid.id, label: "Google Gemini" }),
+    ]);
   });
 
   it("refuses to read one connection's credential through another connection", async function () {
@@ -600,6 +755,29 @@ describe("AI reviewer provider connections", function () {
     expect(serialized).not.toContain(geminiCredential);
     expect(serialized).not.toContain(claudeCredential);
     expect(serialized).not.toContain("credentialEncrypted");
+  });
+
+  it("keeps readable private connections when one credential cannot be decrypted", async function () {
+    const { records, store } = storeFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    const claude = await store.create(userId, claudeConnection);
+    records
+      .get(userId)
+      .connections.find(({ _id }) => _id === gemini.id).credentialEncrypted =
+      "unreadable-ciphertext";
+
+    expect(await store.getAll(userId)).toEqual([
+      expect.objectContaining({
+        id: gemini.id,
+        provider: "gemini",
+        credentialLoadFailed: true,
+      }),
+      expect.objectContaining({
+        id: claude.id,
+        provider: "claude",
+        credential: claudeCredential,
+      }),
+    ]);
   });
 
   it("lists how many of the user's projects select each connection", async function () {
@@ -707,17 +885,17 @@ describe("AI reviewer provider connections", function () {
     expect(await store.list(userId)).toEqual([updated]);
   });
 
-  it("shapes a connection for the client without its credential", function () {
-    expect(
-      publicAiReviewerProviderConnection({
-        id: "connection-1",
-        revision: 7,
-        credentialSet: true,
-        ...localConnection,
-        contextLengthOverride: 16_384,
-        credentialUpdatedAt,
-      }),
-    ).toEqual({
+  it("reports an existing HTTP credential as set while its transport use is blocked", function () {
+    const connection = publicAiReviewerProviderConnection({
+      id: "connection-1",
+      revision: 7,
+      credentialSet: true,
+      ...localConnection,
+      contextLengthOverride: 16_384,
+      credentialUpdatedAt,
+    });
+
+    expect(connection).toEqual({
       id: "connection-1",
       revision: 7,
       label: "127.0.0.1:11434",
@@ -730,6 +908,12 @@ describe("AI reviewer provider connections", function () {
         credentialUpdatedAt,
       },
     });
+    expect(() =>
+      assertOpenAiCompatibleCredentialTransport(
+        connection.config.baseUrl,
+        connection.config.credentialSet,
+      ),
+    ).toThrowError("The API key was not sent because the endpoint uses HTTP");
   });
 
   it("keeps the removed default connection out of the module", async function () {
@@ -761,16 +945,21 @@ describe("AI reviewer provider connections", function () {
 
 describe("AI reviewer unified model list", function () {
   function modelListFixture({ listModels } = {}) {
-    const { store } = storeFixture();
+    const { records, store } = storeFixture();
     const providerService = {
       listModels:
         listModels ?? vi.fn(async (connection) => connectionModels(connection)),
+      contextLengthForModelList: vi.fn(() => ({
+        contextLength,
+        contextLengthSource: "detected",
+      })),
       resolveContextLength: vi.fn(async () => ({
         contextLength,
-        contextLengthSource: "default",
+        contextLengthSource: "detected",
       })),
     };
     return {
+      records,
       store,
       providerService,
       controller: createAiReviewerProviderController({
@@ -799,7 +988,7 @@ describe("AI reviewer unified model list", function () {
           connectionId: gemini.id,
           connectionLabel: "Google Gemini",
           contextLength,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
         {
           id: sharedModel,
@@ -807,7 +996,7 @@ describe("AI reviewer unified model list", function () {
           connectionId: gemini.id,
           connectionLabel: "Google Gemini",
           contextLength,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
         {
           id: localModel,
@@ -815,7 +1004,7 @@ describe("AI reviewer unified model list", function () {
           connectionId: local.id,
           connectionLabel: "Lab GPU box",
           contextLength,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
         {
           // The same model id reachable through two connections stays two
@@ -825,7 +1014,7 @@ describe("AI reviewer unified model list", function () {
           connectionId: local.id,
           connectionLabel: "Lab GPU box",
           contextLength,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
       ],
       failures: [],
@@ -866,6 +1055,66 @@ describe("AI reviewer unified model list", function () {
       },
     ]);
     expect(JSON.stringify(response.body)).not.toContain(rawProviderBody);
+  });
+
+  it("uses connection-owned model names only when discovery is unsupported", async function () {
+    const manualModel = "reviewer/manual-v1";
+    const { controller, providerService, store } = modelListFixture({
+      listModels: vi.fn(async () => {
+        throw new AgentGatewayError("Unsupported model listing.", {
+          code: "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
+          category: "configuration",
+          retryable: false,
+        });
+      }),
+    });
+    const local = await store.create(userId, {
+      ...localConnection,
+      models: [manualModel],
+    });
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.body).toEqual({
+      models: [
+        {
+          id: manualModel,
+          displayName: manualModel,
+          connectionId: local.id,
+          connectionLabel: "127.0.0.1:11434",
+          contextLength,
+          contextLengthSource: "detected",
+        },
+      ],
+      failures: [],
+    });
+    expect(providerService.listModels).toHaveBeenCalledOnce();
+  });
+
+  it("reports one unreadable credential without hiding other model lists", async function () {
+    const { controller, records, store } = modelListFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    const local = await store.create(userId, localConnection);
+    records
+      .get(userId)
+      .connections.find(({ _id }) => _id === gemini.id).credentialEncrypted =
+      "unreadable-ciphertext";
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(
+      response.body.models.map(({ connectionId }) => connectionId),
+    ).toEqual([local.id, local.id]);
+    expect(response.body.failures).toEqual([
+      {
+        connectionId: gemini.id,
+        connectionLabel: "Google Gemini",
+        code: "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
+        category: "configuration",
+      },
+    ]);
   });
 
   it("reports an unconfigured provider when the user has no connection", async function () {
@@ -1053,6 +1302,59 @@ describe("AI reviewer run destination", function () {
     expect(parseNdjson(mineResponse)).toEqual(streamEvents());
   });
 
+  it("loads each user's project perspective without mixing collaborators", async function () {
+    const { store } = storeFixture();
+    const mine = await store.create(userId, geminiConnection);
+    const theirs = await store.create(otherUserId, geminiConnection);
+    const modeInstructionStore = {
+      load: vi.fn(async (scopedUserId) => ({
+        revision: 1,
+        instructions: {
+          brainstorm:
+            scopedUserId === userId
+              ? "MY_PRIVATE_PROJECT_PERSPECTIVE"
+              : "OTHER_PRIVATE_PROJECT_PERSPECTIVE",
+        },
+      })),
+    };
+    const { controller, providerService } = streamFixture({
+      store,
+      modeInstructionStore,
+    });
+
+    await controller.stream(
+      httpRequest({
+        authenticatedUserId: userId,
+        body: selectionRequest({ connectionId: mine.id, model: geminiModel }),
+      }),
+      new FakeResponse(),
+    );
+    await controller.stream(
+      httpRequest({
+        authenticatedUserId: otherUserId,
+        body: selectionRequest({
+          connectionId: theirs.id,
+          model: geminiModel,
+        }),
+      }),
+      new FakeResponse(),
+    );
+
+    expect(modeInstructionStore.load.mock.calls).toEqual([
+      [userId, projectId],
+      [otherUserId, projectId],
+    ]);
+    expect(
+      providerService.createAgentGateway.mock.calls[0][1].modeInstructions,
+    ).toEqual({ brainstorm: "MY_PRIVATE_PROJECT_PERSPECTIVE" });
+    expect(
+      providerService.createAgentGateway.mock.calls[1][1].modeInstructions,
+    ).toEqual({ brainstorm: "OTHER_PRIVATE_PROJECT_PERSPECTIVE" });
+    expect(
+      JSON.stringify(providerService.createAgentGateway.mock.calls[0]),
+    ).not.toContain("OTHER_PRIVATE_PROJECT_PERSPECTIVE");
+  });
+
   it("refuses a model the selected connection does not list", async function () {
     const { store } = storeFixture();
     const gemini = await store.create(userId, geminiConnection);
@@ -1115,6 +1417,10 @@ describe("AI reviewer run destination", function () {
         contextLengthOverride: 12_345,
       }),
       sharedModel,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${gemini.id}`,
+      }),
     );
     expect(requestScopeReader.read).toHaveBeenCalledWith(
       expect.anything(),
@@ -1146,6 +1452,11 @@ describe("AI reviewer connection deletion lifecycle", function () {
     }));
     vi.doMock("../../../app/src/AiReviewerSkillStore.mjs", () => ({
       createAiReviewerSkillStore: vi.fn(() => ({ deleteUser: vi.fn() })),
+    }));
+    vi.doMock("../../../app/src/AiReviewerModeInstructionStore.mjs", () => ({
+      createAiReviewerModeInstructionStore: vi.fn(() => ({
+        deleteUser: vi.fn(),
+      })),
     }));
     vi.doMock("../../../app/src/AiReviewerProviderConfigStore.mjs", () => ({
       createAiReviewerProviderConfigStore: vi.fn(() => store),

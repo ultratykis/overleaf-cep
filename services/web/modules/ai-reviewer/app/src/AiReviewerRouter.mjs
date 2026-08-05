@@ -22,6 +22,8 @@
  *   confirmSkillGitImport: (...args: any[]) => unknown,
  *   deleteSkill: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
+ *   getModeInstructions: (...args: any[]) => unknown,
+ *   saveModeInstructions: (...args: any[]) => unknown,
  *   getWorkspace: (...args: any[]) => unknown,
  *   saveWorkspace: (...args: any[]) => unknown,
  *   getCommentProvenance: (...args: any[]) => unknown,
@@ -47,6 +49,8 @@ export function createAiReviewerRouter({
   confirmSkillGitImport,
   deleteSkill,
   stream,
+  getModeInstructions,
+  saveModeInstructions,
   getWorkspace,
   saveWorkspace,
   getCommentProvenance,
@@ -91,6 +95,11 @@ export function createAiReviewerRouter({
         getWorkspace,
       );
       webRouter.get(
+        "/project/:project_id/ai-reviewer/mode-instructions",
+        ...commonMiddleware,
+        getModeInstructions,
+      );
+      webRouter.get(
         "/project/:project_id/ai-reviewer/comment-provenance",
         ...commonMiddleware,
         getCommentProvenance,
@@ -99,6 +108,11 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/workspace",
         ...commonMiddleware,
         saveWorkspace,
+      );
+      webRouter.put(
+        "/project/:project_id/ai-reviewer/mode-instructions",
+        ...commonMiddleware,
+        saveModeInstructions,
       );
       webRouter.put(
         "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",

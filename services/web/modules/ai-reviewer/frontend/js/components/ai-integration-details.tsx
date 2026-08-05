@@ -36,6 +36,7 @@ import { useTranslation } from "react-i18next";
 
 import {
   deriveAiReviewerChatRequestUrl,
+  isPlaintextAiProviderBaseUrl,
   normalizeAzureOpenAiEndpoint,
 } from "../../../shared/provider-request-url.mjs";
 import "../../stylesheets/ai-reviewer.scss";
@@ -62,6 +63,7 @@ import {
   type AiReviewerSkill,
   type AiReviewerSkillGitHostType,
   type AiReviewerSkillGitPreview,
+  type AiReviewerSkillGitSkippedPluginReason,
   type AiReviewerSkillGitSkippedReferenceReason,
   type AiReviewerSkillGitSource,
   type AiReviewerSkillUpload,
@@ -98,6 +100,7 @@ type ConfigurationDraft = {
   requestStyle: AzureOpenAiRequestStyle;
   apiVersion: string;
   deployments: string;
+  models: string;
   contextLengthOverride: string;
   credential: string;
 };
@@ -106,6 +109,7 @@ type ConfigurationField =
   | "baseUrl"
   | "apiVersion"
   | "deployments"
+  | "models"
   | "contextLengthOverride"
   | "credential";
 
@@ -132,6 +136,7 @@ const emptyConfiguration: ConfigurationDraft = {
   requestStyle: "v1",
   apiVersion: "",
   deployments: "",
+  models: "",
   contextLengthOverride: "",
   credential: "",
 };
@@ -141,6 +146,7 @@ const fields: ConfigurationField[] = [
   "baseUrl",
   "apiVersion",
   "deployments",
+  "models",
   "credential",
 ];
 
@@ -172,6 +178,23 @@ function skippedReferenceReasonTranslation(
       return "ai_reviewer_skill_git_skip_not_readable";
     case "size-limit":
       return "ai_reviewer_skill_git_skip_size_limit";
+  }
+}
+
+function skippedPluginReasonTranslation(
+  reason: AiReviewerSkillGitSkippedPluginReason,
+) {
+  switch (reason) {
+    case "external-source":
+      return "ai_reviewer_skill_git_skip_external_plugin";
+    case "invalid-plugin":
+      return "ai_reviewer_skill_git_skip_invalid_plugin";
+    case "no-readable-skills":
+      return "ai_reviewer_skill_git_skip_no_skills";
+    case "skill-not-readable":
+      return "ai_reviewer_skill_git_skip_unreadable_skill";
+    case "duplicate-skill":
+      return "ai_reviewer_skill_git_skip_duplicate_skill";
   }
 }
 
@@ -283,6 +306,21 @@ function providerFromValue(value: string): AiProvider | null {
   }
 }
 
+function isPlaintextProviderBaseUrl(baseUrl: string): boolean {
+  try {
+    return isPlaintextAiProviderBaseUrl(baseUrl);
+  } catch {
+    return false;
+  }
+}
+
+function isPlaintextProviderConfiguration(
+  configuration: AiProviderConfiguration,
+): boolean {
+  if (!("baseUrl" in configuration)) return false;
+  return isPlaintextProviderBaseUrl(configuration.baseUrl);
+}
+
 function copyPublicConfiguration(
   configuration: AiProviderConfiguration,
 ): AiProviderConfiguration {
@@ -296,16 +334,19 @@ function copyPublicConfiguration(
       return {
         provider: configuration.provider,
         baseUrl: configuration.baseUrl,
+        models: [...(configuration.models ?? [])],
         ...common,
       };
     case "gemini":
       return {
         provider: configuration.provider,
+        models: [...(configuration.models ?? [])],
         ...common,
       };
     case "claude":
       return {
         provider: configuration.provider,
+        models: [...(configuration.models ?? [])],
         ...common,
       };
     case "azure":
@@ -317,6 +358,9 @@ function copyPublicConfiguration(
           ? {}
           : { apiVersion: configuration.apiVersion }),
         deployments: [...configuration.deployments],
+        contextLengthOverrides: configuration.contextLengthOverrides.map(
+          (entry) => ({ ...entry }),
+        ),
         ...common,
       };
   }
@@ -360,6 +404,7 @@ function draftFromConnection(
         requestStyle: "v1",
         apiVersion: "",
         deployments: "",
+        models: (connection.config.models ?? []).join("\n"),
         ...common,
       };
     case "gemini":
@@ -369,6 +414,7 @@ function draftFromConnection(
         requestStyle: "v1",
         apiVersion: "",
         deployments: "",
+        models: (connection.config.models ?? []).join("\n"),
         ...common,
       };
     case "claude":
@@ -378,17 +424,32 @@ function draftFromConnection(
         requestStyle: "v1",
         apiVersion: "",
         deployments: "",
+        models: (connection.config.models ?? []).join("\n"),
         ...common,
       };
-    case "azure":
+    case "azure": {
+      const configuration = connection.config;
       return {
-        provider: connection.config.provider,
-        baseUrl: connection.config.baseUrl,
-        requestStyle: connection.config.requestStyle,
-        apiVersion: connection.config.apiVersion ?? "",
-        deployments: connection.config.deployments.join("\n"),
+        provider: configuration.provider,
+        baseUrl: configuration.baseUrl,
+        requestStyle: configuration.requestStyle,
+        apiVersion: configuration.apiVersion ?? "",
+        deployments: configuration.deployments
+          .map((deployment) => {
+            const contextLength =
+              configuration.contextLengthOverrides.find(
+                (entry) => entry.model === deployment,
+              )?.contextLength ?? configuration.contextLengthOverride;
+            return contextLength == null
+              ? deployment
+              : `${deployment} = ${contextLength}`;
+          })
+          .join("\n"),
+        models: "",
         ...common,
+        contextLengthOverride: "",
       };
+    }
   }
 }
 
@@ -422,6 +483,8 @@ function fieldLabel(field: ConfigurationField, t: TFunction): string {
       return t("ai_reviewer_provider_azure_api_version");
     case "deployments":
       return t("ai_reviewer_provider_azure_deployments");
+    case "models":
+      return t("ai_reviewer_provider_fallback_models");
     case "contextLengthOverride":
       return t("ai_reviewer_provider_context_length_override");
     case "credential":
@@ -434,6 +497,48 @@ function deploymentNames(value: string): string[] {
     .split(/\r?\n/u)
     .map((deployment) => deployment.trim())
     .filter((deployment) => deployment.length > 0);
+}
+
+function azureDeploymentEntries(value: string) {
+  const entries = value
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const separator = line.indexOf("=");
+      const model = (separator < 0 ? line : line.slice(0, separator)).trim();
+      const contextText = separator < 0 ? "" : line.slice(separator + 1).trim();
+      const contextLength = contextText === "" ? null : Number(contextText);
+      return {
+        model,
+        contextLength,
+        valid:
+          (separator < 0 || !line.slice(separator + 1).includes("=")) &&
+          (contextLength == null ||
+            (Number.isSafeInteger(contextLength) && contextLength > 0)),
+      };
+    });
+  return {
+    deployments: entries.map((entry) => entry.model),
+    contextLengthOverrides: entries.flatMap((entry) =>
+      entry.contextLength == null
+        ? []
+        : [{ model: entry.model, contextLength: entry.contextLength }],
+    ),
+    valid: entries.every((entry) => entry.valid),
+  };
+}
+
+function validFallbackModelName(model: string) {
+  const [name, tag, ...extra] = model.split(":");
+  return (
+    /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$/u.test(
+      model,
+    ) &&
+    name.length <= 255 &&
+    (tag === undefined || tag.length <= 128) &&
+    extra.length === 0
+  );
 }
 
 function azurePortalEndpointFields(value: string) {
@@ -544,6 +649,8 @@ function noticeContent(notice: Notice, t: TFunction): string {
       return t("ai_reviewer_provider_network_failed");
     case "AI_PROVIDER_NOT_CONFIGURED":
       return t("ai_reviewer_provider_not_configured");
+    case "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED":
+      return t("ai_reviewer_provider_plaintext_credential_blocked");
     case "AI_PROVIDER_RATE_LIMITED":
       return t("ai_reviewer_error_provider_rate_limited");
     case "AI_PROVIDER_SCHEMA_INVALID":
@@ -710,7 +817,9 @@ export function AiIntegrationDetailsView({
     connections?.find((entry) => entry.id === selectedId) ?? null;
   const saved =
     connections === undefined ? undefined : (selected?.config ?? null);
-  const parsedDeployments = deploymentNames(draft.deployments);
+  const parsedAzureDeployments = azureDeploymentEntries(draft.deployments);
+  const parsedDeployments = parsedAzureDeployments.deployments;
+  const parsedModels = deploymentNames(draft.models);
   const editedDraftDirty =
     saved?.provider !== draft.provider ||
     (selected?.label ?? "") !== draft.label ||
@@ -719,14 +828,22 @@ export function AiIntegrationDetailsView({
       : String(saved.contextLengthOverride)) !== draft.contextLengthOverride ||
     (draft.provider === "openai-compatible" &&
       (saved?.provider !== "openai-compatible" ||
-        saved.baseUrl !== draft.baseUrl)) ||
+        saved.baseUrl !== draft.baseUrl ||
+        (saved.models ?? []).join("\n") !== parsedModels.join("\n"))) ||
+    (draft.provider === "gemini" &&
+      (saved?.provider !== "gemini" ||
+        (saved.models ?? []).join("\n") !== parsedModels.join("\n"))) ||
+    (draft.provider === "claude" &&
+      (saved?.provider !== "claude" ||
+        (saved.models ?? []).join("\n") !== parsedModels.join("\n"))) ||
     (draft.provider === "azure" &&
       (saved?.provider !== "azure" ||
         saved.baseUrl !== draft.baseUrl ||
         saved.requestStyle !== draft.requestStyle ||
         (draft.requestStyle === "deployment" &&
           (saved.apiVersion ?? "") !== draft.apiVersion) ||
-        saved.deployments.join("\n") !== parsedDeployments.join("\n"))) ||
+        draftFromConnection(selected as AiProviderConnection).deployments !==
+          draft.deployments)) ||
     draft.credential !== "";
   const newDraftDirty =
     draft.provider !== emptyConfiguration.provider ||
@@ -749,10 +866,26 @@ export function AiIntegrationDetailsView({
   const credentialRequired =
     draft.provider !== "openai-compatible" &&
     !(saved?.provider === draft.provider && saved.credentialSet);
-  const validAzureDeployments = validDeploymentNames(parsedDeployments);
+  const validAzureDeployments =
+    parsedAzureDeployments.valid && validDeploymentNames(parsedDeployments);
+  const validFallbackModels =
+    parsedModels.length <= 100 &&
+    new Set(parsedModels).size === parsedModels.length &&
+    parsedModels.every(validFallbackModelName);
   const openAiBaseUrlHasCompletionPath =
     draft.provider === "openai-compatible" &&
     /\/chat\/completions\/?$/u.test(draft.baseUrl.trim());
+  const providerBaseUrlIsPlaintext = isPlaintextProviderBaseUrl(draft.baseUrl);
+  const keepingSavedBaseUrlCredential =
+    draft.credential === "" &&
+    saved != null &&
+    "baseUrl" in saved &&
+    saved.provider === draft.provider &&
+    saved.baseUrl === draft.baseUrl &&
+    saved.credentialSet;
+  const plaintextCredentialBlocked =
+    providerBaseUrlIsPlaintext &&
+    (draft.credential.trim() !== "" || keepingSavedBaseUrlCredential);
   const requestUrls = requestUrlsForDraft(
     draft,
     parsedDeployments,
@@ -766,7 +899,9 @@ export function AiIntegrationDetailsView({
         (draft.requestStyle === "v1" ||
           draft.apiVersion === "" ||
           azureApiVersion.test(draft.apiVersion)))) &&
+    (draft.provider === "azure" || validFallbackModels) &&
     !openAiBaseUrlHasCompletionPath &&
+    !plaintextCredentialBlocked &&
     validContextLengthOverride &&
     credentialAvailable;
   const formEditable = formMode === "create" || formMode === "edit";
@@ -821,9 +956,12 @@ export function AiIntegrationDetailsView({
     const provider = providerFromValue(value);
     if (provider == null) return;
     if (busy) cancel();
+    // Destination-specific fields must not survive a provider change. Keeping
+    // baseUrl empty also makes plaintext policy structural rather than vendor-based.
     setDraft((current) => ({
       ...current,
       provider,
+      baseUrl: "",
       credential: "",
       contextLengthOverride: "",
     }));
@@ -862,6 +1000,7 @@ export function AiIntegrationDetailsView({
         requested = {
           provider: draft.provider,
           baseUrl: draft.baseUrl,
+          models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
@@ -870,6 +1009,7 @@ export function AiIntegrationDetailsView({
       case "gemini":
         requested = {
           provider: draft.provider,
+          models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
@@ -878,6 +1018,7 @@ export function AiIntegrationDetailsView({
       case "claude":
         requested = {
           provider: draft.provider,
+          models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
@@ -892,8 +1033,9 @@ export function AiIntegrationDetailsView({
             ? { apiVersion: draft.apiVersion }
             : {}),
           deployments: parsedDeployments,
+          contextLengthOverrides: parsedAzureDeployments.contextLengthOverrides,
           label,
-          contextLengthOverride: parsedContextLengthOverride,
+          contextLengthOverride: null,
           ...credential,
         };
         break;
@@ -1140,7 +1282,12 @@ export function AiIntegrationDetailsView({
     );
     if (preview) {
       setSkillGitPreview(preview);
-      setSelectedSkillGitPaths(preview.skills.map((skill) => skill.path));
+      const remaining = Math.max(0, skillCountLimit - (skills?.length ?? 0));
+      setSelectedSkillGitPaths(
+        preview.skills.length <= remaining
+          ? preview.skills.map((skill) => skill.path)
+          : [],
+      );
     }
   };
 
@@ -1226,6 +1373,9 @@ export function AiIntegrationDetailsView({
     selectedSkillGitPaths.length === 0 ||
     selectedGitSkillCountExceedsLimit;
   const skillGroups = storedSkillGroups(skills ?? []);
+  const connectionTestDisabledReason = connectionTestEnabled
+    ? null
+    : t("ai_reviewer_connection_test_project_only");
 
   const settingsModal = (
     <OLModal
@@ -1280,6 +1430,11 @@ export function AiIntegrationDetailsView({
                   <h3 id="ai-reviewer-connections-heading" className="h5">
                     {t("ai_reviewer_connections")}
                   </h3>
+                  {connectionTestDisabledReason != null && (
+                    <p className="ai-reviewer-provider-settings-hint">
+                      {connectionTestDisabledReason}
+                    </p>
+                  )}
                   {connections != null && connections.length > 0 && (
                     <div className="ai-reviewer-connection-table-scroll">
                       <OLTable
@@ -1336,6 +1491,15 @@ export function AiIntegrationDetailsView({
                                     t,
                                   )}
                                 </span>
+                                {isPlaintextProviderConfiguration(
+                                  connection.config,
+                                ) && (
+                                  <span className="ai-reviewer-connection-plaintext">
+                                    {t(
+                                      "ai_reviewer_provider_plaintext_endpoint",
+                                    )}
+                                  </span>
+                                )}
                               </th>
                               <td className="ai-reviewer-connection-credential-cell">
                                 <OLBadge
@@ -1367,6 +1531,16 @@ export function AiIntegrationDetailsView({
                                     })}
                                   </time>
                                 )}
+                                {isPlaintextProviderConfiguration(
+                                  connection.config,
+                                ) &&
+                                  connection.config.credentialSet && (
+                                    <span className="ai-reviewer-connection-plaintext-credential">
+                                      {t(
+                                        "ai_reviewer_provider_plaintext_credential_blocked",
+                                      )}
+                                    </span>
+                                  )}
                               </td>
                               <td className="ai-reviewer-connection-actions-cell">
                                 <OLButtonGroup aria-label={t("actions")}>
@@ -1375,10 +1549,14 @@ export function AiIntegrationDetailsView({
                                     size="sm"
                                     variant="secondary"
                                     icon="network_check"
-                                    accessibilityLabel={t(
+                                    accessibilityLabel={`${t(
                                       "ai_reviewer_connection_test_named",
                                       { connection: connection.label },
-                                    )}
+                                    )}${
+                                      connectionTestDisabledReason == null
+                                        ? ""
+                                        : `. ${connectionTestDisabledReason}`
+                                    }`}
                                     disabled={!canTestConnection(connection)}
                                     onClick={() => handleTest(connection)}
                                   />
@@ -1548,7 +1726,8 @@ export function AiIntegrationDetailsView({
                               (draft.provider === "azure" &&
                                 draft.requestStyle === "deployment")) &&
                             (field !== "deployments" ||
-                              draft.provider === "azure"),
+                              draft.provider === "azure") &&
+                            (field !== "models" || draft.provider !== "azure"),
                         )
                         .map((field) => (
                           <OLFormGroup
@@ -1571,7 +1750,9 @@ export function AiIntegrationDetailsView({
                             </OLFormLabel>
                             <OLFormControl
                               as={
-                                field === "deployments" ? "textarea" : undefined
+                                field === "deployments" || field === "models"
+                                  ? "textarea"
+                                  : undefined
                               }
                               type={
                                 field === "credential" ? "password" : "text"
@@ -1591,19 +1772,31 @@ export function AiIntegrationDetailsView({
                                   : undefined
                               }
                               aria-describedby={
-                                field === "apiVersion"
-                                  ? "ai-reviewer-apiVersion-help"
-                                  : field === "baseUrl" &&
-                                      draft.provider === "openai-compatible"
-                                    ? `ai-reviewer-baseUrl-help${
-                                        openAiBaseUrlHasCompletionPath
-                                          ? " ai-reviewer-baseUrl-error"
-                                          : ""
-                                      }`
-                                    : field === "baseUrl" &&
-                                        draft.provider === "azure"
-                                      ? "ai-reviewer-azure-endpoint-help"
-                                      : undefined
+                                field === "deployments"
+                                  ? "ai-reviewer-azure-deployments-help"
+                                  : field === "models"
+                                    ? "ai-reviewer-fallback-models-help"
+                                    : field === "apiVersion"
+                                      ? "ai-reviewer-apiVersion-help"
+                                      : field === "credential" &&
+                                          plaintextCredentialBlocked
+                                        ? "ai-reviewer-plaintext-credential-warning"
+                                        : field === "baseUrl" &&
+                                            draft.provider ===
+                                              "openai-compatible"
+                                          ? `ai-reviewer-baseUrl-help${
+                                              providerBaseUrlIsPlaintext
+                                                ? " ai-reviewer-baseUrl-plaintext-warning"
+                                                : ""
+                                            }${
+                                              openAiBaseUrlHasCompletionPath
+                                                ? " ai-reviewer-baseUrl-error"
+                                                : ""
+                                            }`
+                                          : field === "baseUrl" &&
+                                              draft.provider === "azure"
+                                            ? "ai-reviewer-azure-endpoint-help"
+                                            : undefined
                               }
                               aria-invalid={
                                 field === "baseUrl" &&
@@ -1631,6 +1824,24 @@ export function AiIntegrationDetailsView({
                                 )}
                               </p>
                             )}
+                            {field === "models" && (
+                              <p
+                                id="ai-reviewer-fallback-models-help"
+                                className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                              >
+                                {t("ai_reviewer_provider_fallback_models_help")}
+                              </p>
+                            )}
+                            {field === "deployments" && (
+                              <p
+                                id="ai-reviewer-azure-deployments-help"
+                                className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                              >
+                                {t(
+                                  "ai_reviewer_provider_azure_deployments_help",
+                                )}
+                              </p>
+                            )}
                             {field === "baseUrl" &&
                               draft.provider === "openai-compatible" && (
                                 <>
@@ -1651,7 +1862,30 @@ export function AiIntegrationDetailsView({
                                       )}
                                     </p>
                                   )}
+                                  {providerBaseUrlIsPlaintext && (
+                                    <p
+                                      id="ai-reviewer-baseUrl-plaintext-warning"
+                                      className="ai-reviewer-provider-plaintext-warning mt-1 mb-0"
+                                      role="status"
+                                    >
+                                      {t(
+                                        "ai_reviewer_provider_plaintext_endpoint",
+                                      )}
+                                    </p>
+                                  )}
                                 </>
+                              )}
+                            {field === "credential" &&
+                              plaintextCredentialBlocked && (
+                                <p
+                                  id="ai-reviewer-plaintext-credential-warning"
+                                  className="ai-reviewer-provider-plaintext-credential-warning mt-1 mb-0"
+                                  role="alert"
+                                >
+                                  {t(
+                                    "ai_reviewer_provider_plaintext_credential_blocked",
+                                  )}
+                                </p>
                               )}
                             {field === "baseUrl" &&
                               draft.provider === "azure" && (
@@ -1693,45 +1927,47 @@ export function AiIntegrationDetailsView({
                           )}
                         </p>
                       )}
-                      <details className="ai-reviewer-provider-advanced mt-3">
-                        <summary className="ai-reviewer-provider-advanced-summary">
-                          {t("ai_reviewer_provider_advanced_settings")}
-                        </summary>
-                        <div className="ai-reviewer-provider-advanced-content mt-2">
-                          <OLFormGroup
-                            controlId="ai-reviewer-contextLengthOverride"
-                            className="ai-reviewer-provider-settings-field"
-                          >
-                            <OLFormLabel>
-                              {fieldLabel("contextLengthOverride", t)}
-                            </OLFormLabel>
-                            <OLFormControl
-                              type="number"
-                              min={1}
-                              step={1}
-                              value={draft.contextLengthOverride}
-                              onChange={(event) =>
-                                updateDraft(
-                                  "contextLengthOverride",
-                                  event.target.value,
-                                )
-                              }
-                              disabled={saved === undefined || !formEditable}
-                              autoComplete="off"
-                              aria-describedby="ai-reviewer-contextLengthOverride-help"
-                              className="ai-reviewer-provider-settings-control"
-                            />
-                            <p
-                              id="ai-reviewer-contextLengthOverride-help"
-                              className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                      {draft.provider !== "azure" && (
+                        <details className="ai-reviewer-provider-advanced mt-3">
+                          <summary className="ai-reviewer-provider-advanced-summary">
+                            {t("ai_reviewer_provider_advanced_settings")}
+                          </summary>
+                          <div className="ai-reviewer-provider-advanced-content mt-2">
+                            <OLFormGroup
+                              controlId="ai-reviewer-contextLengthOverride"
+                              className="ai-reviewer-provider-settings-field"
                             >
-                              {t(
-                                "ai_reviewer_provider_context_length_override_help",
-                              )}
-                            </p>
-                          </OLFormGroup>
-                        </div>
-                      </details>
+                              <OLFormLabel>
+                                {fieldLabel("contextLengthOverride", t)}
+                              </OLFormLabel>
+                              <OLFormControl
+                                type="number"
+                                min={1}
+                                step={1}
+                                value={draft.contextLengthOverride}
+                                onChange={(event) =>
+                                  updateDraft(
+                                    "contextLengthOverride",
+                                    event.target.value,
+                                  )
+                                }
+                                disabled={saved === undefined || !formEditable}
+                                autoComplete="off"
+                                aria-describedby="ai-reviewer-contextLengthOverride-help"
+                                className="ai-reviewer-provider-settings-control"
+                              />
+                              <p
+                                id="ai-reviewer-contextLengthOverride-help"
+                                className="ai-reviewer-provider-advanced-help mt-1 mb-0"
+                              >
+                                {t(
+                                  "ai_reviewer_provider_context_length_override_help",
+                                )}
+                              </p>
+                            </OLFormGroup>
+                          </div>
+                        </details>
+                      )}
                       {notice && (
                         <OLNotification
                           type={notice.type}
@@ -1784,6 +2020,9 @@ export function AiIntegrationDetailsView({
                   </h3>
                   <p className="ai-reviewer-skills-description">
                     {t("ai_reviewer_skills_description")}
+                  </p>
+                  <p className="ai-reviewer-skills-mode-help">
+                    {t("ai_reviewer_skills_modes")}
                   </p>
                   {skills != null && skills.length === 0 && (
                     <p className="ai-reviewer-skills-empty">
@@ -2011,6 +2250,11 @@ export function AiIntegrationDetailsView({
                         <h5 className="h6">
                           {t("ai_reviewer_skill_git_preview_heading")}
                         </h5>
+                        {skillGitPreview.truncated && (
+                          <p role="status">
+                            {t("ai_reviewer_skill_git_preview_truncated")}
+                          </p>
+                        )}
                         <p className="ai-reviewer-skill-git-source">
                           {t("ai_reviewer_skill_git_understood_host", {
                             service: t(
@@ -2074,6 +2318,48 @@ export function AiIntegrationDetailsView({
                           <p className="ai-reviewer-skill-git-no-manifest">
                             {t("ai_reviewer_skill_git_no_manifest")}
                           </p>
+                        )}
+                        {skillGitPreview.skippedPlugins.length > 0 && (
+                          <section className="ai-reviewer-skill-git-skipped-plugins">
+                            <h6>
+                              {t("ai_reviewer_skill_git_skipped_plugins")}
+                            </h6>
+                            <ul>
+                              {skillGitPreview.skippedPlugins.map(
+                                (plugin, index) => (
+                                  <li
+                                    key={`${plugin.name}-${plugin.reason}-${plugin.skillPath ?? plugin.sourceUrl ?? index}`}
+                                  >
+                                    <strong>{plugin.name}</strong>
+                                    {": "}
+                                    {t(
+                                      skippedPluginReasonTranslation(
+                                        plugin.reason,
+                                      ),
+                                    )}
+                                    {plugin.sourceUrl != null && (
+                                      <>
+                                        {" "}
+                                        <code>{plugin.sourceUrl}</code>
+                                      </>
+                                    )}
+                                    {plugin.sourcePath != null && (
+                                      <>
+                                        {" "}
+                                        <code>{plugin.sourcePath}</code>
+                                      </>
+                                    )}
+                                    {plugin.skillPath != null && (
+                                      <>
+                                        {" "}
+                                        <code>{plugin.skillPath}</code>
+                                      </>
+                                    )}
+                                  </li>
+                                ),
+                              )}
+                            </ul>
+                          </section>
                         )}
                         <div className="ai-reviewer-skill-git-selection">
                           <OLFormCheckbox

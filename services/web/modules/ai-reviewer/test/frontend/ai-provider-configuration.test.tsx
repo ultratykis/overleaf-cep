@@ -71,6 +71,7 @@ const claudeConfiguration: AiProviderConfiguration = {
   credentialUpdatedAt,
 };
 const azureBaseUrl = "https://reviewer.openai.azure.com/openai";
+const plaintextAzureBaseUrl = "http://host.docker.internal:11434/openai";
 const azureApiVersion = "2025-01-01-preview";
 const azureDeployment = "gpt-5.6-terra";
 const azurePortalEndpoint = `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
@@ -80,6 +81,7 @@ const azureConfiguration: AiProviderConfiguration = {
   requestStyle: "deployment",
   apiVersion: azureApiVersion,
   deployments: [azureDeployment],
+  contextLengthOverrides: [],
   contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
@@ -89,6 +91,7 @@ const v1AzureConfiguration: AiProviderConfiguration = {
   baseUrl: azureBaseUrl,
   requestStyle: "v1",
   deployments: [azureDeployment],
+  contextLengthOverrides: [],
   contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
@@ -98,6 +101,7 @@ const blankAzureConfiguration: AiProviderConfiguration = {
   baseUrl: azureBaseUrl,
   requestStyle: "deployment",
   deployments: [azureDeployment],
+  contextLengthOverrides: [],
   contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
@@ -153,22 +157,26 @@ const blankAzureConfigured: AiProviderConnection = {
 const configurationWrite: AiProviderConfigurationWrite = {
   provider: "openai-compatible",
   baseUrl: configuration.baseUrl,
+  models: [],
   label: "",
   contextLengthOverride: null,
 };
 const otherConfigurationWrite: AiProviderConfigurationWrite = {
   provider: "openai-compatible",
   baseUrl: otherConfiguration.baseUrl,
+  models: [],
   label: otherConfigured.label,
   contextLengthOverride: null,
 };
 const geminiConfigurationWrite: AiProviderConfigurationWrite = {
   provider: "gemini",
+  models: [],
   label: "",
   contextLengthOverride: null,
 };
 const claudeConfigurationWrite: AiProviderConfigurationWrite = {
   provider: "claude",
+  models: [],
   label: "",
   contextLengthOverride: null,
 };
@@ -178,6 +186,7 @@ const azureConfigurationWrite: AiProviderConfigurationWrite = {
   requestStyle: "deployment",
   apiVersion: azureApiVersion,
   deployments: [azureDeployment],
+  contextLengthOverrides: [],
   label: "",
   contextLengthOverride: null,
 };
@@ -470,7 +479,7 @@ describe("AI reviewer: provider configuration", function () {
     ).not.to.include(scopeKey);
   });
 
-  it("creates a connection with exactly the four destination fields", async function () {
+  it("creates a connection with exactly the destination fields", async function () {
     const route = fetchMock.post(
       `/project/${projectId}/ai-reviewer/connections`,
       configured,
@@ -492,6 +501,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(Object.keys(JSON.parse(String(call.options.body)))).to.deep.equal([
       "provider",
       "baseUrl",
+      "models",
       "label",
       "contextLengthOverride",
     ]);
@@ -524,6 +534,7 @@ describe("AI reviewer: provider configuration", function () {
       "requestStyle",
       "apiVersion",
       "deployments",
+      "contextLengthOverrides",
       "label",
       "contextLengthOverride",
       "credential",
@@ -559,7 +570,7 @@ describe("AI reviewer: provider configuration", function () {
     });
   });
 
-  it("sends only an explicitly entered credential as the fifth write field", async function () {
+  it("sends only an explicitly entered credential beyond the destination fields", async function () {
     const route = fetchMock.put(
       `/project/${projectId}/ai-reviewer/connections/${connectionId}`,
       otherConfigured,
@@ -588,6 +599,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(Object.keys(body)).to.deep.equal([
       "provider",
       "baseUrl",
+      "models",
       "label",
       "contextLengthOverride",
       "credential",
@@ -625,6 +637,7 @@ describe("AI reviewer: provider configuration", function () {
       const body = JSON.parse(String(call.options.body));
       expect(Object.keys(body)).to.deep.equal([
         "provider",
+        "models",
         "label",
         "contextLengthOverride",
         "credential",
@@ -674,7 +687,7 @@ describe("AI reviewer: provider configuration", function () {
           connectionId: secondConnectionId,
           connectionLabel: claudeConfigured.label,
           contextLength: 200_000,
-          contextLengthSource: "derived",
+          contextLengthSource: "detected",
         },
       ],
       failures: [],
@@ -743,6 +756,42 @@ describe("AI reviewer: provider configuration", function () {
     await screen.findByText("Connection successful");
   });
 
+  it("saves manual fallback model names with the connection", async function () {
+    const { saveConfiguration } = renderDetails();
+    await waitUntilLoaded();
+    fireEvent.change(input("Base URL"), {
+      target: { value: configuration.baseUrl },
+    });
+    const modelNames = screen.getByLabelText(
+      "Fallback model names",
+    ) as HTMLTextAreaElement;
+    expect(
+      screen.getByText(
+        "One per line. Used only when this provider cannot list models.",
+      ),
+    ).to.exist;
+
+    fireEvent.change(modelNames, {
+      target: {
+        value: "reviewer/manual-v1\nreviewer/manual-v2\nreviewer/manual-v1",
+      },
+    });
+    expect(button("Save").disabled).to.equal(true);
+    fireEvent.change(modelNames, {
+      target: { value: "reviewer/manual-v1\nreviewer/manual-v2" },
+    });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args.slice(0, 2)).to.deep.equal([
+      projectId,
+      {
+        ...configurationWrite,
+        models: ["reviewer/manual-v1", "reviewer/manual-v2"],
+      },
+    ]);
+  });
+
   it("explains the API base URL and rejects a chat completions endpoint", async function () {
     renderDetails();
     await waitUntilLoaded();
@@ -771,7 +820,7 @@ describe("AI reviewer: provider configuration", function () {
     });
     expect(baseUrlInput.getAttribute("aria-invalid")).to.equal("true");
     expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
-      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-error",
+      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning ai-reviewer-baseUrl-error",
     );
     expect(
       screen.getByText(
@@ -779,6 +828,42 @@ describe("AI reviewer: provider configuration", function () {
       ),
     ).to.exist;
     expect(button("Save").disabled).to.equal(true);
+  });
+
+  it("shows HTTP as unencrypted and blocks an API key until the scheme is HTTPS", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    const baseUrlInput = input("Base URL");
+    const credentialInput = input("API key");
+    fireEvent.change(baseUrlInput, {
+      target: { value: configuration.baseUrl },
+    });
+    expect(screen.getByText("HTTP: traffic is not encrypted.")).to.exist;
+    expect(baseUrlInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-baseUrl-help ai-reviewer-baseUrl-plaintext-warning",
+    );
+    expect(button("Save").disabled).to.equal(false);
+
+    fireEvent.change(credentialInput, { target: { value: credential } });
+    expect(
+      screen.getByText("API key blocked. Use HTTPS or recreate without a key."),
+    ).to.exist;
+    expect(credentialInput.getAttribute("aria-describedby")).to.equal(
+      "ai-reviewer-plaintext-credential-warning",
+    );
+    expect(button("Save").disabled).to.equal(true);
+
+    fireEvent.change(baseUrlInput, {
+      target: { value: "https://localhost:8443/v1" },
+    });
+    expect(screen.queryByText("HTTP: traffic is not encrypted.")).not.to.exist;
+    expect(
+      screen.queryByText(
+        "API key blocked. Use HTTPS or recreate without a key.",
+      ),
+    ).not.to.exist;
+    expect(button("Save").disabled).to.equal(false);
   });
 
   it("previews the OpenAI-compatible request URL and omits native destinations", async function () {
@@ -872,9 +957,13 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
       target: { value: azurePortalEndpoint },
     });
-    expect(input("Deployment names (one per line)").value).to.equal(
+    expect(input("Deployments and context lengths").value).to.equal(
       azureDeployment,
     );
+    expect(screen.getByText("One per line: deployment = tokens.")).to.exist;
+    fireEvent.change(input("Deployments and context lengths"), {
+      target: { value: `${azureDeployment} = 400000` },
+    });
     expect(requestUrlValues()).to.deep.equal([
       `${azureBaseUrl}/v1/chat/completions?api-version=v1`,
     ]);
@@ -887,6 +976,9 @@ describe("AI reviewer: provider configuration", function () {
       baseUrl: azurePortalEndpoint,
       requestStyle: "v1",
       deployments: [azureDeployment],
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+      ],
       label: "",
       contextLengthOverride: null,
       credential,
@@ -901,7 +993,7 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
       target: { value: `${azureBaseUrl}/v1` },
     });
-    fireEvent.change(input("Deployment names (one per line)"), {
+    fireEvent.change(input("Deployments and context lengths"), {
       target: { value: azureDeployment },
     });
     expect(requestUrlValues()).to.deep.equal([
@@ -918,7 +1010,7 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("API version (Optional)"), {
       target: { value: azureApiVersion },
     });
-    fireEvent.change(input("Deployment names (one per line)"), {
+    fireEvent.change(input("Deployments and context lengths"), {
       target: { value: `${azureDeployment}\ngpt-4.1-reviewer` },
     });
     expect(requestUrlValues()).to.deep.equal([
@@ -926,14 +1018,14 @@ describe("AI reviewer: provider configuration", function () {
       `${azureBaseUrl}/deployments/gpt-4.1-reviewer/chat/completions?api-version=${azureApiVersion}`,
     ]);
 
-    fireEvent.change(input("Deployment names (one per line)"), {
+    fireEvent.change(input("Deployments and context lengths"), {
       target: { value: "invalid deployment name" },
     });
     expect(requestUrlValues()).to.deep.equal([
       "Enter a valid endpoint and any route fields shown above to see the request URL.",
     ]);
 
-    fireEvent.change(input("Deployment names (one per line)"), {
+    fireEvent.change(input("Deployments and context lengths"), {
       target: { value: azureDeployment },
     });
     fireEvent.change(requestStyleSelect(), { target: { value: "v1" } });
@@ -961,7 +1053,7 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
       target: { value: azurePortalEndpoint },
     });
-    expect(input("Deployment names (one per line)").value).to.equal(
+    expect(input("Deployments and context lengths").value).to.equal(
       azureDeployment,
     );
     expect(input("API version (Optional)").value).to.equal(azureApiVersion);
@@ -974,6 +1066,35 @@ describe("AI reviewer: provider configuration", function () {
       projectId,
       { ...azureConfigurationWrite, credential },
     ]);
+  });
+
+  it("warns and suppresses saving when an Azure API key would use HTTP", async function () {
+    renderDetails();
+    await waitUntilLoaded();
+
+    fireEvent.change(providerSelect(), { target: { value: "azure" } });
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: plaintextAzureBaseUrl },
+    });
+    fireEvent.change(input("Deployments and context lengths"), {
+      target: { value: azureDeployment },
+    });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+
+    expect(
+      screen.getByText("API key blocked. Use HTTPS or recreate without a key."),
+    ).to.exist;
+    expect(button("Save").disabled).to.equal(true);
+
+    fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
+      target: { value: azureBaseUrl },
+    });
+    expect(
+      screen.queryByText(
+        "API key blocked. Use HTTPS or recreate without a key.",
+      ),
+    ).not.to.exist;
+    expect(button("Save").disabled).to.equal(false);
   });
 
   it("keeps the optional deployment API version blank and explains endpoint normalization", async function () {
@@ -1019,7 +1140,7 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Azure OpenAI resource name or endpoint"), {
       target: { value: azureBaseUrl },
     });
-    fireEvent.change(input("Deployment names (one per line)"), {
+    fireEvent.change(input("Deployments and context lengths"), {
       target: { value: azureDeployment },
     });
     fireEvent.change(apiVersionInput, { target: { value: "" } });
@@ -1033,6 +1154,7 @@ describe("AI reviewer: provider configuration", function () {
       baseUrl: azureBaseUrl,
       requestStyle: "deployment",
       deployments: [azureDeployment],
+      contextLengthOverrides: [],
       label: "",
       contextLengthOverride: null,
       credential,
@@ -1073,6 +1195,7 @@ describe("AI reviewer: provider configuration", function () {
         baseUrl: azureBaseUrl,
         requestStyle: "v1",
         deployments: [azureDeployment],
+        contextLengthOverrides: [],
         label: azureConfigured.label,
         contextLengthOverride: null,
       },
@@ -1255,6 +1378,73 @@ describe("AI reviewer: provider configuration", function () {
       credentialUpdatedAt,
     );
     expect(document.body.textContent).not.to.include(credential);
+  });
+
+  it("uses the URL scheme, not local classification, for plaintext and saved-key warnings", async function () {
+    const plaintextCredentialConfigured: AiProviderConnection = {
+      ...configured,
+      config: {
+        ...configuration,
+        credentialSet: true,
+        credentialUpdatedAt,
+      },
+    };
+    const encryptedLocalConfigured: AiProviderConnection = {
+      ...configured,
+      id: secondConnectionId,
+      label: "localhost:8443",
+      classification: "local",
+      config: {
+        ...configuration,
+        baseUrl: "https://localhost:8443/v1",
+        credentialSet: true,
+        credentialUpdatedAt,
+      },
+    };
+    const plaintextAzureConfigured: AiProviderConnection = {
+      ...azureConfigured,
+      id: "connection-plaintext-azure",
+      label: "host.docker.internal:11434",
+      classification: "local",
+      config: {
+        ...azureConfiguration,
+        baseUrl: plaintextAzureBaseUrl,
+      },
+    };
+    renderConnections({
+      listConnections: sinon.stub().resolves({
+        connections: [
+          plaintextCredentialConfigured,
+          encryptedLocalConfigured,
+          plaintextAzureConfigured,
+        ],
+      }),
+    });
+    await waitUntilLoaded({ openEmptyForm: false });
+
+    const [plaintextRow, encryptedRow, plaintextAzureRow] = connectionRows();
+    expect(within(plaintextRow).getByText("HTTP: traffic is not encrypted.")).to
+      .exist;
+    expect(
+      within(plaintextRow).getByText(
+        "API key blocked. Use HTTPS or recreate without a key.",
+      ),
+    ).to.exist;
+    expect(within(encryptedRow).queryByText("HTTP: traffic is not encrypted."))
+      .not.to.exist;
+    expect(
+      within(encryptedRow).queryByText(
+        "API key blocked. Use HTTPS or recreate without a key.",
+      ),
+    ).not.to.exist;
+    expect(
+      within(plaintextAzureRow).getByText("HTTP: traffic is not encrypted."),
+    ).to.exist;
+    expect(
+      within(plaintextAzureRow).getByText(
+        "API key blocked. Use HTTPS or recreate without a key.",
+      ),
+    ).to.exist;
   });
 
   it("reconstructs a native public configuration without returned secret fields", async function () {
@@ -1505,6 +1695,11 @@ describe("AI reviewer: provider configuration", function () {
     const row = connectionRows()[0];
     expect(within(row).getByText(otherConfigured.label)).to.exist;
     expect(testConnectionButton(otherConfigured)).to.exist;
+    expect(
+      screen.queryByText(
+        "Connection tests are only available within a project.",
+      ),
+    ).not.to.exist;
     const edit = button(`Edit ${otherConfigured.label}`);
     const remove = deleteConnectionButton(otherConfigured);
     expect(edit.classList.contains("btn-secondary")).to.equal(true);
@@ -1777,8 +1972,8 @@ describe("AI reviewer: provider configuration", function () {
     );
     await waitUntilLoaded();
     editConnection(configured);
-    fireEvent.change(input("API key"), {
-      target: { value: credential },
+    fireEvent.change(input("Display name"), {
+      target: { value: "Conflict candidate" },
     });
     fireEvent.click(button("Save"));
 

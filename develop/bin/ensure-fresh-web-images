@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+develop_dir="$(cd "$script_dir/.." && pwd)"
+repository_dir="$(cd "$develop_dir/.." && pwd)"
+
+dependency_files=(
+  "$repository_dir/package.json"
+  "$repository_dir/services/web/package.json"
+  "$repository_dir/yarn.lock"
+  "$repository_dir/services/web/Dockerfile"
+)
+
+file_mtime() {
+  local file_path=$1
+  local modified_at
+  if modified_at="$(stat -f %m "$file_path" 2>/dev/null)"; then
+    printf '%s\n' "$modified_at"
+  else
+    stat -c %Y "$file_path"
+  fi
+}
+
+created_epoch() {
+  node -e '
+    const created = Date.parse(process.argv[1])
+    if (!Number.isFinite(created)) process.exit(1)
+    process.stdout.write(String(Math.floor(created / 1000)))
+  ' "$1"
+}
+
+requested_services=()
+has_service_argument=false
+for argument in "$@"; do
+  if [[ $argument != -* ]]; then
+    has_service_argument=true
+  fi
+  case "$argument" in
+    web|webpack)
+      if [[ " ${requested_services[*]-} " != *" $argument "* ]]; then
+        requested_services+=("$argument")
+      fi
+      ;;
+  esac
+done
+if [[ $has_service_argument == false ]]; then
+  requested_services=(web webpack)
+fi
+if [[ ${#requested_services[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+latest_dependency_mtime=0
+for dependency_file in "${dependency_files[@]}"; do
+  dependency_mtime="$(file_mtime "$dependency_file")"
+  if (( dependency_mtime > latest_dependency_mtime )); then
+    latest_dependency_mtime=$dependency_mtime
+  fi
+done
+
+stale_services=()
+for service in "${requested_services[@]}"; do
+  image_ids="$(cd "$develop_dir" && docker compose images -q "$service")"
+  image_id="${image_ids%%$'\n'*}"
+  if [[ -z $image_id ]]; then
+    stale_services+=("$service")
+    continue
+  fi
+  image_created="$(docker image inspect --format '{{.Created}}' "$image_id")"
+  image_created_epoch="$(created_epoch "$image_created")"
+  if (( image_created_epoch < latest_dependency_mtime )); then
+    stale_services+=("$service")
+  fi
+done
+
+if [[ ${#stale_services[@]} -gt 0 ]]; then
+  # Starting an old dependency layer produces misleading missing-package errors,
+  # so correctness takes precedence over the occasional cached build delay.
+  printf 'Rebuilding stale development image(s): %s\n' "${stale_services[*]}" >&2
+  (cd "$develop_dir" && docker compose build "${stale_services[@]}")
+fi

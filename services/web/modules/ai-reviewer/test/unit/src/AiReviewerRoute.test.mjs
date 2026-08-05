@@ -365,6 +365,8 @@ describe("AI reviewer: module shell authenticated route", function () {
     const stream = vi.fn();
     const getWorkspace = vi.fn();
     const saveWorkspace = vi.fn();
+    const getModeInstructions = vi.fn();
+    const saveModeInstructions = vi.fn();
     const getCommentProvenance = vi.fn();
     const markCommentProvenance = vi.fn();
     const deleteCommentProvenance = vi.fn();
@@ -403,6 +405,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       stream,
       getWorkspace,
       saveWorkspace,
+      getModeInstructions,
+      saveModeInstructions,
       getCommentProvenance,
       markCommentProvenance,
       deleteCommentProvenance,
@@ -444,6 +448,15 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
     expect(get).toHaveBeenNthCalledWith(
       3,
+      "/project/:project_id/ai-reviewer/mode-instructions",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      getModeInstructions,
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      4,
       "/project/:project_id/ai-reviewer/comment-provenance",
       login,
       rateLimit,
@@ -462,6 +475,15 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
     expect(put).toHaveBeenNthCalledWith(
       2,
+      "/project/:project_id/ai-reviewer/mode-instructions",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      saveModeInstructions,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      3,
       "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
       login,
       rateLimit,
@@ -515,7 +537,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       deleteCommentProvenance,
     );
     expect(get).toHaveBeenNthCalledWith(
-      4,
+      5,
       "/user/ai-reviewer/connections",
       login,
       rateLimit,
@@ -529,7 +551,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       createConnection,
     );
     expect(put).toHaveBeenNthCalledWith(
-      3,
+      4,
       "/user/ai-reviewer/connections/:connection_id",
       login,
       rateLimit,
@@ -540,46 +562,46 @@ describe("AI reviewer: module shell authenticated route", function () {
       "/user/ai-reviewer/connections/:connection_id",
       login,
       rateLimit,
-      deleteConnection,
-    );
-    expect(get).toHaveBeenNthCalledWith(
-      5,
-      "/project/:project_id/ai-reviewer/connections",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
-      listConnections,
-    );
-    expect(post).toHaveBeenNthCalledWith(
-      4,
-      "/project/:project_id/ai-reviewer/connections",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
-      createConnection,
-    );
-    expect(put).toHaveBeenNthCalledWith(
-      4,
-      "/project/:project_id/ai-reviewer/connections/:connection_id",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
-      updateConnection,
-    );
-    expect(remove).toHaveBeenNthCalledWith(
-      5,
-      "/project/:project_id/ai-reviewer/connections/:connection_id",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
       deleteConnection,
     );
     expect(get).toHaveBeenNthCalledWith(
       6,
+      "/project/:project_id/ai-reviewer/connections",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      listConnections,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/project/:project_id/ai-reviewer/connections",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      createConnection,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      5,
+      "/project/:project_id/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      updateConnection,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      5,
+      "/project/:project_id/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteConnection,
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      7,
       "/user/ai-reviewer/skills",
       login,
       rateLimit,
@@ -614,7 +636,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       deleteSkill,
     );
     expect(get).toHaveBeenNthCalledWith(
-      7,
+      8,
       "/project/:project_id/ai-reviewer/skills",
       login,
       rateLimit,
@@ -658,8 +680,8 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       deleteSkill,
     );
-    expect(anotherRouter.get).toHaveBeenCalledTimes(7);
-    expect(anotherRouter.put).toHaveBeenCalledTimes(4);
+    expect(anotherRouter.get).toHaveBeenCalledTimes(8);
+    expect(anotherRouter.put).toHaveBeenCalledTimes(5);
     expect(anotherRouter.post).toHaveBeenCalledTimes(10);
     expect(anotherRouter.delete).toHaveBeenCalledTimes(7);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);

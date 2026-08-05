@@ -174,7 +174,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     ]);
     const info = vi.spyOn(logger, "info").mockImplementation(() => {});
     try {
-      await collect(createGateway(model).stream(request()));
+      const events = await collect(createGateway(model).stream(request()));
 
       expect(info).toHaveBeenCalledExactlyOnceWith(
         {
@@ -188,6 +188,10 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );
+      expect(events.at(-1)).toMatchObject({
+        type: "completed",
+        findingToolNotCalled: true,
+      });
     } finally {
       info.mockRestore();
     }
@@ -350,6 +354,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
         outputTokens: 12,
       },
     });
+    expect(events[4]).not.toHaveProperty("findingToolNotCalled");
     expect(readProjectFile).toHaveBeenCalledOnce();
     expect(consumed()).toBe(3);
     expect(model.doStreamCalls).toHaveLength(3);
@@ -387,8 +392,9 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
         currentDocument: { path: "main.tex" },
       }),
     );
-    expect(userPrompt).toContain("## Conversation");
-    expect(userPrompt).toContain("User:\nReview the synthetic project.");
+    expect(model.doStreamCalls[0].prompt.at(-1).content[0].text).toBe(
+      "Review the synthetic project.",
+    );
     expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
       structuredOutput().findings[0].evidence,
       {

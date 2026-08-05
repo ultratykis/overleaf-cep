@@ -7,12 +7,14 @@ import {
   within,
 } from "@testing-library/react";
 import { expect } from "chai";
+import fetchMock from "fetch-mock";
 import React from "react";
 import sinon from "sinon";
 
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
 import {
   AiReviewerWorkspacePersistenceError,
+  deleteAiReviewerDiscussion,
   type AiReviewerWorkspacePersistence,
   workspaceChangedMessage,
   workspaceLimitMessage,
@@ -192,9 +194,16 @@ class MemoryWorkspacePersistence implements AiReviewerWorkspacePersistence {
   async deleteDiscussion(
     projectId: string,
     discussionId: string,
+    revision: number,
     _signal: AbortSignal,
   ): Promise<AiReviewerWorkspaceSnapshot> {
     await this.discussionDeleteGates.get(`${projectId}:${discussionId}`);
+    if (revision !== (this.revisions.get(projectId) ?? 0)) {
+      throw new AiReviewerWorkspacePersistenceError(
+        workspaceChangedMessage,
+        "AI_REVIEWER_WORKSPACE_CHANGED",
+      );
+    }
     const workspace = this.stores.get(projectId) ?? emptyWorkspace();
     const orphanedRequestIds = new Set(
       workspace.discussions.flatMap((discussion) =>
@@ -451,6 +460,34 @@ function confirmDeleteDiscussion() {
 }
 
 describe("AI reviewer: persisted review workspace", function () {
+  afterEach(function () {
+    fetchMock.removeRoutes().clearHistory();
+  });
+
+  it("sends the loaded revision with a discussion deletion", async function () {
+    const projectId = "revisioned-discussion-delete-project";
+    const route = fetchMock.delete(
+      `/project/${projectId}/ai-reviewer/workspace/discussions/revisioned-discussion`,
+      {
+        revision: 8,
+        workspace: emptyWorkspace(),
+      },
+    );
+
+    await deleteAiReviewerDiscussion(
+      projectId,
+      "revisioned-discussion",
+      7,
+      new AbortController().signal,
+    );
+
+    const [request] = route.callHistory.calls();
+    expect(request.options.method?.toUpperCase()).to.equal("DELETE");
+    expect(JSON.parse(String(request.options.body))).to.deep.equal({
+      revision: 7,
+    });
+  });
+
   it("hydrates and preserves a generated run subject", async function () {
     const projectId = "subject-persistence-project";
     const initial = workspaceWithFinding({ projectId });
@@ -727,6 +764,119 @@ describe("AI reviewer: persisted review workspace", function () {
       .exist;
   });
 
+  it("keeps a cancelled run with visible findings after discussion deletion", async function () {
+    const projectId = "cancelled-run-discussion-deletion-project";
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: workspaceWithFinding({
+        projectId,
+        includeDiscussion: true,
+      }),
+    });
+    const deleteDiscussion = sinon.spy(persistence, "deleteDiscussion");
+    const cancelledFindingTitle = "Cancelled run finding remains visible";
+    const streamRequest = sinon
+      .stub()
+      .callsFake((call: ConversationStreamCall) => {
+        call.onEvent({
+          type: "started",
+          eventId: `${call.request.requestId}-started`,
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          provider: "fake",
+          model: "deterministic-v1",
+          skill: call.request.skill,
+        });
+        call.onEvent({
+          type: "finding",
+          eventId: `${call.request.requestId}-finding`,
+          requestId: call.request.requestId,
+          sequence: 1,
+          createdAt,
+          finding: sourceFinding(
+            call.request,
+            "cancelled-run-finding",
+            cancelledFindingTitle,
+          ),
+        });
+        return new Promise<void>((_resolve, reject) => {
+          call.signal.addEventListener(
+            "abort",
+            () => reject(call.signal.reason),
+            {
+              once: true,
+            },
+          );
+        });
+      });
+
+    render(
+      panel(projectId, persistence, {
+        createRequestId: () => "cancelled-run-request",
+        captureSelectionSession: async ({ action, instruction }) => {
+          const source = sourceRequest(projectId);
+          if (source.scope == null || source.scope.kind === "project") {
+            throw new Error(
+              "The cancelled run fixture requires document scope.",
+            );
+          }
+          const scope = source.scope;
+          const request: AgentRequest = {
+            ...source,
+            requestId: "cancelled-run-request",
+            action,
+            instruction,
+          };
+          const shareDocument = {
+            connection: { state: "ok" },
+            getVersion: () => scope.baseRevision,
+          };
+          const currentDocument = {
+            doc_id: scope.documentId,
+            joined: true,
+            doc: shareDocument,
+            getSnapshot: () => scope.text,
+            hasBufferedOps: () => false,
+            getTrackingChanges: () => false,
+          };
+          return {
+            status: "ready",
+            session: Object.freeze({
+              request: Object.freeze(request),
+              binding: Object.freeze({
+                currentDocument,
+                shareDocument,
+                trackChanges: false,
+                connectionEpoch: 1,
+              }),
+            }),
+          };
+        },
+        streamRequest,
+      }),
+    );
+
+    await screen.findByText("Persisted unresolved finding");
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    await screen.findByText(cancelledFindingTitle);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await screen.findByText("Cancelled");
+
+    const summary = screen.getByRole("article", {
+      name: "Discussion summary",
+    });
+    fireEvent.click(
+      within(summary).getByRole("button", { name: "Delete discussion" }),
+    );
+    confirmDeleteDiscussion();
+
+    await waitFor(() => expect(deleteDiscussion.calledOnce).to.equal(true));
+    expect(screen.getByRole("article", { name: "Review run 2" })).to.exist;
+    expect(screen.getByText(cancelledFindingTitle)).to.exist;
+    expect(screen.getByText("Cancelled")).to.exist;
+    expect(persistence.read(projectId).runs).to.have.length(1);
+  });
+
   it("confirms one discussion deletion and preserves the other saved work after reload", async function () {
     const projectId = "isolated-discussion-deletion-project";
     const stored = workspaceWithFinding({
@@ -886,7 +1036,7 @@ describe("AI reviewer: persisted review workspace", function () {
       expect(
         screen
           .getByRole("button", {
-            name: "Review mode",
+            name: "Selected mode — Freeform",
           })
           .hasAttribute("disabled"),
       ).to.equal(false);
@@ -1109,7 +1259,7 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(
       screen
         .getByRole("button", {
-          name: "Review mode",
+          name: "Selected mode — Freeform",
         })
         .hasAttribute("disabled"),
     ).to.equal(true);
@@ -1132,7 +1282,7 @@ describe("AI reviewer: persisted review workspace", function () {
         }),
       });
       const pendingSave = deferred();
-      const save = sinon.stub(persistence, "save").callsFake(async function () {
+      const save = sinon.stub(persistence, "save").callsFake(async () => {
         await pendingSave.promise;
         throw new AiReviewerWorkspacePersistenceError(
           workspaceChangedMessage,
@@ -1229,11 +1379,12 @@ describe("AI reviewer: persisted review workspace", function () {
     });
 
     expect(await screen.findByText(workspaceChangedMessage)).to.exist;
-    expect(await screen.findByText("Status: Applied")).to.exist;
+    expect(await screen.findByText("Status: Discarded")).to.exist;
     expect(save.called).to.equal(false);
     expect(
       persistence.read(projectId).runs[0].suggestions[0].artifact.status,
     ).to.equal("applied");
+    expect(persistence.read(projectId).discussions).to.have.length(1);
   });
 
   it("freezes on a locally decided suggestion removed by the server during discussion deletion", async function () {
@@ -1281,10 +1432,7 @@ describe("AI reviewer: persisted review workspace", function () {
       projectId,
       (persistence.revisions.get(projectId) ?? 0) + 1,
     );
-    const exactServerWorkspace = {
-      runs: concurrentWorkspace.runs,
-      discussions: [],
-    };
+    const exactServerWorkspace = concurrentWorkspace;
     await act(async () => {
       pendingDelete.resolve();
       await pendingDelete.promise;
@@ -1293,12 +1441,12 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(await screen.findByText(workspaceChangedMessage)).to.exist;
     expect(save.called).to.equal(false);
     expect(persistence.read(projectId)).to.deep.equal(exactServerWorkspace);
-    expect(screen.queryByText("Status: Discarded")).not.to.exist;
+    expect(screen.getByText("Status: Discarded")).to.exist;
     expect(
-      screen.queryByRole("article", {
+      screen.getByRole("article", {
         name: "Discussion summary",
       }),
-    ).not.to.exist;
+    ).to.exist;
   });
 
   it("rebinds a hydrated finding to the currently open document before navigation", async function () {
@@ -1562,7 +1710,7 @@ describe("AI reviewer: persisted review workspace", function () {
       expect(
         screen
           .getByRole("button", {
-            name: "Review mode",
+            name: "Selected mode — Freeform",
           })
           .hasAttribute("disabled"),
       ).to.equal(false);

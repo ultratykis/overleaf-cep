@@ -5,6 +5,7 @@
  *   AgentRequest,
  *   DiscussionTurn,
  * } from '../../shared/contract-types'
+ * @typedef {{ role: "user" | "assistant", content: string }} AgentMessage
  */
 
 /**
@@ -43,24 +44,21 @@ function formatScope(scope) {
 
 /**
  * @param {DiscussionTurn[]} turns
+ * @returns {AgentMessage[]}
  */
-function formatConversation(turns) {
-  return turns
-    .map(
-      ({ role, text }) => `${role === "user" ? "User" : "Assistant"}:\n${text}`,
-    )
-    .join("\n\n");
+function conversationMessages(turns) {
+  return turns.map(({ role, text }) => ({ role, content: text }));
 }
 
 /**
- * Render the readable prompt. Project snapshots call this same formatter so
- * accepting a read cannot be followed by a second, differently measured
- * gateway rejection.
+ * Render the readable request context without flattening prior conversational
+ * roles into labels inside one user message.
  *
  * @param {AgentRequest} request
  * @param {unknown} projectContext
+ * @returns {AgentMessage[]}
  */
-export function formatAgentPrompt(request, projectContext) {
+export function formatAgentMessages(request, projectContext) {
   const sections = [
     [
       "## Task",
@@ -77,15 +75,22 @@ export function formatAgentPrompt(request, projectContext) {
       ["## Project", "", JSON.stringify(projectContext)].join("\n"),
     );
   }
-  sections.push(
-    [
-      "## Conversation",
-      "",
-      formatConversation([
-        ...(request.turns ?? []),
-        { role: "user", text: request.instruction },
-      ]),
-    ].join("\n"),
-  );
-  return sections.join("\n\n");
+  return [
+    { role: "user", content: sections.join("\n\n") },
+    ...conversationMessages(request.turns ?? []),
+    { role: "user", content: request.instruction },
+  ];
+}
+
+/**
+ * Serialize the exact role-bearing input for the shared character budget.
+ * Project snapshots call this same formatter so
+ * accepting a read cannot be followed by a second, differently measured
+ * gateway rejection.
+ *
+ * @param {AgentRequest} request
+ * @param {unknown} projectContext
+ */
+export function formatAgentPrompt(request, projectContext) {
+  return JSON.stringify(formatAgentMessages(request, projectContext));
 }

@@ -9,6 +9,8 @@ import { createAiReviewerCommentProvenanceController } from "./AiReviewerComment
 import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProvenanceStore.mjs";
 import { createAiReviewerController } from "./AiReviewerController.mjs";
 import { recordAiReviewerFailure } from "./AiReviewerFailureLogger.mjs";
+import { createAiReviewerModeInstructionController } from "./AiReviewerModeInstructionController.mjs";
+import { createAiReviewerModeInstructionStore } from "./AiReviewerModeInstructionStore.mjs";
 import {
   AiReviewerConnectionNotFoundError,
   aiReviewerModelCacheKey,
@@ -122,6 +124,17 @@ function modelSelectionRequired() {
   });
 }
 
+function modelContextLengthRequired() {
+  return new AgentGatewayError(
+    "The selected model context length is unknown. For Ollama, load the model first or set it in Connection settings.",
+    {
+      code: "AI_MODEL_CONTEXT_UNKNOWN",
+      category: "configuration",
+      retryable: false,
+    },
+  );
+}
+
 /**
  * Load the connection the request selected. A connection identifier that is
  * not this user's own is absent rather than readable, and is reported as an
@@ -203,7 +216,20 @@ async function resolveRunConfiguration(
   const resolution = await providerService.resolveContextLength(
     connection,
     model,
+    {
+      signal: context.signal,
+      cacheKey: aiReviewerModelCacheKey(userId, connection.id ?? null),
+    },
   );
+  if (
+    resolution.contextLength == null ||
+    resolution.contextLengthSource === "unknown"
+  ) {
+    // Stop before RequestScopeReader, ProjectSnapshot, or AiSdkAgentGateway can
+    // calculate a budget. No provider generation request is made for an
+    // invented context length.
+    throw modelContextLengthRequired();
+  }
   return Object.freeze({
     provider: connection.provider,
     ...(connection.provider === "openai-compatible" ||
@@ -240,11 +266,26 @@ async function loadRunSkills(skillStore, userId) {
   }
 }
 
+/** @param {any} modeInstructionStore @param {any} request @param {string} userId */
+async function loadRunModeInstructions(modeInstructionStore, request, userId) {
+  if (typeof modeInstructionStore?.load !== "function") {
+    return {};
+  }
+  // The project half of the owner scope comes from the authorized route, not
+  // from the model request body, so a caller cannot select another project.
+  const snapshot = await modeInstructionStore.load(
+    userId,
+    request.params?.project_id,
+  );
+  return snapshot.instructions;
+}
+
 /** @param {any} dependencies */
 export function createConfiguredAiReviewerController({
   configStore,
   providerService,
   skillStore,
+  modeInstructionStore,
   requestScopeReader,
   timeoutSignalFactory,
   now,
@@ -286,9 +327,17 @@ export function createConfiguredAiReviewerController({
         contextLength: runConfiguration.contextLength,
         contextLengthSource: runConfiguration.contextLengthSource,
       });
-      const skills = await loadRunSkills(skillStore, userId);
+      const [skills, modeInstructions] = await Promise.all([
+        loadRunSkills(skillStore, userId),
+        loadRunModeInstructions(
+          modeInstructionStore,
+          context.httpRequest,
+          userId,
+        ),
+      ]);
       const gateway = providerService.createAgentGateway(runConfiguration, {
         skills,
+        modeInstructions,
         readProjectFile: scope.readProjectFile,
         projectContext: scope.projectContext,
         searchZotero: scope.searchZotero,
@@ -379,6 +428,7 @@ const providerController = createAiReviewerProviderController({
   failureRecorder: recordAiReviewerFailure,
 });
 const skillStore = createAiReviewerSkillStore();
+const modeInstructionStore = createAiReviewerModeInstructionStore();
 const skillGitImporter = createAiReviewerSkillGitImporter();
 const skillController = createAiReviewerSkillController({
   skillStore,
@@ -388,11 +438,15 @@ const configuredController = createConfiguredAiReviewerController({
   configStore,
   providerService,
   skillStore,
+  modeInstructionStore,
   requestScopeReader,
   failureRecorder: recordAiReviewerFailure,
 });
 const workspaceController = createAiReviewerWorkspaceController({
   workspaceStore,
+});
+const modeInstructionController = createAiReviewerModeInstructionController({
+  modeInstructionStore,
 });
 const provenanceStore = createAiReviewerCommentProvenanceStore();
 const provenanceController = createAiReviewerCommentProvenanceController({
@@ -412,6 +466,12 @@ export default {
   confirmSkillGitImport: expressify(skillController.confirmGitImport),
   deleteSkill: expressify(skillController.deleteSkill),
   stream: expressify(configuredController.stream),
+  getModeInstructions: expressify(
+    modeInstructionController.getModeInstructions,
+  ),
+  saveModeInstructions: expressify(
+    modeInstructionController.saveModeInstructions,
+  ),
   getWorkspace: expressify(workspaceController.getWorkspace),
   saveWorkspace: expressify(workspaceController.saveWorkspace),
   getCommentProvenance: expressify(provenanceController.getCommentProvenance),

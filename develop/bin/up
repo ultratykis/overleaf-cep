@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 
+"$(dirname "$0")/ensure-fresh-web-images" "$@" || exit $?
 docker compose up --detach "$@"

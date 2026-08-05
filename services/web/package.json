@@ -377,6 +377,7 @@
     "mediatr-ts": "^2.0.1",
     "mensch": "^0.3.4",
     "micromark": "^4.0.0",
+    "micromark-extension-gfm": "^3.0.0",
     "mini-css-extract-plugin": "^2.7.6",
     "minisearch": "^7.2.0",
     "mocha": "^11.1.0",

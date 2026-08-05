@@ -147,6 +147,7 @@ export type ReviewWorkspaceAction =
   | {
       type: "hydrate";
       runs: readonly WorkspaceRun[];
+      retainedGenerations?: readonly number[];
     }
   | {
       type: "retain-runs";
@@ -558,8 +559,20 @@ export function reduceReviewWorkspaceState(
   action: ReviewWorkspaceAction,
 ): ReviewWorkspaceState {
   if (action.type === "hydrate") {
+    const hydratedRuns = action.runs.map(hydrateWorkspaceRun);
+    const retainedGenerations = new Set(action.retainedGenerations ?? []);
+    const hydratedGenerations = new Set(
+      hydratedRuns.map((run) => run.generation),
+    );
+    const retainedRuns = state.runs.filter(
+      (run) =>
+        retainedGenerations.has(run.generation) &&
+        !hydratedGenerations.has(run.generation),
+    );
     return {
-      runs: action.runs.map(hydrateWorkspaceRun),
+      runs: [...hydratedRuns, ...retainedRuns].sort(
+        (left, right) => left.createdOrder - right.createdOrder,
+      ),
     };
   }
   if (action.type === "retain-runs") {

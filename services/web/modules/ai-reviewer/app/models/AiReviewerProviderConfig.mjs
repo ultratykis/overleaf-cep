@@ -16,6 +16,14 @@ const contextLength = {
   },
 };
 
+const ModelContextLengthOverrideSchema = new mongoose.Schema(
+  {
+    model: { type: String, required: true },
+    contextLength: { ...contextLength, required: true },
+  },
+  { _id: false, strict: "throw", versionKey: false },
+);
+
 export const AiReviewerProviderConnectionSchema = new mongoose.Schema(
   {
     // Connection identifiers are server-issued so a user cannot name one after
@@ -26,6 +34,15 @@ export const AiReviewerProviderConnectionSchema = new mongoose.Schema(
     requestStyle: { type: String, enum: ["v1", "deployment"] },
     apiVersion: { type: String },
     deployments: { type: [String], default: undefined },
+    // Azure deployment names cannot identify their underlying model. Bind each
+    // user-supplied limit to that exact name rather than sharing one guess.
+    contextLengthOverrides: {
+      type: [ModelContextLengthOverrideSchema],
+      default: undefined,
+    },
+    // These are fallback catalogue entries, not a selected model. They are used
+    // only when the destination cannot expose a model list of its own.
+    models: { type: [String], default: undefined },
     // Only a name the user typed is stored. An absent one is derived on read,
     // so an existing connection gains a name without a migration.
     label: { type: String },

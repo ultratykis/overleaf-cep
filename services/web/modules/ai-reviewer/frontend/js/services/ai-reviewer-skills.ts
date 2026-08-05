@@ -56,6 +56,13 @@ export type AiReviewerSkillGitSkippedReferenceReason =
   | "not-readable"
   | "size-limit";
 
+export type AiReviewerSkillGitSkippedPluginReason =
+  | "external-source"
+  | "invalid-plugin"
+  | "no-readable-skills"
+  | "skill-not-readable"
+  | "duplicate-skill";
+
 export type AiReviewerSkillGitPreview = {
   source: {
     service: "github" | "gitlab";
@@ -72,6 +79,14 @@ export type AiReviewerSkillGitPreview = {
     owner: AiReviewerSkillGitOwner | null;
     homepage: string | null;
   }>;
+  skippedPlugins: Array<{
+    name: string;
+    reason: AiReviewerSkillGitSkippedPluginReason;
+    sourceUrl?: string;
+    sourcePath?: string;
+    skillPath?: string;
+  }>;
+  truncated: boolean;
   skills: Array<{
     path: string;
     name: string;

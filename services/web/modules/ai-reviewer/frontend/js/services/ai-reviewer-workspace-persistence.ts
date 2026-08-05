@@ -116,6 +116,7 @@ export function saveAiReviewerWorkspace(
 export function deleteAiReviewerDiscussion(
   projectId: string,
   discussionId: string,
+  revision: number,
   signal: AbortSignal,
 ) {
   return request(signal, async () =>
@@ -125,6 +126,7 @@ export function deleteAiReviewerDiscussion(
           discussionId,
         )}`,
         {
+          body: { revision },
           signal,
           swallowAbortError: false,
         },

@@ -26,6 +26,8 @@ const MAX_GIT_API_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_GIT_RESPONSE_CHUNKS = 512;
 const MAX_GIT_ARCHIVE_COMPRESSED_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_ARCHIVE_EXPANDED_BYTES = 128 * 1024 * 1024;
+export const AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES =
+  32 * 1024 * 1024;
 const MAX_GIT_ARCHIVE_CHUNKS = 65_536;
 const MAX_TAR_METADATA_BYTES = 64 * 1024;
 const MAX_REPOSITORY_TREE_ENTRIES = 10_000;
@@ -70,6 +72,20 @@ const ARCHIVE_CONTENT_TYPES = Object.freeze([
  *   owner: ManifestOwner | null,
  *   homepage: string | null,
  * }} PreviewPlugin
+ */
+
+/**
+ * @typedef {"external-source" | "invalid-plugin" | "no-readable-skills" | "skill-not-readable" | "duplicate-skill"} SkippedPluginReason
+ */
+
+/**
+ * @typedef {{
+ *   name: string,
+ *   reason: SkippedPluginReason,
+ *   sourceUrl?: string,
+ *   sourcePath?: string,
+ *   skillPath?: string,
+ * }} SkippedPlugin
  */
 
 /**
@@ -192,13 +208,6 @@ function hostTypeRequired() {
   return new AiReviewerSkillGitImportError(
     "Choose GitHub or GitLab for this self-hosted repository.",
     { code: "AI_REVIEWER_SKILL_GIT_HOST_TYPE_REQUIRED" },
-  );
-}
-
-function tooManyRepositorySkills() {
-  return new AiReviewerSkillGitImportError(
-    `The repository contains more than ${AI_REVIEWER_SKILL_COUNT_LIMIT} skills. Import from a repository with at most ${AI_REVIEWER_SKILL_COUNT_LIMIT} skills.`,
-    { code: "AI_REVIEWER_SKILL_GIT_SKILL_COUNT_LIMIT_REACHED", status: 409 },
   );
 }
 
@@ -1231,8 +1240,7 @@ function pluginManifest(files, root) {
 }
 
 /** @param {Map<string, Buffer>} files */
-function marketplacePluginRoots(files) {
-  if (!files.has(MARKETPLACE_MANIFEST_PATH)) return Object.freeze([]);
+function marketplaceManifest(files) {
   let marketplace;
   try {
     marketplace = plainRecord(
@@ -1251,97 +1259,145 @@ function marketplacePluginRoots(files) {
       "The repository marketplace manifest declares no plugins.",
     );
   }
-  if (marketplace.plugins.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
-    throw tooManyRepositorySkills();
-  }
-  const roots = new Set();
-  for (const rawPlugin of marketplace.plugins) {
-    let plugin;
-    try {
-      plugin = plainRecord(rawPlugin);
-    } catch {
-      throw manifestInvalid("The repository marketplace plugin is invalid.");
-    }
-    roots.add(
-      manifestRelativePath(
-        manifestString(plugin.source ?? "./", "plugin source", true),
-        true,
-      ),
-    );
-  }
-  return Object.freeze([...roots]);
+  return marketplace;
 }
 
-/** @param {Map<string, Buffer>} files */
-function marketplaceDeclaredSkillPaths(files) {
-  let marketplace;
+/** @param {unknown} value */
+function pluginDisplayName(value) {
   try {
-    marketplace = plainRecord(
-      JSON.parse(
-        requiredTextFile(files, MARKETPLACE_MANIFEST_PATH, MAX_MANIFEST_BYTES),
+    const plugin = plainRecord(value);
+    return manifestString(plugin.name, "plugin name") ?? "Unnamed plugin";
+  } catch {
+    return "Unnamed plugin";
+  }
+}
+
+/** @param {unknown} input */
+function manifestPluginSource(input) {
+  if (input == null) {
+    return Object.freeze({ kind: /** @type {const} */ ("local"), root: "" });
+  }
+  if (typeof input === "string") {
+    return Object.freeze({
+      kind: /** @type {const} */ ("local"),
+      root: manifestRelativePath(
+        manifestString(input, "plugin source", true),
+        true,
       ),
-    );
-  } catch (error) {
-    if (error instanceof AiReviewerSkillGitImportError) throw error;
-    throw manifestInvalid(
-      "The repository marketplace manifest is invalid JSON.",
-    );
+    });
   }
-  if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length === 0) {
-    throw manifestInvalid(
-      "The repository marketplace manifest declares no plugins.",
-    );
-  }
-  if (marketplace.plugins.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
-    throw tooManyRepositorySkills();
-  }
-  const paths = [];
-  const seen = new Set();
-  for (const rawPlugin of marketplace.plugins) {
-    let plugin;
-    try {
-      plugin = plainRecord(rawPlugin);
-    } catch {
-      throw manifestInvalid("The repository marketplace plugin is invalid.");
-    }
-    const root = manifestRelativePath(
-      manifestString(plugin.source ?? "./", "plugin source", true),
+  const source = plainRecord(input);
+  const sourceKind =
+    source.source == null
+      ? null
+      : manifestString(source.source, "plugin source", true);
+  const sourcePath =
+    source.path == null
+      ? null
+      : manifestString(source.path, "plugin source path", true);
+  const externalValue = source.url ?? source.repo;
+  if (externalValue != null) {
+    const external = manifestString(
+      externalValue,
+      source.repo == null ? "plugin source URL" : "plugin source repository",
       true,
     );
-    if (!Array.isArray(plugin.skills) || plugin.skills.length === 0) {
-      throw manifestInvalid(
-        "A repository marketplace plugin declares no skills.",
-      );
-    }
-    for (const rawSkillPath of plugin.skills) {
+    const sourceUrl =
+      source.repo != null && GITHUB_SHORTHAND.test(external)
+        ? `https://github.com/${external.replace(/\.git$/u, "")}`
+        : external;
+    return Object.freeze({
+      kind: /** @type {const} */ ("external"),
+      sourceUrl,
+      ...(sourcePath == null ? {} : { sourcePath }),
+    });
+  }
+  if (!["url", "git-subdir", "github"].includes(sourceKind ?? "")) {
+    throw manifestInvalid(
+      "The repository marketplace plugin source is invalid.",
+    );
+  }
+  if (sourceKind === "github" || sourcePath == null) {
+    throw manifestInvalid(
+      "The repository marketplace plugin source is invalid.",
+    );
+  }
+  return Object.freeze({
+    kind: /** @type {const} */ ("local"),
+    root: manifestRelativePath(sourcePath, true),
+  });
+}
+
+/**
+ * A missing `skills` array means the plugin root, not the whole repository,
+ * owns discovery. Explicit entries are directories in public manifests, while
+ * accepting an explicit `SKILL.md` keeps compatibility with older manifests.
+ *
+ * @param {Record<string, unknown>} plugin
+ * @param {string} root
+ * @param {Map<string, RepositoryTreeEntry>} entries
+ */
+function pluginSkillPaths(plugin, root, entries) {
+  if (Array.isArray(plugin.skills) && plugin.skills.length > 0) {
+    return plugin.skills.map((rawSkillPath) => {
       const declared = manifestRelativePath(
         manifestString(rawSkillPath, "skill path", true),
         false,
       );
       const directory = [root, declared].filter(Boolean).join("/");
-      const path =
-        directory.endsWith("/SKILL.md") || directory === "SKILL.md"
-          ? directory
-          : `${directory}/SKILL.md`;
-      if (seen.has(path)) {
-        throw manifestInvalid(
-          "The repository manifest declares a skill more than once.",
-        );
-      }
-      seen.add(path);
-      paths.push(path);
-      if (paths.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
-        throw tooManyRepositorySkills();
-      }
-    }
+      return directory.endsWith("/SKILL.md") || directory === "SKILL.md"
+        ? directory
+        : `${directory}/SKILL.md`;
+    });
   }
-  return Object.freeze(paths);
+  if (root === "") {
+    // A repository root overlaps every nested plugin root. Without explicit
+    // skills there is no safe ownership boundary, so do not claim peer Skills.
+    return [];
+  }
+  const prefix = root === "" ? "" : `${root}/`;
+  return [...entries.values()]
+    .filter(
+      (entry) =>
+        readableBlob(entry) &&
+        (entry.path === `${root === "" ? "" : `${root}/`}SKILL.md` ||
+          (entry.path.startsWith(prefix) && entry.path.endsWith("/SKILL.md"))),
+    )
+    .map(({ path }) => path)
+    .sort();
 }
 
 /**
  * @param {Map<string, Buffer>} files
  * @param {Map<string, RepositoryTreeEntry>} entries
- * @returns {{ manifestFound: boolean, plugins: readonly PreviewPlugin[], declarations: readonly { path: string, facts: ManifestFacts }[] }}
+ */
+function marketplaceLocalFiles(files, entries) {
+  const marketplace = marketplaceManifest(files);
+  const roots = new Set();
+  const skillPaths = new Set();
+  for (const rawPlugin of marketplace.plugins) {
+    try {
+      const plugin = plainRecord(rawPlugin);
+      const source = manifestPluginSource(plugin.source);
+      if (source.kind !== "local") continue;
+      roots.add(source.root);
+      for (const path of pluginSkillPaths(plugin, source.root, entries)) {
+        if (readableBlob(entries.get(path))) skillPaths.add(path);
+      }
+    } catch {
+      // One unrecognised marketplace entry must not hide readable local peers.
+    }
+  }
+  return Object.freeze({
+    roots: Object.freeze([...roots]),
+    skillPaths: Object.freeze([...skillPaths]),
+  });
+}
+
+/**
+ * @param {Map<string, Buffer>} files
+ * @param {Map<string, RepositoryTreeEntry>} entries
+ * @returns {{ manifestFound: boolean, plugins: readonly PreviewPlugin[], skippedPlugins: readonly SkippedPlugin[], declarations: readonly { path: string, facts: ManifestFacts }[] }}
  */
 function discoverSkillDeclarations(files, entries) {
   if (!readableBlob(entries.get(MARKETPLACE_MANIFEST_PATH))) {
@@ -1356,102 +1412,63 @@ function discoverSkillDeclarations(files, entries) {
     if (paths.length === 0) {
       throw manifestInvalid("The repository does not contain a SKILL.md file.");
     }
-    if (paths.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
-      throw tooManyRepositorySkills();
-    }
     return Object.freeze({
       manifestFound: false,
       plugins: Object.freeze([]),
+      skippedPlugins: Object.freeze([]),
       declarations: Object.freeze(
         paths.map((path) => Object.freeze({ path, facts: Object.freeze({}) })),
       ),
     });
   }
 
-  let marketplace;
-  try {
-    marketplace = plainRecord(
-      JSON.parse(
-        requiredTextFile(files, MARKETPLACE_MANIFEST_PATH, MAX_MANIFEST_BYTES),
-      ),
-    );
-  } catch (error) {
-    if (error instanceof AiReviewerSkillGitImportError) throw error;
-    throw manifestInvalid(
-      "The repository marketplace manifest is invalid JSON.",
-    );
-  }
+  const marketplace = marketplaceManifest(files);
   const owner = manifestOwner(marketplace.owner, "owner");
-  if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length === 0) {
-    throw manifestInvalid(
-      "The repository marketplace manifest declares no plugins.",
-    );
-  }
   /** @type {PreviewPlugin[]} */
   const plugins = [];
+  /** @type {SkippedPlugin[]} */
+  const skippedPlugins = [];
   /** @type {{ path: string, facts: ManifestFacts }[]} */
   const declarations = [];
   const declaredPaths = new Set();
   for (const rawPlugin of marketplace.plugins) {
-    let plugin;
+    const fallbackName = pluginDisplayName(rawPlugin);
     try {
-      plugin = plainRecord(rawPlugin);
-    } catch {
-      throw manifestInvalid("The repository marketplace plugin is invalid.");
-    }
-    const root = manifestRelativePath(
-      manifestString(plugin.source ?? "./", "plugin source", true),
-      true,
-    );
-    const localPlugin = pluginManifest(files, root);
-    const name = manifestString(
-      plugin.name ?? localPlugin?.name,
-      "plugin name",
-      true,
-    );
-    const version = manifestString(
-      plugin.version ?? localPlugin?.version,
-      "plugin version",
-    );
-    const license = manifestString(
-      plugin.license ?? localPlugin?.license,
-      "plugin license",
-    );
-    const pluginOwner =
-      owner ?? manifestOwner(localPlugin?.author, "plugin author");
-    const homepage = manifestString(
-      plugin.homepage ?? localPlugin?.homepage,
-      "plugin homepage",
-    );
-    if (!Array.isArray(plugin.skills) || plugin.skills.length === 0) {
-      throw manifestInvalid(
-        `The repository plugin ${JSON.stringify(name)} declares no skills.`,
-      );
-    }
-    const previewPlugin = Object.freeze({
-      name,
-      version,
-      license,
-      owner: pluginOwner,
-      homepage,
-    });
-    plugins.push(previewPlugin);
-    for (const rawSkillPath of plugin.skills) {
-      const declared = manifestRelativePath(
-        manifestString(rawSkillPath, "skill path", true),
-        false,
-      );
-      const directory = [root, declared].filter(Boolean).join("/");
-      const path =
-        directory.endsWith("/SKILL.md") || directory === "SKILL.md"
-          ? directory
-          : `${directory}/SKILL.md`;
-      if (declaredPaths.has(path)) {
-        throw manifestInvalid(
-          "The repository manifest declares a skill more than once.",
+      const plugin = plainRecord(rawPlugin);
+      const source = manifestPluginSource(plugin.source);
+      if (source.kind === "external") {
+        skippedPlugins.push(
+          Object.freeze({
+            name: fallbackName,
+            reason: /** @type {const} */ ("external-source"),
+            sourceUrl: source.sourceUrl,
+            ...(source.sourcePath == null
+              ? {}
+              : { sourcePath: source.sourcePath }),
+          }),
         );
+        continue;
       }
-      declaredPaths.add(path);
+      const localPlugin = pluginManifest(files, source.root);
+      const name = manifestString(
+        plugin.name ?? localPlugin?.name,
+        "plugin name",
+        true,
+      );
+      const version = manifestString(
+        plugin.version ?? localPlugin?.version,
+        "plugin version",
+      );
+      const license = manifestString(
+        plugin.license ?? localPlugin?.license,
+        "plugin license",
+      );
+      const pluginOwner =
+        owner ?? manifestOwner(localPlugin?.author, "plugin author");
+      const homepage = manifestString(
+        plugin.homepage ?? localPlugin?.homepage,
+        "plugin homepage",
+      );
       const facts = Object.freeze({
         pluginName: name,
         ...(version == null ? {} : { pluginVersion: version }),
@@ -1459,15 +1476,67 @@ function discoverSkillDeclarations(files, entries) {
         ...(pluginOwner == null ? {} : { owner: pluginOwner }),
         ...(homepage == null ? {} : { homepage }),
       });
-      declarations.push(Object.freeze({ path, facts }));
-      if (declarations.length > AI_REVIEWER_SKILL_COUNT_LIMIT) {
-        throw tooManyRepositorySkills();
+      const skillPaths = pluginSkillPaths(plugin, source.root, entries);
+      if (skillPaths.length === 0) {
+        skippedPlugins.push(
+          Object.freeze({
+            name,
+            reason: /** @type {const} */ ("no-readable-skills"),
+            ...(source.root === "" ? {} : { sourcePath: source.root }),
+          }),
+        );
+        continue;
       }
+      let readableSkillCount = 0;
+      for (const path of skillPaths) {
+        if (!readableBlob(entries.get(path))) {
+          skippedPlugins.push(
+            Object.freeze({
+              name,
+              reason: /** @type {const} */ ("skill-not-readable"),
+              skillPath: path,
+            }),
+          );
+          continue;
+        }
+        if (declaredPaths.has(path)) {
+          skippedPlugins.push(
+            Object.freeze({
+              name,
+              reason: /** @type {const} */ ("duplicate-skill"),
+              skillPath: path,
+            }),
+          );
+          continue;
+        }
+        declaredPaths.add(path);
+        declarations.push(Object.freeze({ path, facts }));
+        readableSkillCount += 1;
+      }
+      if (readableSkillCount > 0) {
+        plugins.push(
+          Object.freeze({
+            name,
+            version,
+            license,
+            owner: pluginOwner,
+            homepage,
+          }),
+        );
+      }
+    } catch {
+      skippedPlugins.push(
+        Object.freeze({
+          name: fallbackName,
+          reason: /** @type {const} */ ("invalid-plugin"),
+        }),
+      );
     }
   }
   return Object.freeze({
     manifestFound: true,
     plugins: Object.freeze(plugins),
+    skippedPlugins: Object.freeze(skippedPlugins),
     declarations: Object.freeze(declarations),
   });
 }
@@ -1497,7 +1566,12 @@ function resolveReferenceMention(skillPath, mention) {
         segment === "prototype",
     )
   ) {
-    throw invalidSource("SKILL.md mentions an unsafe reference path.");
+    return Object.freeze({
+      skipped: /** @type {SkippedReference} */ ({
+        path: mention,
+        reason: "outside-skill-directory",
+      }),
+    });
   }
   if (absolute) {
     return Object.freeze({
@@ -1558,6 +1632,7 @@ function provenanceFacts(facts) {
  * @param {Map<string, Buffer>} files
  * @param {ReturnType<typeof discoverSkillDeclarations>} discovery
  * @param {string} contentHash
+ * @param {boolean} [truncated]
  */
 function buildRepositoryPreview(
   source,
@@ -1566,6 +1641,7 @@ function buildRepositoryPreview(
   files,
   discovery,
   contentHash,
+  truncated = false,
 ) {
   /** @type {any[]} */
   const internalSkills = [];
@@ -1660,6 +1736,8 @@ function buildRepositoryPreview(
     }),
     manifestFound: discovery.manifestFound,
     plugins: discovery.plugins,
+    skippedPlugins: discovery.skippedPlugins,
+    truncated,
     skills: Object.freeze(
       internalSkills.map((skill) =>
         Object.freeze({
@@ -1826,10 +1904,17 @@ export function createAiReviewerSkillGitImporter({
     const referenceOwners = new Map();
     const passed = new Set();
     const selected = selectedPaths == null ? null : new Set(selectedPaths);
+    // Candidate count stays independent from preview capacity so large
+    // repositories remain usable. 32 MiB preserves the former roughly
+    // 30.25 MiB footprint while complete selected Skills remain confirmable.
     const maximumRetainedBytes =
-      AI_REVIEWER_SKILL_COUNT_LIMIT * AI_REVIEWER_SKILL_MAX_BYTES +
-      (2 * AI_REVIEWER_SKILL_COUNT_LIMIT + 1) * MAX_MANIFEST_BYTES;
+      selected == null
+        ? AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES
+        : AI_REVIEWER_SKILL_COUNT_LIMIT * AI_REVIEWER_SKILL_MAX_BYTES +
+          (2 * AI_REVIEWER_SKILL_COUNT_LIMIT + 1) * MAX_MANIFEST_BYTES;
     let retainedBytes = 0;
+    let previewTruncated = false;
+    const omittedPaths = new Set();
 
     /** @param {string} path @param {"manifest" | "skill" | "reference"} kind */
     const retain = (path, kind) => {
@@ -1937,6 +2022,16 @@ export function createAiReviewerSkillGitImporter({
         for (const owner of referenceOwners.get(path) ?? []) {
           checkSkillSize(owner);
         }
+        if (
+          selected == null &&
+          (previewTruncated || retainedBytes + size > maximumRetainedBytes)
+        ) {
+          // Do not retain a partial file: only fully inspectable Skills may be
+          // offered for confirmation after the preview budget is exhausted.
+          previewTruncated = true;
+          omittedPaths.add(path);
+          return null;
+        }
         if (kind === "manifest") return MAX_MANIFEST_BYTES;
         if (kind === "skill") {
           return AI_REVIEWER_SKILL_MAX_BYTES + MAX_MANIFEST_BYTES;
@@ -1952,7 +2047,8 @@ export function createAiReviewerSkillGitImporter({
         files.set(path, bytes);
         const kind = desired.get(path);
         if (path === MARKETPLACE_MANIFEST_PATH) {
-          for (const root of marketplacePluginRoots(files)) {
+          const marketplaceFiles = marketplaceLocalFiles(files, entries);
+          for (const root of marketplaceFiles.roots) {
             const pluginPath =
               root === ""
                 ? PLUGIN_MANIFEST_PATH
@@ -1961,7 +2057,7 @@ export function createAiReviewerSkillGitImporter({
               retain(pluginPath, "manifest");
             }
           }
-          retainDeclaredSkills(marketplaceDeclaredSkillPaths(files));
+          retainDeclaredSkills(marketplaceFiles.skillPaths);
         } else if (kind === "skill") {
           inspectSkill(path, bytes);
         }
@@ -1969,7 +2065,7 @@ export function createAiReviewerSkillGitImporter({
     });
 
     for (const path of desired.keys()) {
-      if (!files.has(path)) throw responseInvalid();
+      if (!files.has(path) && !omittedPaths.has(path)) throw responseInvalid();
     }
     const discovery = discoverSkillDeclarations(files, entries);
     const declarationsByPath = new Map(
@@ -1980,7 +2076,15 @@ export function createAiReviewerSkillGitImporter({
     );
     const declarations =
       selectedPaths == null
-        ? discovery.declarations
+        ? discovery.declarations.filter(({ path }) => {
+            const state = skillStates.get(path);
+            return (
+              state != null &&
+              [...state.references].every((referencePath) =>
+                files.has(referencePath),
+              )
+            );
+          })
         : selectedPaths.map((path) => declarationsByPath.get(path));
     if (declarations.some((declaration) => declaration == null)) {
       throw previewChanged(
@@ -1989,6 +2093,7 @@ export function createAiReviewerSkillGitImporter({
     }
     return Object.freeze({
       files,
+      previewTruncated,
       discovery: Object.freeze({
         ...discovery,
         declarations: Object.freeze(declarations),
@@ -2043,7 +2148,7 @@ export function createAiReviewerSkillGitImporter({
         throw responseInvalid();
       }
       const entries = await fetchRepositoryTree(source, resolvedSha, signal);
-      const { files, discovery } = await fetchArchiveFiles(
+      const { files, discovery, previewTruncated } = await fetchArchiveFiles(
         source,
         resolvedSha,
         entries,
@@ -2057,6 +2162,7 @@ export function createAiReviewerSkillGitImporter({
         files,
         discovery,
         repositorySnapshotHash(source, resolvedSha, entries),
+        previewTruncated,
       ).preview;
     },
 

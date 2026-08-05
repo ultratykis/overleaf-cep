@@ -15,6 +15,7 @@ import {
   AiReviewerConnectionConflictError,
   AiReviewerConnectionLimitError,
   AiReviewerConnectionNotFoundError,
+  AiReviewerPlaintextCredentialError,
   AiReviewerProviderConfigInputError,
   aiReviewerModelCacheKey,
 } from "./AiReviewerProviderConfigStore.mjs";
@@ -26,6 +27,13 @@ const ERRORS = Object.freeze({
     code: "AI_PROVIDER_CONFIGURATION_INVALID",
     category: "configuration",
     message: "The AI provider configuration is invalid.",
+    retryable: false,
+  }),
+  plaintextCredential: Object.freeze({
+    code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+    category: "configuration",
+    message:
+      "API keys cannot be saved or sent to HTTP endpoints. Use HTTPS or recreate the connection without a key.",
     retryable: false,
   }),
   missing: Object.freeze({
@@ -173,6 +181,12 @@ function providerFailureKind(error) {
 
 /** @param {unknown} error */
 function modelFailureKind(error) {
+  if (
+    error instanceof AgentGatewayError &&
+    error.code === ERRORS.plaintextCredential.code
+  ) {
+    return /** @type {const} */ ("plaintextCredential");
+  }
   if (
     error instanceof AgentGatewayError &&
     error.code === ERRORS.unsupported.code
@@ -327,6 +341,9 @@ export function createAiReviewerProviderController(dependencies) {
       if (error instanceof AiReviewerConnectionConflictError) {
         return sendError(response, 409, "connectionConflict");
       }
+      if (error instanceof AiReviewerPlaintextCredentialError) {
+        return sendError(response, 400, "plaintextCredential");
+      }
       if (error instanceof AiReviewerProviderConfigInputError) {
         return sendError(response, 400, "invalid");
       }
@@ -474,27 +491,49 @@ export function createAiReviewerProviderController(dependencies) {
       const listings = await Promise.all(
         connections.map(async (/** @type {any} */ connection) => {
           try {
-            const listedModels = await providerService.listModels(connection, {
-              signal,
-              cacheKey: aiReviewerModelCacheKey(
-                authenticatedUserId,
-                connection.id,
-              ),
-            });
+            if (connection.credentialLoadFailed === true) {
+              return { connection, credentialLoadFailed: true };
+            }
+            const cacheKey = aiReviewerModelCacheKey(
+              authenticatedUserId,
+              connection.id,
+            );
+            let listedModels;
+            try {
+              listedModels = await providerService.listModels(connection, {
+                signal,
+                cacheKey,
+              });
+            } catch (error) {
+              if (
+                error instanceof AgentGatewayError &&
+                error.code === ERRORS.unsupported.code &&
+                (connection.models?.length ?? 0) > 0
+              ) {
+                // These remain explicit candidates. The run controller already
+                // validates the bounded id and accepts it only for unsupported
+                // discovery; no model is selected on the connection's behalf.
+                listedModels = connection.models.map((id) => ({
+                  id,
+                  displayName: id,
+                }));
+              } else {
+                throw error;
+              }
+            }
             return {
               connection,
-              // Context length belongs to the selected model rather than its
-              // connection. Resolve every listed pair here with the same
-              // policy a run applies, so the picker can expose the decision.
-              models: await Promise.all(
-                listedModels.map(async (/** @type {any} */ model) => ({
-                  ...model,
-                  ...(await providerService.resolveContextLength(
-                    connection,
-                    model.id,
-                  )),
-                })),
-              ),
+              // Opening the picker must not send credentials to one metadata
+              // request per model. Keep the useful value/source display from
+              // non-network policy and selected-model cache entries only.
+              models: listedModels.map((/** @type {any} */ model) => ({
+                ...model,
+                ...providerService.contextLengthForModelList(
+                  connection,
+                  model.id,
+                  { cacheKey },
+                ),
+              })),
             };
           } catch (error) {
             return { connection, error };
@@ -508,6 +547,15 @@ export function createAiReviewerProviderController(dependencies) {
         return sendError(response, 499, "aborted");
       }
       for (const listing of listings) {
+        if (listing.credentialLoadFailed === true) {
+          failures.push({
+            connectionId: listing.connection.id,
+            connectionLabel: listing.connection.label,
+            code: ERRORS.persistence.code,
+            category: ERRORS.persistence.category,
+          });
+          continue;
+        }
         if (listing.error !== undefined) {
           const publicError = recordModelFailure(
             listing.connection,
@@ -588,7 +636,15 @@ export function createAiReviewerProviderController(dependencies) {
         return sendError(response, 499, "aborted");
       }
       const kind = modelFailureKind(error);
-      return sendError(response, kind === "unsupported" ? 501 : 502, kind);
+      return sendError(
+        response,
+        kind === "unsupported"
+          ? 501
+          : kind === "plaintextCredential"
+            ? 409
+            : 502,
+        kind,
+      );
     } finally {
       request.removeListener?.("aborted", onAborted);
     }

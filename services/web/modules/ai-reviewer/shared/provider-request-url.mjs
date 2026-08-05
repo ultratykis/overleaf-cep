@@ -55,6 +55,17 @@ export function parseCanonicalAiProviderBaseUrl(input) {
 }
 
 /**
+ * Transport encryption is a property of the URL scheme. Host-based endpoint
+ * classification cannot answer this because localhost may be served over
+ * either HTTP or HTTPS.
+ *
+ * @param {unknown} input
+ */
+export function isPlaintextAiProviderBaseUrl(input) {
+  return parseCanonicalAiProviderBaseUrl(input).scheme === "http";
+}
+
+/**
  * Normalize the Azure endpoint shapes accepted by the settings boundary. The
  * server supplies its stricter base URL parser so normalization and network
  * policy remain one operation there; the form uses the shared syntax parser.

@@ -361,7 +361,7 @@ describe("AI reviewer workspace persistence", function () {
     });
 
     expect(
-      await store.deleteDiscussion(userId, projectId, discussion.id),
+      await store.deleteDiscussion(userId, projectId, discussion.id, 1),
     ).toEqual({
       revision: 2,
       workspace: emptyWorkspace(),
@@ -404,7 +404,7 @@ describe("AI reviewer workspace persistence", function () {
       workspace: { runs: [], discussions: [discussion], selectedModel },
     });
     expect(
-      await store.deleteDiscussion(userId, projectId, discussion.id),
+      await store.deleteDiscussion(userId, projectId, discussion.id, 2),
     ).toEqual({
       revision: 3,
       workspace: { ...emptyWorkspace(), selectedModel },
@@ -827,6 +827,7 @@ describe("AI reviewer workspace persistence", function () {
       userId,
       projectId,
       removedDiscussion.id,
+      1,
     );
 
     expect(result.revision).toBe(2);
@@ -879,6 +880,7 @@ describe("AI reviewer workspace persistence", function () {
       userId,
       projectId,
       removedDiscussion.id,
+      1,
     );
 
     expect(result.workspace).toEqual({
@@ -923,6 +925,7 @@ describe("AI reviewer workspace persistence", function () {
       userId,
       projectId,
       removedDiscussion.id,
+      1,
     );
 
     expect(result.workspace.discussions).toEqual([]);
@@ -986,7 +989,7 @@ describe("AI reviewer workspace persistence", function () {
     expect(model.findOne).toHaveBeenCalledTimes(2);
   });
 
-  it("retries discussion deletion without dropping a concurrent save", async function () {
+  it("rejects discussion deletion after a concurrent save", async function () {
     const removedRun = workspaceRun({
       requestId: "request-delete-race",
       generation: 1,
@@ -1014,40 +1017,31 @@ describe("AI reviewer workspace persistence", function () {
       },
       0,
     );
-    const current = records.get(recordKey(userId, projectId));
-
-    model.findOneAndUpdate.mockImplementationOnce((filter) =>
-      fakeQuery(() => {
-        records.set(recordKey(userId, projectId), {
-          ...current,
-          revision: current.revision + 1,
-          workspace: {
-            runs: [removedRun, concurrentRun],
-            discussions: [removedDiscussion],
-          },
-        });
-        expect(filter.revision).toBe(current.revision);
-        return null;
-      }),
-    );
-
-    const result = await store.deleteDiscussion(
+    await store.save(
       userId,
       projectId,
-      removedDiscussion.id,
+      {
+        runs: [removedRun, concurrentRun],
+        discussions: [removedDiscussion],
+      },
+      1,
     );
 
-    expect(result).toEqual({
-      revision: 3,
-      workspace: {
-        runs: [concurrentRun],
-        discussions: [],
-      },
-    });
-    expect(records.get(recordKey(userId, projectId)).workspace).toEqual(
-      result.workspace,
+    const error = await captureError(
+      store.deleteDiscussion(userId, projectId, removedDiscussion.id, 1),
     );
-    expect(model.findOne).toHaveBeenCalledTimes(2);
+
+    expect(error).toBeInstanceOf(AiReviewerWorkspaceConflictError);
+    expect(records.get(recordKey(userId, projectId))).toEqual(
+      expect.objectContaining({
+        revision: 2,
+        workspace: {
+          runs: [removedRun, concurrentRun],
+          discussions: [removedDiscussion],
+        },
+      }),
+    );
+    expect(model.findOne).toHaveBeenCalledTimes(1);
   });
 
   it("deletes one workspace, every workspace for a project, and every workspace for a user", async function () {
@@ -1188,11 +1182,15 @@ describe("AI reviewer workspace controller", function () {
     );
 
     const discussionResponse = new FakeResponse();
-    await controller.deleteDiscussion(httpRequest(), discussionResponse);
+    await controller.deleteDiscussion(
+      httpRequest({ body: { revision: snapshot.revision } }),
+      discussionResponse,
+    );
     expect(workspaceStore.deleteDiscussion).toHaveBeenCalledExactlyOnceWith(
       userId,
       projectId,
       "discussion-requested",
+      snapshot.revision,
     );
     expect(discussionResponse.statusCode).toBe(200);
     expect(discussionResponse.body).toEqual(snapshot);

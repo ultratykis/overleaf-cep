@@ -74,12 +74,8 @@ function catalogModel(
   connection: AiProviderConnection,
   id: string,
   displayName: string,
-  contextLength = 4_096,
-  contextLengthSource:
-    | "derived"
-    | "detected"
-    | "default"
-    | "override" = "default",
+  contextLength: number | null = null,
+  contextLengthSource: "detected" | "override" | "unknown" = "unknown",
 ) {
   return {
     id,
@@ -101,7 +97,7 @@ const alternateModel = catalogModel(
   "claude-sonnet-4-20250514",
   "Claude Sonnet",
   200_000,
-  "derived",
+  "detected",
 );
 
 function providerProps(
@@ -380,8 +376,9 @@ describe("AI reviewer: context-driven panel", function () {
     expect(screen.queryByTestId("ai-reviewer-review-shortcuts")).not.to.exist;
     expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
     expect(
-      screen.getByRole("button", { name: "Review mode" }).textContent,
-    ).to.equal("No mode");
+      screen.getByRole("button", { name: "Selected mode — Freeform" })
+        .textContent,
+    ).to.equal("Freeform");
   });
 
   it("sends a typed message with the selected review mode and no scope", async function () {
@@ -392,7 +389,9 @@ describe("AI reviewer: context-driven panel", function () {
       streamRequest,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Review mode" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Selected mode — Freeform" }),
+    );
     fireEvent.click(screen.getByRole("menuitem", { name: "Review mode" }));
     typeConversationMessage("Review chapter 3 as a referee.");
     await screen.findByText("A precise explanation.");
@@ -402,7 +401,8 @@ describe("AI reviewer: context-driven panel", function () {
     expect(request.skill).to.equal("referee-review");
     expect(request).not.to.have.property("scope");
     expect(
-      screen.getByRole("button", { name: "Review mode" }).textContent,
+      screen.getByRole("button", { name: "Selected mode — Review mode" })
+        .textContent,
     ).to.equal("Review mode");
   });
 
@@ -414,7 +414,9 @@ describe("AI reviewer: context-driven panel", function () {
       streamRequest,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Review mode" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Selected mode — Freeform" }),
+    );
     fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm mode" }));
     typeConversationMessage("Generate alternative explanations.");
     await screen.findByText("A precise explanation.");
@@ -422,6 +424,11 @@ describe("AI reviewer: context-driven panel", function () {
     const request = streamRequest.firstCall.args[0].request;
     expect(request.skill).to.equal("brainstorm");
     expect(request).not.to.have.property("scope");
+    expect(
+      screen.getByRole("button", {
+        name: "Selected mode — Brainstorm mode",
+      }).textContent,
+    ).to.equal("Brainstorm mode");
   });
 
   it("keeps earlier run findings visible while brainstorm mode is active", async function () {
@@ -430,7 +437,9 @@ describe("AI reviewer: context-driven panel", function () {
     expect(within(run).getByRole("region", { name: "Review findings" })).to
       .exist;
 
-    fireEvent.click(screen.getByRole("button", { name: "Review mode" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Selected mode — Freeform" }),
+    );
     fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm mode" }));
 
     expect(within(run).getByRole("region", { name: "Review findings" })).to
@@ -441,7 +450,7 @@ describe("AI reviewer: context-driven panel", function () {
   });
 
   // Spec case 5
-  it("sends a typed message with no skill or scope in No mode", async function () {
+  it("sends a typed message with no skill or scope in Freeform", async function () {
     const streamRequest = unifiedStream();
     renderPanel({
       createDiscussionId: () => "typed-message-discussion",
@@ -506,6 +515,73 @@ describe("AI reviewer: context-driven panel", function () {
       screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
     );
     expect(await screen.findByText("Ambiguous phrase")).to.exist;
+  });
+
+  it("returns to the timeline when a review starts from an open discussion", async function () {
+    let requestNumber = 0;
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        const { requestId, skill } = call.request;
+        call.onEvent({
+          type: "started",
+          eventId: `${requestId}-started`,
+          requestId,
+          sequence: 0,
+          createdAt,
+          provider: "fake",
+          model: "deterministic-v1",
+          skill,
+        });
+        if (streamRequest.callCount === 1) {
+          call.onEvent({
+            type: "finding",
+            eventId: `${requestId}-finding`,
+            requestId,
+            sequence: 1,
+            createdAt,
+            finding: sourceFinding(call.request),
+          });
+          call.onEvent({
+            type: "completed",
+            eventId: `${requestId}-completed`,
+            requestId,
+            sequence: 2,
+            createdAt,
+            finishReason: "stop",
+          });
+          return;
+        }
+        await new Promise<void>((_resolve, reject) => {
+          call.signal.addEventListener(
+            "abort",
+            () => reject(call.signal.reason),
+            { once: true },
+          );
+        });
+      });
+    await reviewedSelection({
+      createRequestId: () => `discussion-review-request-${++requestNumber}`,
+      streamRequest,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Discuss finding" }));
+    expect(
+      await screen.findByRole("article", { name: "AI reviewer discussion" }),
+    ).to.exist;
+
+    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+
+    const activeRun = await screen.findByRole("article", {
+      name: "Review run 2",
+    });
+    expect(document.querySelector(".ai-reviewer-panel-timeline")).not.to.equal(
+      null,
+    );
+    expect(screen.queryByRole("article", { name: "AI reviewer discussion" }))
+      .not.to.exist;
+    const stop = within(activeRun).getByRole("button", { name: "Stop" });
+    fireEvent.click(stop);
+    expect(await within(activeRun).findByText("Cancelled")).to.exist;
   });
 
   it("renders markdown in review findings", async function () {
@@ -724,7 +800,7 @@ describe("AI reviewer: context-driven panel", function () {
     await screen.findByRole("article", { name: "Review run 1" });
 
     const modeSelector = screen.getByRole("button", {
-      name: "Review mode",
+      name: "Selected mode — Freeform",
     }) as HTMLButtonElement;
     expect(modeSelector.disabled).to.equal(true);
 
@@ -782,7 +858,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
     expect(await screen.findByTestId("discussion-responding")).to.exist;
     const modeSelector = screen.getByRole("button", {
-      name: "Review mode",
+      name: "Selected mode — Freeform",
     }) as HTMLButtonElement;
     expect(modeSelector.disabled).to.equal(true);
 
@@ -891,12 +967,128 @@ describe("AI reviewer: context-driven panel", function () {
     const run = await screen.findByRole("article", { name: "Review run 1" });
     expect(
       screen.getByRole("button", {
-        name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · built-in model data",
+        name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · provider-detected value",
       }),
     ).to.exist;
     expect(
       within(run).getByText("Model used for this run: fake · deterministic-v1"),
     ).to.exist;
+  });
+
+  it("marks an unknown context length in the model catalogue", async function () {
+    renderPanel({ ...providerProps() });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    );
+
+    expect(
+      screen.getByRole("menuitem", {
+        name: `Default reviewer (${localConnection.label}) · Context length unknown. Set it in Connection settings.`,
+      }),
+    ).to.exist;
+    expect(screen.getByText("· Context unknown")).to.exist;
+  });
+
+  it("filters a 49-model catalogue by display name or id", async function () {
+    const models = Array.from({ length: 49 }, (_, index) =>
+      catalogModel(
+        localConnection,
+        `reviewer-model-${index + 1}`,
+        index === 47 ? "Specialized reviewer" : `Reviewer ${index + 1}`,
+      ),
+    );
+    renderPanel({ ...providerProps([localConnection], models) });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    );
+    const filter = screen.getByRole("textbox", { name: "Filter models" });
+    expect(screen.getAllByRole("menuitem")).to.have.length(49);
+    fireEvent.change(filter, { target: { value: "model-48" } });
+
+    const matches = screen.getAllByRole("menuitem");
+    expect(matches).to.have.length(1);
+    expect(matches[0].textContent).to.contain("Specialized reviewer");
+    fireEvent.change(filter, { target: { value: "does-not-exist" } });
+    expect(screen.getByRole("status").textContent).to.equal(
+      "No matching models",
+    );
+  });
+
+  it("moves from the model filter into its options and lets Escape close the menu", async function () {
+    renderPanel({ ...providerProps() });
+
+    const toggle = await screen.findByRole("button", {
+      name: "Selected model — None",
+    });
+    fireEvent.click(toggle);
+    const filter = screen.getByLabelText("Filter models");
+    const options = screen.getAllByRole("menuitem");
+
+    filter.focus();
+    fireEvent.keyDown(filter, { key: "ArrowDown" });
+    expect(document.activeElement).to.equal(options[0]);
+
+    filter.focus();
+    fireEvent.keyDown(filter, { key: "ArrowUp" });
+    expect(document.activeElement).to.equal(options.at(-1));
+
+    filter.focus();
+    fireEvent.keyDown(filter, { key: "Escape" });
+    await waitFor(() =>
+      expect(toggle.getAttribute("aria-expanded")).to.equal("false"),
+    );
+    expect(
+      document
+        .querySelector(".ai-reviewer-panel-model-menu")
+        ?.classList.contains("show"),
+    ).to.equal(false);
+  });
+
+  it("shows model ids only when display names are duplicated", async function () {
+    const duplicates = [
+      catalogModel(localConnection, "reviewer/duplicate-a", "Same reviewer"),
+      catalogModel(localConnection, "reviewer/duplicate-b", "Same reviewer"),
+      catalogModel(localConnection, "reviewer/unique", "Unique reviewer"),
+    ];
+    renderPanel({ ...providerProps([localConnection], duplicates) });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Selected model — None" }),
+    );
+
+    const optionText = screen
+      .getAllByRole("menuitem")
+      .map((option) => option.textContent);
+    expect(
+      optionText.some((text) =>
+        text?.includes("Same reviewer — reviewer/duplicate-a"),
+      ),
+    ).to.equal(true);
+    expect(
+      optionText.some((text) =>
+        text?.includes("Same reviewer — reviewer/duplicate-b"),
+      ),
+    ).to.equal(true);
+    expect(
+      optionText.find((text) => text?.startsWith("Unique reviewer")),
+    ).not.to.include("reviewer/unique");
+  });
+
+  it("shows a model-catalogue error when the request fails", async function () {
+    renderPanel({
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection] }),
+      loadProviderModels: sinon.stub().rejects(new Error("HTTP 409")),
+    });
+
+    expect((await screen.findByRole("alert")).textContent).to.equal(
+      "Models could not be loaded.",
+    );
+    expect(screen.queryByRole("button", { name: /^Selected model/u })).not.to
+      .exist;
   });
 
   it("saves the chosen model and restores it after a reload", async function () {
@@ -920,7 +1112,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(
       (
         await screen.findByRole("button", {
-          name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · built-in model data",
+          name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · provider-detected value",
         })
       ).textContent,
     ).to.equal("Claude Sonnet");

@@ -20,6 +20,7 @@ import {
   classifySdkError,
 } from "./AiSdkAgentGateway.mjs";
 import {
+  assertOpenAiCompatibleCredentialTransport,
   assertAllowedResolvedIpAddress,
   OPENAI_COMPATIBLE_FETCH_REDIRECT,
   OpenAiCompatibleEndpointPolicyError,
@@ -28,17 +29,11 @@ import {
 } from "./OllamaEndpointPolicy.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
 import { parseAzureOpenAiRunDestination } from "./AzureOpenAiEndpointPolicy.mjs";
-import {
-  isValidModelContextLength,
-  MAX_DETECTED_MODEL_CONTEXT_LENGTH,
-} from "./ModelContextLength.mjs";
+import { modelContextLengthFromFields } from "./ModelContextLength.mjs";
 
-const CANONICAL_MODEL_ARCHITECTURE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
-// Ollama answers /api/show with the full modelfile and license text, which is
-// already ~80 KB for a small model. The old 64 KiB ceiling truncated that, so
-// detection failed and every local model silently fell back to the 4 096
-// default — far below the 262 144 the model actually reports.
+// Context metadata is untrusted and some servers attach unexpectedly large
+// payloads, so bound it before retaining or parsing the response body.
 const MAX_CONTEXT_METADATA_BYTES = 1_048_576;
 const MAX_CONTEXT_METADATA_CHUNKS = 2_048;
 const MAX_NONSTREAM_CONTENT_PARTS = 512;
@@ -2641,34 +2636,125 @@ async function readBoundedContextMetadata(response, signal) {
   return parsed;
 }
 
+/**
+ * @param {Record<string, unknown>} record
+ * @param {string} key
+ */
+function optionalOwnJsonDataProperty(record, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (descriptor == null) return undefined;
+  if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) {
+    throw invalidContextMetadataResponse();
+  }
+  return descriptor.value;
+}
+
+/** @param {unknown} input @param {string} model */
+function ollamaRunningContextLength(input, model) {
+  const root = plainJsonRecord(input);
+  const models = ownJsonDataProperty(root, "models");
+  if (!Array.isArray(models)) {
+    throw invalidContextMetadataResponse();
+  }
+  for (const value of models) {
+    const entry = plainJsonRecord(value);
+    const candidate =
+      optionalOwnJsonDataProperty(entry, "name") ??
+      optionalOwnJsonDataProperty(entry, "model");
+    if (candidate !== model) continue;
+    const contextLength = modelContextLengthFromFields(entry);
+    if (contextLength != null) return contextLength;
+  }
+  return null;
+}
+
+/** @param {unknown} input @param {string} model */
+function llamaSlotContextLength(input, model) {
+  if (!Array.isArray(input)) {
+    throw invalidContextMetadataResponse();
+  }
+  const contextLengths = [];
+  for (const value of input) {
+    const slot = plainJsonRecord(value);
+    const slotModel =
+      optionalOwnJsonDataProperty(slot, "model") ??
+      optionalOwnJsonDataProperty(slot, "model_id");
+    if (typeof slotModel === "string" && slotModel !== model) continue;
+    const contextLength = modelContextLengthFromFields(slot);
+    if (contextLength != null) contextLengths.push(contextLength);
+  }
+  return contextLengths.length === 0 ? null : Math.min(...contextLengths);
+}
+
 /** @param {unknown} input */
-function modelContextLengthFromMetadata(input) {
-  const response = plainJsonRecord(input);
-  const modelInfo = plainJsonRecord(
-    ownJsonDataProperty(response, "model_info"),
+function llamaPropsContextLength(input) {
+  const root = plainJsonRecord(input);
+  const direct = modelContextLengthFromFields(root);
+  if (direct != null) return direct;
+  const defaults = optionalOwnJsonDataProperty(
+    root,
+    "default_generation_settings",
   );
-  const architecture = ownJsonDataProperty(modelInfo, "general.architecture");
-  if (
-    typeof architecture !== "string" ||
-    !CANONICAL_MODEL_ARCHITECTURE.test(architecture)
-  ) {
-    throw invalidContextMetadataResponse();
-  }
-  const contextLength = ownJsonDataProperty(
-    modelInfo,
-    `${architecture}.context_length`,
-  );
-  if (
-    !isValidModelContextLength(contextLength, MAX_DETECTED_MODEL_CONTEXT_LENGTH)
-  ) {
-    throw invalidContextMetadataResponse();
-  }
-  return /** @type {number} */ (contextLength);
+  return defaults == null ? null : modelContextLengthFromFields(defaults);
 }
 
 /**
- * Detect Ollama model metadata without widening the Chat Completions request
- * path. The fixed metadata path is at the configured endpoint's same origin.
+ * @param {{
+ *   baseUrl: string,
+ *   url: string,
+ *   credential?: string,
+ *   signal?: AbortSignal,
+ *   fetchImpl: typeof fetch,
+ *   method: "GET" | "POST",
+ *   body?: string,
+ * }} input
+ */
+async function requestContextMetadata({
+  baseUrl,
+  url,
+  credential,
+  signal,
+  fetchImpl,
+  method,
+  body,
+}) {
+  const guardedFetch = createGuardedOpenAiCompatibleFetch({
+    baseUrl,
+    allowedRequestUrl: url,
+    fetchImpl,
+  });
+  const headers = new Headers({ Accept: "application/json" });
+  if (body !== undefined) headers.set("content-type", "application/json");
+  if (credential !== undefined) {
+    headers.set("authorization", `Bearer ${credential}`);
+  }
+  const response = await guardedFetch(url, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (!(response instanceof Response)) {
+    throw invalidContextMetadataResponse();
+  }
+  if (response.status < 200 || response.status >= 300) {
+    if ([404, 405, 501].includes(response.status)) {
+      cancelRejectedResponseBody(response, invalidContextMetadataResponse());
+      return null;
+    }
+    const error = contextMetadataHttpFailure(response.status);
+    cancelRejectedResponseBody(response, error);
+    throw error;
+  }
+  return await readBoundedContextMetadata(response, signal);
+}
+
+/**
+ * Prefer the context actually allocated to a loaded Ollama model or llama.cpp
+ * slot. Ollama's model maximum is not a safe fallback because the next load
+ * may allocate its smaller server default; without a runtime value, planning
+ * must remain unknown. Every fixed metadata path stays on the configured
+ * endpoint's guarded same origin.
  *
  * @param {{
  *   baseUrl: unknown,
@@ -2691,38 +2777,46 @@ export async function detectOpenAiCompatibleContextLength({
     credential === undefined
       ? undefined
       : parseAiReviewerProviderCredential(credential);
+  assertOpenAiCompatibleCredentialTransport(
+    endpoint.baseUrl,
+    parsedCredential !== undefined,
+  );
   if (typeof fetchImpl !== "function") {
     throw new TypeError("fetchImpl must be a function.");
   }
   throwIfTransportSignalAborted(signal);
 
-  const metadataUrl = `${new URL(endpoint.baseUrl).origin}/api/show`;
-  const guardedFetch = createGuardedOpenAiCompatibleFetch({
-    baseUrl: endpoint.baseUrl,
-    allowedRequestUrl: metadataUrl,
-    fetchImpl,
-  });
-  const headers = new Headers({ "content-type": "application/json" });
-  if (parsedCredential !== undefined) {
-    headers.set("authorization", `Bearer ${parsedCredential}`);
+  const origin = new URL(endpoint.baseUrl).origin;
+  const request = (url, method, body) =>
+    requestContextMetadata({
+      baseUrl: endpoint.baseUrl,
+      url,
+      credential: parsedCredential,
+      signal,
+      fetchImpl,
+      method,
+      ...(body === undefined ? {} : { body }),
+    });
+
+  const running = await request(`${origin}/api/ps`, "GET");
+  if (running != null) {
+    const contextLength = ollamaRunningContextLength(running, parsedModel);
+    if (contextLength != null) return contextLength;
   }
-  const response = await guardedFetch(metadataUrl, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ model: parsedModel, verbose: false }),
-    ...(signal === undefined ? {} : { signal }),
-  });
-  if (!(response instanceof Response)) {
-    throw invalidContextMetadataResponse();
+
+  const slots = await request(`${origin}/slots`, "GET");
+  if (slots != null) {
+    const contextLength = llamaSlotContextLength(slots, parsedModel);
+    if (contextLength != null) return contextLength;
   }
-  if (response.status < 200 || response.status >= 300) {
-    const error = contextMetadataHttpFailure(response.status);
-    cancelRejectedResponseBody(response, error);
-    throw error;
+
+  const props = await request(`${origin}/props`, "GET");
+  if (props != null) {
+    const contextLength = llamaPropsContextLength(props);
+    if (contextLength != null) return contextLength;
   }
-  return modelContextLengthFromMetadata(
-    await readBoundedContextMetadata(response, signal),
-  );
+
+  return null;
 }
 
 /**
@@ -3282,6 +3376,7 @@ export class HardenedAiSdkProviderTransport {
    *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
    *   contextLengthSource?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLengthSource"],
    *   skills?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["skills"],
+   *   modeInstructions?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["modeInstructions"],
    *   readProjectFile: ConstructorParameters<typeof AiSdkAgentGateway>[0]["readProjectFile"],
    *   projectContext?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["projectContext"],
    *   searchZotero?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["searchZotero"],
@@ -3294,6 +3389,7 @@ export class HardenedAiSdkProviderTransport {
     contextLength,
     contextLengthSource,
     skills,
+    modeInstructions,
     readProjectFile,
     projectContext,
     searchZotero,
@@ -3309,6 +3405,7 @@ export class HardenedAiSdkProviderTransport {
       contextLength,
       contextLengthSource,
       skills,
+      modeInstructions,
       readProjectFile,
       projectContext,
       searchZotero,
@@ -3346,6 +3443,10 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       credential == null
         ? undefined
         : parseAiReviewerProviderCredential(credential);
+    assertOpenAiCompatibleCredentialTransport(
+      endpoint.baseUrl,
+      parsedCredential !== undefined,
+    );
     const parsedModelTag = parseOpenAiCompatibleModelId(modelTag);
     if (typeof fetchImpl !== "function") {
       throw new TypeError("fetchImpl must be a function.");
@@ -3392,6 +3493,8 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       provider: "openai-compatible",
       modelTag: parsedModelTag,
       gatewayProviderOptions: OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS,
+      // Ollama's num_ctx controls VRAM allocation, so choosing it here would
+      // silently make a hardware decision that belongs to the user.
       providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
       invalidModelMessage:
         "The OpenAI-compatible provider must return a concrete Chat Completions model.",
@@ -3432,6 +3535,7 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
       model: modelTag,
     });
     const parsedCredential = parseAiReviewerProviderCredential(credential);
+    assertOpenAiCompatibleCredentialTransport(destination.baseUrl, true);
     if (typeof fetchImpl !== "function") {
       throw new TypeError("fetchImpl must be a function.");
     }

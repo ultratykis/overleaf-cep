@@ -135,11 +135,23 @@ export function createAiReviewerWorkspaceController({ workspaceStore }) {
   async function deleteDiscussion(request, response) {
     try {
       const { userId, projectId } = requestScope(request);
+      const body = request.body;
+      const revision = WorkspaceRevisionSchema.safeParse(body?.revision);
+      if (
+        typeof body !== "object" ||
+        body == null ||
+        Array.isArray(body) ||
+        Object.keys(body).join(",") !== "revision" ||
+        !revision.success
+      ) {
+        throw new AiReviewerWorkspaceValidationError();
+      }
       const discussionId = identifier(request.params.discussion_id);
       const snapshot = await workspaceStore.deleteDiscussion(
         userId,
         projectId,
         discussionId,
+        revision.data,
       );
       return response.json(snapshot);
     } catch (error) {

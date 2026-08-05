@@ -232,6 +232,7 @@ describe("AI reviewer skill routes", function () {
       },
       manifestFound: true,
       plugins: [],
+      skippedPlugins: [],
       skills: [
         {
           path: provenance.path,

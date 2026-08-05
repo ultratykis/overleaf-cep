@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertAllowedResolvedIpAddress,
+  assertOpenAiCompatibleCredentialTransport,
   OPENAI_COMPATIBLE_FETCH_REDIRECT,
   OpenAiCompatibleEndpointPolicyError,
+  OpenAiCompatiblePlaintextCredentialError,
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "../../../app/src/OllamaEndpointPolicy.mjs";
@@ -170,6 +172,21 @@ describe("AI reviewer: OpenAI-compatible endpoint policy", function () {
       });
     },
   );
+
+  it("uses the URL scheme rather than local host classification for credential transport", function () {
+    const plaintextLocal = "http://host.docker.internal:11434/v1";
+    const encryptedLocal = "https://localhost:8443/v1";
+
+    expect(() =>
+      assertOpenAiCompatibleCredentialTransport(plaintextLocal, true),
+    ).toThrowError(OpenAiCompatiblePlaintextCredentialError);
+    expect(() =>
+      assertOpenAiCompatibleCredentialTransport(encryptedLocal, true),
+    ).not.toThrow();
+    expect(parseOpenAiCompatibleBaseUrl(encryptedLocal).classification).toBe(
+      "local",
+    );
+  });
 
   it("identifies the fixture cases superseded by HTTPS and canonical paths", function () {
     expect(

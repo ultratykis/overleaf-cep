@@ -338,7 +338,10 @@ describe("AI reviewer: single document selection workspace", function () {
       proposedText: "Add the missing synthetic bibliography entry.",
       suggestionIds: [],
     };
-    const emittedSuggestion = suggestion(session.request);
+    const emittedSuggestion = {
+      ...suggestion(session.request),
+      rationale: "Use a **more precise** synthetic term.",
+    };
     const stream = deferred();
     const streamRequest = sinon.stub().callsFake((call) => {
       call.onEvent(startedEvent(session.request));
@@ -417,8 +420,12 @@ describe("AI reviewer: single document selection workspace", function () {
       name: "Review suggestions",
     });
     const suggestionCard = within(suggestionsSection)
-      .getByText("Rationale: Use a more precise synthetic term.")
+      .getByRole("heading", { name: "Suggestion 1" })
       .closest(".ai-reviewer-artifact");
+    expect(suggestionCard.querySelector("strong")?.textContent).to.equal(
+      "more precise",
+    );
+    expect(suggestionCard.textContent).not.to.contain("**");
     expect(
       within(suggestionsSection)
         .getAllByRole("button")

@@ -56,6 +56,20 @@ function getSkillCleanupStore() {
   return skillCleanupStorePromise;
 }
 
+const modeInstructionStorePath = "./AiReviewerModeInstructionStore.mjs";
+/** @type {Promise<ReturnType<import("./AiReviewerModeInstructionStore.mjs").createAiReviewerModeInstructionStore>> | null} */
+let modeInstructionCleanupStorePromise = null;
+
+function getModeInstructionCleanupStore() {
+  if (modeInstructionCleanupStorePromise == null) {
+    modeInstructionCleanupStorePromise = import(modeInstructionStorePath).then(
+      ({ createAiReviewerModeInstructionStore }) =>
+        createAiReviewerModeInstructionStore(),
+    );
+  }
+  return modeInstructionCleanupStorePromise;
+}
+
 /**
  * Remove everything this module stores for one user. Provider configuration
  * carries the encrypted credential, so it is deleted alongside the workspace
@@ -68,8 +82,14 @@ async function deleteUserData(userId) {
     getWorkspaceCleanupStore().then((store) => store.deleteUser(userId)),
     getProviderConfigCleanupStore().then((store) => store.deleteUser(userId)),
     getSkillCleanupStore().then((store) => store.deleteUser(userId)),
+    getModeInstructionCleanupStore().then((store) => store.deleteUser(userId)),
   ]);
-  const dataKinds = ["workspace", "provider configuration", "skills"];
+  const dataKinds = [
+    "workspace",
+    "provider configuration",
+    "skills",
+    "mode instructions",
+  ];
   for (const [index, outcome] of outcomes.entries()) {
     if (outcome.status === "rejected") {
       // A module cleanup failure must not prevent the host from deleting the
@@ -86,13 +106,16 @@ const AiReviewerCleanupHooks = {
   promises: {
     /** @param {string} projectId */
     async projectExpired(projectId) {
-      const [workspaceStore, provenanceStore] = await Promise.all([
-        getWorkspaceCleanupStore(),
-        getProvenanceCleanupStore(),
-      ]);
+      const [workspaceStore, provenanceStore, modeInstructionStore] =
+        await Promise.all([
+          getWorkspaceCleanupStore(),
+          getProvenanceCleanupStore(),
+          getModeInstructionCleanupStore(),
+        ]);
       await Promise.all([
         workspaceStore.deleteProject(projectId),
         provenanceStore.deleteProject(projectId),
+        modeInstructionStore.deleteProject(projectId),
       ]);
     },
 

@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES,
   AiReviewerSkillGitImportError,
   createAiReviewerSkillGitImporter,
   parseAiReviewerSkillGitSource,
@@ -194,7 +195,7 @@ function tarHeader(path, size, { mode = 0o644, type = "0" } = {}) {
   return header;
 }
 
-function repositoryArchive(files) {
+function repositoryArchive(files, compressionLevel = 0) {
   const root = `repository-${resolvedSha}`;
   const chunks = [tarHeader(`${root}/`, 0, { mode: 0o755, type: "5" })];
   for (const [path, content] of Object.entries(files).sort(([left], [right]) =>
@@ -208,7 +209,7 @@ function repositoryArchive(files) {
     if (padding > 0) chunks.push(Buffer.alloc(padding));
   }
   chunks.push(Buffer.alloc(1024));
-  return gzipSync(Buffer.concat(chunks), { level: 0 });
+  return gzipSync(Buffer.concat(chunks), { level: compressionLevel });
 }
 
 function jsonResponse(value, init = {}) {
@@ -501,6 +502,254 @@ describe("AI reviewer git skill importer", function () {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  it("discovers local plugin roots and reports external or unreadable marketplace entries", async function () {
+    const realMarketplaceShapes = {
+      plugins: [
+        {
+          name: "local-string-source",
+          source: "./local-string",
+        },
+        {
+          name: "local-object-source",
+          source: { source: "git-subdir", path: "./local-object" },
+        },
+        {
+          name: "external-url-source",
+          source: {
+            source: "url",
+            url: "https://git.example.com/vendor/external.git",
+            path: "skills/reviewer",
+            sha: resolvedSha,
+          },
+        },
+        {
+          name: "external-github-source",
+          source: {
+            source: "github",
+            repo: "vendor/reviewer-skills",
+            commit: resolvedSha,
+          },
+        },
+        {
+          name: "ambiguous-external-source",
+          source: {
+            source: "future-index-format",
+            url: "https://git.example.com/vendor/future.git",
+            path: "skills/future",
+          },
+        },
+        {
+          name: "missing-explicit-skill",
+          source: "./missing",
+          skills: ["./reviewer"],
+        },
+        {
+          name: "unsafe-local-source",
+          source: { source: "git-subdir", path: "../outside" },
+        },
+      ],
+    };
+    const files = {
+      ".claude-plugin/marketplace.json": JSON.stringify(realMarketplaceShapes),
+      "local-string/nested/SKILL.md": skillMarkdown("local-string-review"),
+      "local-object/SKILL.md": skillMarkdown("local-object-review"),
+      "unlisted/SKILL.md": skillMarkdown("must-not-cross-plugin-root"),
+    };
+    const requests = [];
+    const fetchImpl = githubFetch(repositoryFixture(files), requests);
+    const { importer } = fixture(fetchImpl);
+
+    const preview = await importer.preview({ repository: "owner/repository" });
+
+    expect(preview.skills.map(({ name, path }) => ({ name, path }))).toEqual([
+      {
+        name: "local-string-review",
+        path: "local-string/nested/SKILL.md",
+      },
+      { name: "local-object-review", path: "local-object/SKILL.md" },
+    ]);
+    expect(preview.skippedPlugins).toEqual([
+      {
+        name: "external-url-source",
+        reason: "external-source",
+        sourceUrl: "https://git.example.com/vendor/external.git",
+        sourcePath: "skills/reviewer",
+      },
+      {
+        name: "external-github-source",
+        reason: "external-source",
+        sourceUrl: "https://github.com/vendor/reviewer-skills",
+      },
+      {
+        name: "ambiguous-external-source",
+        reason: "external-source",
+        sourceUrl: "https://git.example.com/vendor/future.git",
+        sourcePath: "skills/future",
+      },
+      {
+        name: "missing-explicit-skill",
+        reason: "skill-not-readable",
+        skillPath: "missing/reviewer/SKILL.md",
+      },
+      { name: "unsafe-local-source", reason: "invalid-plugin" },
+    ]);
+    expect(requests).toHaveLength(3);
+    expect(
+      requests.some(({ url }) =>
+        url.includes("git.example.com/vendor/external"),
+      ),
+    ).toBe(false);
+    expect(
+      requests.some(({ url }) => url.includes("vendor/reviewer-skills")),
+    ).toBe(false);
+    expect(requests.some(({ url }) => url.includes("vendor/future"))).toBe(
+      false,
+    );
+  });
+
+  it("does not let an implicit repository-root plugin claim a nested plugin Skill", async function () {
+    const files = {
+      ".claude-plugin/marketplace.json": JSON.stringify({
+        plugins: [
+          {
+            name: "repository-root",
+            source: "./",
+            version: "1.0.0",
+            license: "ROOT-LICENSE",
+          },
+          {
+            name: "nested-owner",
+            source: "./nested-plugin",
+            version: "2.0.0",
+            license: "NESTED-LICENSE",
+          },
+        ],
+      }),
+      "nested-plugin/SKILL.md": skillMarkdown("nested-reviewer"),
+    };
+    const fetchImpl = githubFetch(repositoryFixture(files));
+    const { importer } = fixture(fetchImpl);
+    const source = { repository: "owner/repository" };
+
+    const preview = await importer.preview(source);
+
+    expect(preview.skills).toEqual([
+      expect.objectContaining({
+        path: "nested-plugin/SKILL.md",
+        name: "nested-reviewer",
+        pluginName: "nested-owner",
+      }),
+    ]);
+    expect(preview.skippedPlugins).toContainEqual({
+      name: "repository-root",
+      reason: "no-readable-skills",
+    });
+    expect(preview.skippedPlugins).not.toContainEqual(
+      expect.objectContaining({
+        name: "nested-owner",
+        reason: "duplicate-skill",
+      }),
+    );
+
+    const confirmed = await importer.confirm({
+      ...source,
+      resolvedSha,
+      contentHash: preview.contentHash,
+      selectedPaths: ["nested-plugin/SKILL.md"],
+    });
+    expect(confirmed.skills[0].provenance).toMatchObject({
+      pluginName: "nested-owner",
+      pluginVersion: "2.0.0",
+      license: "NESTED-LICENSE",
+    });
+  });
+
+  it("previews more than twenty discovered skills and confirms only a bounded selection", async function () {
+    const files = Object.fromEntries(
+      Array.from({ length: 25 }, (_, index) => {
+        const name = `review-${String(index + 1).padStart(2, "0")}`;
+        return [`${name}/SKILL.md`, skillMarkdown(name)];
+      }),
+    );
+    const requests = [];
+    const fetchImpl = githubFetch(repositoryFixture(files), requests);
+    const { importer } = fixture(fetchImpl);
+
+    const preview = await importer.preview({ repository: "owner/repository" });
+    expect(preview.skills).toHaveLength(25);
+    expect(preview.truncated).toBe(false);
+
+    const confirmed = await importer.confirm({
+      repository: "owner/repository",
+      resolvedSha,
+      contentHash: preview.contentHash,
+      selectedPaths: [
+        "review-03/SKILL.md",
+        "review-21/SKILL.md",
+        "review-25/SKILL.md",
+      ],
+    });
+
+    expect(confirmed.skills.map(({ skillMarkdown }) => skillMarkdown)).toEqual([
+      files["review-03/SKILL.md"],
+      files["review-21/SKILL.md"],
+      files["review-25/SKILL.md"],
+    ]);
+    expect(requests).toHaveLength(5);
+  });
+
+  it("limits preview retention to 32 MiB without restoring a candidate-count limit", async function () {
+    const candidateCount = 40;
+    const files = Object.fromEntries(
+      Array.from({ length: candidateCount }, (_, index) => {
+        const name = `review-${String(index + 1).padStart(2, "0")}`;
+        return [
+          `${name}/SKILL.md`,
+          skillMarkdown(
+            name,
+            `Instructions for ${name}.`,
+            "a".repeat(900 * 1024),
+          ),
+        ];
+      }),
+    );
+    const repository = repositoryFixture(files);
+    repository.archive = repositoryArchive(files, 9);
+    const requests = [];
+    const { importer } = fixture(githubFetch(repository, requests));
+
+    const preview = await importer.preview({ repository: "owner/repository" });
+
+    expect(AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES).toBe(
+      32 * 1024 * 1024,
+    );
+    expect(preview.truncated).toBe(true);
+    expect(preview.skills.length).toBeGreaterThan(20);
+    expect(preview.skills.length).toBeLessThan(candidateCount);
+    const retainedSkillBytes = preview.skills.reduce(
+      (total, { path }) => total + Buffer.byteLength(files[path], "utf8"),
+      0,
+    );
+    expect(retainedSkillBytes).toBeLessThanOrEqual(
+      AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES,
+    );
+    const firstOmittedPath = `review-${String(preview.skills.length + 1).padStart(2, "0")}/SKILL.md`;
+    expect(
+      retainedSkillBytes + Buffer.byteLength(files[firstOmittedPath], "utf8"),
+    ).toBeGreaterThan(AI_REVIEWER_SKILL_GIT_PREVIEW_MAX_RETAINED_BYTES);
+
+    const selectedPath = preview.skills.at(-1).path;
+    const confirmed = await importer.confirm({
+      repository: "owner/repository",
+      resolvedSha,
+      contentHash: preview.contentHash,
+      selectedPaths: [selectedPath],
+    });
+    expect(confirmed.skills).toHaveLength(1);
+    expect(confirmed.skills[0].provenance.path).toBe(selectedPath);
+    expect(requests).toHaveLength(5);
+  });
+
   it("imports 170 Markdown files from an 8.3 MiB repository in five requests", async function () {
     const files = measuredAcademicRepositoryFiles();
     const repository = repositoryFixtureNearArchiveSize(
@@ -695,25 +944,37 @@ describe("AI reviewer git skill importer", function () {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
-  it("refuses traversal mentioned in a skill before any content can be stored", async function () {
+  it("skips traversal mentioned by one skill without losing other skills", async function () {
     const files = {
       "review/SKILL.md": skillMarkdown(
         "review",
         "Review a paper.",
         "Do not read `../outside.md`.",
       ),
+      "other/SKILL.md": skillMarkdown("other"),
     };
     const fetchImpl = githubFetch(repositoryFixture(files));
     const { importer } = fixture(fetchImpl);
 
-    const error = await rejectedError(
-      importer.preview({ repository: "owner/repository", ref: "main" }),
-    );
-    expect(error).toMatchObject({
-      code: "AI_REVIEWER_SKILL_GIT_SOURCE_INVALID",
-      message: "SKILL.md mentions an unsafe reference path.",
+    const preview = await importer.preview({
+      repository: "owner/repository",
+      ref: "main",
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    expect(preview.skills.map(({ name }) => name)).toEqual(["other", "review"]);
+    expect(
+      preview.skills.find(({ name }) => name === "review")?.skippedReferences,
+    ).toEqual([{ path: "../outside.md", reason: "outside-skill-directory" }]);
+
+    const confirmed = await importer.confirm({
+      repository: "owner/repository",
+      ref: "main",
+      resolvedSha,
+      contentHash: preview.contentHash,
+      selectedPaths: ["other/SKILL.md", "review/SKILL.md"],
+    });
+    expect(confirmed.skills).toHaveLength(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
   });
 
   it("keeps GitLab resolve, tree, and archive differences inside the adapter", async function () {

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { APICallError, RetryError } from "ai";
+import { APICallError } from "ai";
 import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
@@ -412,6 +412,50 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(fixture.fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("blocks an HTTP Chat Completions credential before provider construction", function () {
+    const createProvider = vi.fn();
+    const fetchImpl = vi.fn();
+
+    expect(
+      () =>
+        new OllamaOpenAiTransport({
+          baseUrl,
+          credential: "PRIVATE_CHAT_COMPLETIONS_CREDENTIAL",
+          modelTag,
+          createProvider,
+          fetchImpl,
+        }),
+    ).toThrow("The API key was not sent because the endpoint uses HTTP");
+    expect(createProvider).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("passes an HTTPS localhost credential only to the provider SDK", function () {
+    const encryptedLocalBaseUrl = "https://localhost:8443/v1";
+    const credential = "PRIVATE_HTTPS_LOCALHOST_CREDENTIAL";
+    const model = concreteModel();
+    const createProvider = vi.fn(() => ({
+      chatModel: vi.fn(() => model),
+    }));
+    const fetchImpl = vi.fn();
+
+    new OllamaOpenAiTransport({
+      baseUrl: encryptedLocalBaseUrl,
+      credential,
+      modelTag,
+      createProvider,
+      fetchImpl,
+    });
+
+    expect(createProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: credential,
+        baseURL: encryptedLocalBaseUrl,
+      }),
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("constructs the real function provider without making a request", function () {
     const fetchImpl = vi.fn();
     const transport = new OllamaOpenAiTransport({
@@ -475,6 +519,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
           action: "review",
           instruction: "Review the synthetic project.",
           skill: null,
+          scope: { kind: "project" },
         }),
       ),
     );
@@ -2723,65 +2768,49 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     await flushProviderPromiseObservation();
   });
 
-  it("observes an ordinary rejected Promise consumed as RetryError.lastError", async function () {
-    const fixture = transportFixture();
-    const rejected = Promise.reject(
-      new Error("AI_REVIEWER_RETRY_LAST_ERROR_PRIVATE"),
-    );
-    const providerError = new RetryError({
-      message: "AI_REVIEWER_RETRY_PRIVATE",
-      reason: "maxRetriesExceeded",
-      errors: [rejected],
-    });
-    fixture.model.doGenerate.mockRejectedValue(providerError);
+  it("does not inspect RetryError.lastError while SDK retries are disabled", function () {
+    let lastErrorReads = 0;
+    const retryMarker = Symbol.for("vercel.ai.error.AI_RetryError");
+    const providerError = {
+      [retryMarker]: true,
+      get lastError() {
+        lastErrorReads += 1;
+        throw new Error("AI_REVIEWER_RETRY_LAST_ERROR_PRIVATE");
+      },
+    };
 
-    const error = await captureError(
-      fixture.transport.generateChat({
-        prompt: "Return exactly COMPAT_OK and nothing else.",
-        maxOutputTokens: 32,
-      }),
-    );
+    const classified = classifySdkError(providerError);
 
-    expect(error).toMatchObject({
+    expect(classified).toMatchObject({
       code: "AI_PROVIDER_FAILED",
       category: "provider",
       retryable: true,
     });
-    expect(error.message).not.toContain("AI_REVIEWER_");
-    await flushProviderPromiseObservation();
+    expect(lastErrorReads).toBe(0);
   });
 
-  it.each([
-    {
-      name: "cycle",
-      error() {
-        const marker = Symbol.for("vercel.ai.error.AI_RetryError");
-        const first = { [marker]: true };
-        const second = { [marker]: true, lastError: first };
-        first.lastError = second;
-        return first;
-      },
-    },
-    {
-      name: "depth",
-      error() {
-        const marker = Symbol.for("vercel.ai.error.AI_RetryError");
-        let error = {};
+  it.each(["cycle", "depth"])(
+    "treats an injected RetryError $0 marker as an unknown provider failure",
+    function (shape) {
+      const retryMarker = Symbol.for("vercel.ai.error.AI_RetryError");
+      let providerError;
+      if (shape === "cycle") {
+        providerError = { [retryMarker]: true };
+        providerError.lastError = providerError;
+      } else {
+        providerError = {};
         for (let depth = 0; depth < 9; depth += 1) {
-          error = { [marker]: true, lastError: error };
+          providerError = { [retryMarker]: true, lastError: providerError };
         }
-        return error;
-      },
-    },
-  ])("bounds a provider-controlled RetryError $name", function ({ error }) {
-    const classified = classifySdkError(error());
+      }
 
-    expect(classified).toMatchObject({
-      code: "AI_PROVIDER_RETRY_EXHAUSTED",
-      category: "network",
-      retryable: true,
-    });
-  });
+      expect(classifySdkError(providerError)).toMatchObject({
+        code: "AI_PROVIDER_FAILED",
+        category: "provider",
+        retryable: true,
+      });
+    },
+  );
 
   it("observes an ordinary rejected Promise consumed as an SDK marker", async function () {
     const fixture = transportFixture();

@@ -68,6 +68,8 @@ describe("AI reviewer: module shell", function () {
       provenanceDeleteProject: vi.fn(),
       providerConfigDeleteUser: vi.fn(),
       skillDeleteUser: vi.fn(),
+      modeInstructionsDeleteProject: vi.fn(),
+      modeInstructionsDeleteUser: vi.fn(),
     };
     const createAiReviewerWorkspaceStore = vi.fn(() => ({
       deleteProject: stores.workspaceDeleteProject,
@@ -94,6 +96,12 @@ describe("AI reviewer: module shell", function () {
         deleteUser: stores.skillDeleteUser,
       })),
     }));
+    vi.doMock("../../../app/src/AiReviewerModeInstructionStore.mjs", () => ({
+      createAiReviewerModeInstructionStore: vi.fn(() => ({
+        deleteProject: stores.modeInstructionsDeleteProject,
+        deleteUser: stores.modeInstructionsDeleteUser,
+      })),
+    }));
     return { ...stores, createAiReviewerWorkspaceStore };
   }
 
@@ -116,6 +124,12 @@ describe("AI reviewer: module shell", function () {
     expect(stores.workspaceDeleteUser).toHaveBeenCalledExactlyOnceWith(
       "user-0001",
     );
+    expect(
+      stores.modeInstructionsDeleteProject,
+    ).toHaveBeenCalledExactlyOnceWith("project-0001");
+    expect(stores.modeInstructionsDeleteUser).toHaveBeenCalledExactlyOnceWith(
+      "user-0001",
+    );
   });
 
   it("deletes user data including the credential-bearing configuration", async function () {
@@ -128,6 +142,9 @@ describe("AI reviewer: module shell", function () {
       "user-0001",
     );
     expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0001");
+    expect(stores.modeInstructionsDeleteUser).toHaveBeenCalledExactlyOnceWith(
+      "user-0001",
+    );
   });
 
   it("expires a deleted user through the same removal path", async function () {
@@ -143,6 +160,9 @@ describe("AI reviewer: module shell", function () {
       "user-0002",
     );
     expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0002");
+    expect(stores.modeInstructionsDeleteUser).toHaveBeenCalledExactlyOnceWith(
+      "user-0002",
+    );
   });
 
   it("still deletes project and user data while the feature is disabled", async function () {
@@ -165,5 +185,11 @@ describe("AI reviewer: module shell", function () {
       "user-0003",
     );
     expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0003");
+    expect(
+      stores.modeInstructionsDeleteProject,
+    ).toHaveBeenCalledExactlyOnceWith("project-0002");
+    expect(stores.modeInstructionsDeleteUser).toHaveBeenCalledExactlyOnceWith(
+      "user-0003",
+    );
   });
 });

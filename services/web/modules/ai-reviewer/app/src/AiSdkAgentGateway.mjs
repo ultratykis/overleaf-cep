@@ -14,6 +14,7 @@ import { z } from "zod";
 import {
   AgentEventSchema,
   AgentRequestSchema,
+  AiReviewerModeInstructionsSchema,
   CitationFindingSchema,
   EvidenceReferenceSchema,
   JsonValueSchema,
@@ -41,7 +42,7 @@ import {
   recordAiReviewerCompletion,
   recordAiReviewerProviderDiagnostic,
 } from "./AiReviewerFailureLogger.mjs";
-import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
+import { formatAgentMessages, formatAgentPrompt } from "./AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
 /**
@@ -230,13 +231,17 @@ export const SYSTEM_INSTRUCTION = [
   "Use only the declared tools.",
   "Use read_project_file before making claims about project file content.",
   "Use search_zotero only to investigate a citation issue.",
-  "When report_finding is available, call it once per issue worth tracking.",
+  "Call propose_suggestion only for a concrete edit that is fully supported by the active scope.",
+].join(" ");
+
+const FINDING_INSTRUCTION = [
+  "When report_finding is available, put every issue worth tracking in that tool instead of only describing it in prose.",
+  "If there is at least one issue worth tracking, call report_finding once for each issue; if there are none, do not call it.",
   "For each finding, copy the exact cited project-file passage into evidence.excerpt and include its project-relative path; the server locates the passage.",
   "If you already know exact character offsets, evidence.range is also accepted, but do not calculate offsets instead of quoting the passage.",
   "Preserve deterministic project citationAudit issues and their evidence.",
   'For those issues, use artifactKind "citation-finding" and preserve the text-only proposal as proposedText.',
   'For every other finding, use artifactKind "finding" and omit proposedText.',
-  "Call propose_suggestion only for a concrete edit that is fully supported by the active scope.",
   "Do not restate a reported finding or suggestion in prose; describe only what the user still needs to know.",
 ].join(" ");
 
@@ -263,6 +268,11 @@ const SKILL_DATA_WARNING = [
 ].join(" ");
 const CONTROL_OR_LINE_SEPARATOR = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
 const USER_SKILL_MODES = new Set(["referee-review", "brainstorm"]);
+const REFEREE_FINDING_INSTRUCTION = [
+  "For each actionable point, call report_finding, quote the passage, say plainly",
+  "what is wrong with it, and propose a concrete change. If there are no actionable",
+  "points, do not call report_finding. A point the author cannot act on is not a finding.",
+].join("\n");
 
 // Mode prompts stay as data so a different prompt source can replace the
 // built-ins without changing the provider call or its safety boundaries.
@@ -282,8 +292,7 @@ const BUILT_IN_MODE_INSTRUCTIONS = Object.freeze({
     "  - Overclaiming in the abstract or conclusion relative to what was shown",
     "  - Limitations the authors have not named",
     "",
-    "For each point: quote the passage, say plainly what is wrong with it, and",
-    "propose a concrete change. A point the author cannot act on is not a finding.",
+    REFEREE_FINDING_INSTRUCTION,
     "",
     "Do not rewrite the manuscript. Do not raise typography or house style unless",
     "asked. Say when something is genuinely good — it tells the author what to keep.",
@@ -304,6 +313,40 @@ const BUILT_IN_MODE_INSTRUCTIONS = Object.freeze({
     "is review mode's job. Keep it a conversation.",
   ].join("\n"),
 });
+
+/** @param {unknown} input */
+function boundedModeInstructions(input) {
+  const parsed = AiReviewerModeInstructionsSchema.safeParse(input ?? {});
+  if (!parsed.success) {
+    throw new TypeError(
+      "modeInstructions must be bounded review perspectives.",
+    );
+  }
+  return Object.freeze(parsed.data);
+}
+
+/**
+ * The user supplies only the review perspective. The command that binds
+ * referee output to the finding tool remains server-owned and is appended in
+ * the same removable suffix position as the built-in perspective.
+ *
+ * @param {AgentRequest["skill"]} mode
+ * @param {ReturnType<typeof boundedModeInstructions>} modeInstructions
+ */
+function modeInstructionForRequest(mode, modeInstructions) {
+  if (mode == null || !Object.hasOwn(BUILT_IN_MODE_INSTRUCTIONS, mode)) {
+    return null;
+  }
+  const customInstruction = modeInstructions[mode];
+  if (customInstruction == null) {
+    return BUILT_IN_MODE_INSTRUCTIONS[
+      /** @type {keyof typeof BUILT_IN_MODE_INSTRUCTIONS} */ (mode)
+    ];
+  }
+  return mode === "referee-review"
+    ? `${customInstruction}\n\n${REFEREE_FINDING_INSTRUCTION}`
+    : customInstruction;
+}
 
 /**
  * Rebuild the metadata boundary here even though the current store already
@@ -441,21 +484,25 @@ function skillErrorResult(error, name, referencePath) {
 /**
  * @param {AgentRequest} request
  * @param {ReturnType<typeof boundedStoredSkills>} skills
+ * @param {ReturnType<typeof boundedModeInstructions>} modeInstructions
  */
-function systemInstructionForRequest(request, skills) {
+function systemInstructionForRequest(request, skills, modeInstructions) {
   const skill = request.skill;
-  const modeInstruction =
-    skill != null && Object.hasOwn(BUILT_IN_MODE_INSTRUCTIONS, skill)
-      ? (BUILT_IN_MODE_INSTRUCTIONS[
-          /** @type {keyof typeof BUILT_IN_MODE_INSTRUCTIONS} */ (skill)
-        ] ?? null)
-      : null;
+  const findingsAllowed = findingsAllowedForRequest(request);
+  const modeInstruction = modeInstructionForRequest(skill, modeInstructions);
+  // Discussions do not own findings. Keep the referee guidance, but remove the
+  // command for a tool that the same ownership boundary deliberately withholds.
+  const effectiveModeInstruction =
+    !findingsAllowed && skill === "referee-review"
+      ? modeInstruction?.replace(`\n\n${REFEREE_FINDING_INSTRUCTION}`, "")
+      : modeInstruction;
   return [
     SYSTEM_INSTRUCTION,
     isSelectionTransformRequest(request)
       ? SELECTION_TRANSFORM_INSTRUCTION
       : REVIEW_RESULT_INSTRUCTION,
-    modeInstruction,
+    findingsAllowed ? FINDING_INSTRUCTION : null,
+    effectiveModeInstruction,
     storedSkillInstruction(skill, skills),
     SHARED_LANGUAGE_INSTRUCTION,
   ]
@@ -468,6 +515,18 @@ function isSelectionTransformRequest(request) {
   return (
     request.scope?.kind === "selection" &&
     (request.action === "rewrite" || request.action === "shorten")
+  );
+}
+
+/** @param {AgentRequest} request */
+function findingsAllowedForRequest(request) {
+  // Typed discussion requests deliberately omit scope, including discussions
+  // pinned to a prior artifact. Every review target, including project-wide
+  // review, has an explicit scope, so this is the existing ownership boundary.
+  return (
+    request.scope != null &&
+    request.skill !== "brainstorm" &&
+    !isSelectionTransformRequest(request)
   );
 }
 
@@ -515,7 +574,11 @@ const LOCAL_GATEWAY_ERRORS = new WeakSet();
 // the real bound on how much work one request can cause.
 const MAX_AGENT_STEPS = 8;
 const MAX_REPORTED_ARTIFACTS = 100;
-const MAX_SDK_ERROR_RECURSION = 8;
+// The SDK throws the provider's own error when this is zero and only wraps it
+// in a RetryError above zero, so the RetryError classification was removed as
+// unreachable. Raising this value silently re-enables billed retries and brings
+// back an error shape nothing classifies; restore that path before changing it.
+export const AI_REVIEWER_MAX_RETRIES = 0;
 const MAX_SDK_STREAM_BLOCKS = 100;
 const MAX_SDK_STREAM_CHARACTERS = 100_000;
 const MAX_SDK_STREAM_ID_CHARACTERS = 256;
@@ -544,10 +607,6 @@ const SDK_ERROR_MARKERS = Object.freeze({
       type: "AI_NoSuchModelError",
     }),
   ]),
-  retry: Object.freeze({
-    marker: Symbol.for("vercel.ai.error.AI_RetryError"),
-    type: "AI_RetryError",
-  }),
   schema: Object.freeze([
     Object.freeze({
       marker: Symbol.for("vercel.ai.error.AI_InvalidResponseDataError"),
@@ -1714,22 +1773,11 @@ function providerFailedError(diagnostics = {}) {
   });
 }
 
-function retryExhaustedError() {
-  return gatewayError("The AI provider request failed.", {
-    code: "AI_PROVIDER_RETRY_EXHAUSTED",
-    category: "network",
-    retryable: true,
-    providerErrorType: SDK_ERROR_MARKERS.retry.type,
-  });
-}
-
 /**
  * @param {unknown} error
  * @param {AbortSignal | undefined} signal
- * @param {Set<object | Function>} seenRetryErrors
- * @param {number} depth
  */
-function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
+function classifySdkErrorInternal(error, signal) {
   observeSdkValue(error);
   if (signal?.aborted) {
     return abortErrorForSignal(signal);
@@ -1846,42 +1894,6 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
     }
   }
 
-  const isRetryError = hasSdkErrorMarker(
-    error,
-    SDK_ERROR_MARKERS.retry.marker,
-    signal,
-  );
-  if (signal?.aborted) {
-    return abortErrorForSignal(signal);
-  }
-  if (isRetryError) {
-    if (
-      !isObjectLike(error) ||
-      depth >= MAX_SDK_ERROR_RECURSION ||
-      seenRetryErrors.has(error)
-    ) {
-      return retryExhaustedError();
-    }
-    seenRetryErrors.add(error);
-    const lastErrorResult = readSdkProperty(error, "lastError");
-    if (signal?.aborted) {
-      return abortErrorForSignal(signal);
-    }
-    if (
-      !lastErrorResult.ok ||
-      lastErrorResult.value == null ||
-      lastErrorResult.value === error
-    ) {
-      return retryExhaustedError();
-    }
-    return classifySdkErrorInternal(
-      lastErrorResult.value,
-      signal,
-      seenRetryErrors,
-      depth + 1,
-    );
-  }
-
   return providerFailedError();
 }
 
@@ -1890,7 +1902,7 @@ function classifySdkErrorInternal(error, signal, seenRetryErrors, depth) {
  * @param {AbortSignal | undefined} signal
  */
 export function classifySdkError(error, signal) {
-  return classifySdkErrorInternal(error, signal, new Set(), 0);
+  return classifySdkErrorInternal(error, signal);
 }
 
 const WHITESPACE_CHARACTER = /\s/u;
@@ -2199,6 +2211,7 @@ export class AiSdkAgentGateway {
    *   contextLength: unknown,
    *   contextLengthSource?: unknown,
    *   skills?: readonly unknown[],
+   *   modeInstructions?: unknown,
    *   readProjectFile: (
    *     input: z.infer<typeof ReadProjectFileArgumentsSchema>,
    *     context: { request: AgentRequest, signal?: AbortSignal },
@@ -2224,6 +2237,7 @@ export class AiSdkAgentGateway {
     contextLength,
     contextLengthSource,
     skills = [],
+    modeInstructions = {},
     readProjectFile,
     projectContext,
     searchZotero,
@@ -2272,6 +2286,7 @@ export class AiSdkAgentGateway {
     }
     const maxModelInputCharacters = modelInputCharacterBudget(contextLength);
     const boundedSkills = boundedStoredSkills(skills);
+    const boundedInstructions = boundedModeInstructions(modeInstructions);
     if (typeof readProjectFile !== "function") {
       throw new TypeError("readProjectFile must be a function.");
     }
@@ -2292,6 +2307,7 @@ export class AiSdkAgentGateway {
     this.contextLengthSource = contextLengthSource;
     this.maxModelInputCharacters = maxModelInputCharacters;
     this.skills = boundedSkills;
+    this.modeInstructions = boundedInstructions;
     this.readProjectFile = readProjectFile;
     this.projectContext = projectContext;
     this.searchZotero = searchZotero ?? null;
@@ -2349,10 +2365,21 @@ export class AiSdkAgentGateway {
     const storedSkills = USER_SKILL_MODES.has(request.skill ?? "")
       ? this.skills
       : [];
-    const systemInstructionAuthorContent = storedSkills.flatMap(
-      ({ name, description }) => [name, description],
+    const customModeInstruction =
+      request.skill == null ? undefined : this.modeInstructions[request.skill];
+    const systemInstructionAuthorContent = [
+      ...storedSkills.flatMap(({ name, description }) => [name, description]),
+      ...(customModeInstruction == null ? [] : [customModeInstruction]),
+    ];
+    const instructions = systemInstructionForRequest(
+      request,
+      storedSkills,
+      this.modeInstructions,
     );
-    const instructions = systemInstructionForRequest(request, storedSkills);
+    const messages = formatAgentMessages(
+      request,
+      projectWide ? this.projectContext : null,
+    );
     const prompt = formatAgentPrompt(
       request,
       projectWide ? this.projectContext : null,
@@ -2420,7 +2447,7 @@ export class AiSdkAgentGateway {
     // Brainstorming stays conversational even if a caller supplies a scope;
     // review artifacts would turn the visible premise into a hidden review.
     const artifactToolsAllowed = request.skill !== "brainstorm";
-    const findingsAllowed = artifactToolsAllowed && !selectionTransform;
+    const findingsAllowed = findingsAllowedForRequest(request);
     // An edit is only checkable against one known document state, and the
     // artifact contract files it under the skill the user chose, so a
     // suggestion needs both before the model may propose one.
@@ -2747,12 +2774,17 @@ export class AiSdkAgentGateway {
         hiddenProviderTools,
       );
       assertNoGlobalTelemetryIntegration();
+      // Invalid inputs already return through the SDK's tool-error continuation,
+      // where the model can correct them with the full tool schema. A repair
+      // callback would have to guess author data or make another billed request.
       result = streamText({
         model: /** @type {never} */ (requestModel),
         instructions,
-        prompt,
+        messages,
         abortSignal: signal,
-        maxRetries: 0,
+        // A transparent provider retry can repeat a billed request. Keep retries
+        // disabled and expose the original SDK error through the classifier.
+        maxRetries: AI_REVIEWER_MAX_RETRIES,
         providerOptions: /** @type {never} */ (this.providerOptions),
         stopWhen: [
           isStepCount(MAX_AGENT_STEPS),
@@ -3270,6 +3302,11 @@ export class AiSdkAgentGateway {
           retryable: false,
         });
       }
+      /** @type {Map<string, number>} */
+      const toolCallCounts = new Map();
+      for (const toolName of observedToolCalls.values()) {
+        toolCallCounts.set(toolName, (toolCallCounts.get(toolName) ?? 0) + 1);
+      }
       const completedEvent = parseEvent({
         type: "completed",
         eventId: this.createId("event"),
@@ -3277,6 +3314,9 @@ export class AiSdkAgentGateway {
         sequence,
         createdAt: this.now(),
         finishReason,
+        ...(findingsAllowed && !toolCallCounts.has("report_finding")
+          ? { findingToolNotCalled: true }
+          : {}),
         usage:
           Number.isInteger(usage.inputTokens) &&
           Number.isInteger(usage.outputTokens)
@@ -3286,11 +3326,6 @@ export class AiSdkAgentGateway {
               }
             : undefined,
       });
-      /** @type {Map<string, number>} */
-      const toolCallCounts = new Map();
-      for (const toolName of observedToolCalls.values()) {
-        toolCallCounts.set(toolName, (toolCallCounts.get(toolName) ?? 0) + 1);
-      }
       recordAiReviewerCompletion({
         requestId: request.requestId,
         provider: this.provider,

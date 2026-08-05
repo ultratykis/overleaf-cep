@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $1 == compose && $2 == images ]]; then
+  if [[ -n ${FAKE_DOCKER_IMAGE_ID:-} ]]; then
+    printf '%s\n' "$FAKE_DOCKER_IMAGE_ID"
+  fi
+  exit 0
+fi
+if [[ $1 == image && $2 == inspect ]]; then
+  printf '%s\n' "$FAKE_DOCKER_CREATED"
+  exit 0
+fi
+if [[ $1 == compose && $2 == build && ${FAKE_DOCKER_FAIL_BUILD:-} == 1 ]]; then
+  printf 'docker %s\n' "$*" >> "$FAKE_DOCKER_LOG"
+  exit 17
+fi
+
+printf 'docker %s\n' "$*" >> "$FAKE_DOCKER_LOG"

@@ -5,6 +5,7 @@ import {
   AiReviewerProviderConfig,
   newAiReviewerConnectionId,
 } from "../models/AiReviewerProviderConfig.mjs";
+import { isPlaintextAiProviderBaseUrl } from "../../shared/provider-request-url.mjs";
 import {
   parseAiReviewerConnection,
   parseAiReviewerConnectionRevision,
@@ -32,6 +33,15 @@ export class AiReviewerProviderConfigInputError extends TypeError {
   constructor(message) {
     super(message);
     this.name = "AiReviewerProviderConfigInputError";
+  }
+}
+
+export class AiReviewerPlaintextCredentialError extends AiReviewerProviderConfigInputError {
+  constructor() {
+    super(
+      "API keys cannot be saved for HTTP endpoints. Use HTTPS or recreate the connection without a key.",
+    );
+    this.name = "AiReviewerPlaintextCredentialError";
   }
 }
 
@@ -146,8 +156,16 @@ function coreConnectionInput(value) {
               ? { apiVersion: value.apiVersion }
               : {}),
             deployments: value?.deployments,
+            ...(value?.contextLengthOverrides == null
+              ? {}
+              : { contextLengthOverrides: value.contextLengthOverrides }),
           }
         : {}),
+    ...(value?.provider !== "azure" &&
+    value?.provider != null &&
+    value?.models != null
+      ? { models: value?.models }
+      : {}),
     ...(value?.label == null ? {} : { label: value.label }),
     ...(value?.contextLengthOverride == null
       ? {}
@@ -228,19 +246,27 @@ function connectionRecord(record, connectionId) {
  * @param {any} record
  */
 function publicConnections(record) {
-  return connectionRecords(record).map((connection) =>
-    Object.freeze({
-      id: String(connection._id),
-      revision: storedConnectionRevision(connection),
-      credentialSet:
-        typeof connection.credentialEncrypted === "string" &&
-        connection.credentialEncrypted.length > 0,
-      ...parseAiReviewerConnection(coreConnectionInput(connection)),
-      ...(connection.credentialUpdatedAt == null
-        ? {}
-        : { credentialUpdatedAt: connection.credentialUpdatedAt }),
-    }),
-  );
+  const connections = [];
+  for (const connection of connectionRecords(record)) {
+    try {
+      connections.push(
+        Object.freeze({
+          id: String(connection._id),
+          revision: storedConnectionRevision(connection),
+          credentialSet:
+            typeof connection.credentialEncrypted === "string" &&
+            connection.credentialEncrypted.length > 0,
+          ...parseAiReviewerConnection(coreConnectionInput(connection)),
+          ...(connection.credentialUpdatedAt == null
+            ? {}
+            : { credentialUpdatedAt: connection.credentialUpdatedAt }),
+        }),
+      );
+    } catch {
+      // One unreadable legacy entry must not hide independent connections.
+    }
+  }
+  return connections;
 }
 
 /**
@@ -331,6 +357,24 @@ function timestamp(value) {
 }
 
 /**
+ * HTTP versus HTTPS decides whether a credential would cross the network in
+ * plaintext. Host classification is intentionally irrelevant: localhost can
+ * have TLS, while an allowed local HTTP endpoint does not.
+ *
+ * @param {ReturnType<typeof parseAiReviewerConnectionUpdate>} config
+ * @param {boolean} credentialPresent
+ */
+function assertCredentialStorageAllowed(config, credentialPresent) {
+  if (
+    "baseUrl" in config &&
+    credentialPresent &&
+    isPlaintextAiProviderBaseUrl(config.baseUrl)
+  ) {
+    throw new AiReviewerPlaintextCredentialError();
+  }
+}
+
+/**
  * @param {{
  *   model?: typeof AiReviewerProviderConfig,
  *   credentialManager?: ReturnType<typeof createAiReviewerProviderCredentialManager>,
@@ -407,6 +451,13 @@ export function createAiReviewerProviderConfigStore({
       !credentialProvided &&
       hasStoredCredential &&
       isSameCredentialDestination(current, config);
+    // Do not silently delete a pre-existing plaintext-bound credential during
+    // an unrelated edit. Refuse the write until the destination is made HTTPS
+    // or the connection is explicitly recreated without the credential.
+    assertCredentialStorageAllowed(
+      config,
+      replacingCredential || keepingCredential,
+    );
     if (
       config.provider !== "openai-compatible" &&
       !replacingCredential &&
@@ -437,12 +488,18 @@ export function createAiReviewerProviderConfigStore({
               : {}),
           }
         : {}),
+      ...(config.provider === "azure" || config.models == null
+        ? {}
+        : { models: config.models }),
       // Only a name the user typed is stored, so an unnamed connection keeps
       // following the endpoint it is derived from when that endpoint changes.
       ...(config.label == null ? {} : { label: config.label }),
       ...(config.contextLengthOverride == null
         ? {}
         : { contextLengthOverride: config.contextLengthOverride }),
+      ...(config.contextLengthOverrides == null
+        ? {}
+        : { contextLengthOverrides: config.contextLengthOverrides }),
       ...(replacingCredential
         ? {
             credentialEncrypted: encryptedCredential,
@@ -526,6 +583,12 @@ export function createAiReviewerProviderConfigStore({
     expectedRevisionInput,
   ) {
     const config = parseAiReviewerConnectionUpdate(input);
+    // Reject a newly supplied plaintext-bound credential before encryption so
+    // a failed write has no credential-storage side effect.
+    assertCredentialStorageAllowed(
+      config,
+      typeof config.credential === "string",
+    );
     const expectedRevision =
       connectionId == null
         ? null
@@ -637,12 +700,32 @@ export function createAiReviewerProviderConfigStore({
      */
     async getAll(userId) {
       const record = await lean(model.findOne({ _id: userId }));
-      return await Promise.all(
-        connectionRecords(record).map(
+      const records = connectionRecords(record);
+      // Credentials have independent envelopes. Settling them independently
+      // preserves usable destinations while marking only the unreadable one.
+      const settled = await Promise.allSettled(
+        records.map(
           async (connection) =>
             await storedConnection(connection, credentialManager),
         ),
       );
+      return settled.flatMap((result, index) => {
+        if (result.status === "fulfilled") return [result.value];
+        try {
+          const connection = parseAiReviewerConnection(
+            coreConnectionInput(records[index]),
+          );
+          return [
+            Object.freeze({
+              id: String(records[index]._id),
+              ...connection,
+              credentialLoadFailed: true,
+            }),
+          ];
+        } catch {
+          return [];
+        }
+      });
     },
 
     /** @param {string} userId */

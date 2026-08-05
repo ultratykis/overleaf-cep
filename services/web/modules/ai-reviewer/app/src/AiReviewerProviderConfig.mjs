@@ -18,6 +18,16 @@ const ContextLengthSchema = z
   .int()
   .positive()
   .max(Number.MAX_SAFE_INTEGER);
+const ContextLengthOverridesSchema = z
+  .array(
+    z
+      .object({
+        model: z.string(),
+        contextLength: ContextLengthSchema,
+      })
+      .strict(),
+  )
+  .max(100);
 const ContextLengthSourceSchema = z.enum([
   "derived",
   "detected",
@@ -59,10 +69,21 @@ const DestinationSchema = z.discriminatedUnion("provider", [
     .object({
       provider: z.literal("openai-compatible"),
       baseUrl: z.string(),
+      models: z.array(z.string()).max(100).optional(),
     })
     .strict(),
-  z.object({ provider: z.literal("gemini") }).strict(),
-  z.object({ provider: z.literal("claude") }).strict(),
+  z
+    .object({
+      provider: z.literal("gemini"),
+      models: z.array(z.string()).max(100).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      provider: z.literal("claude"),
+      models: z.array(z.string()).max(100).optional(),
+    })
+    .strict(),
   z
     .object({
       provider: z.literal("azure"),
@@ -174,19 +195,38 @@ function parseDestination(
     ...(Object.hasOwn(value, "deployments")
       ? { deployments: value.deployments }
       : {}),
+    ...(Object.hasOwn(value, "models") ? { models: value.models } : {}),
   };
   const destination = DestinationSchema.parse(candidate);
+  const hasModels = Object.hasOwn(destination, "models");
+  const models =
+    destination.provider === "azure"
+      ? []
+      : (destination.models ?? []).map((model) =>
+          parseOpenAiCompatibleModelId(
+            destination.provider === "gemini"
+              ? model.replace(/^models\//u, "")
+              : model,
+          ),
+        );
+  if (new Set(models).size !== models.length) {
+    throw new TypeError("AI provider fallback models must be unique.");
+  }
   if (destination.provider === "openai-compatible") {
     return Object.freeze({
       provider: destination.provider,
       baseUrl: parseOpenAiCompatibleBaseUrl(destination.baseUrl).baseUrl,
+      ...(hasModels ? { models: Object.freeze(models) } : {}),
     });
   }
   return destination.provider === "azure"
     ? parseAzureOpenAiConnection(destination, {
         defaultRequestStyle: azureDefaultRequestStyle,
       })
-    : Object.freeze({ provider: destination.provider });
+    : Object.freeze({
+        provider: destination.provider,
+        ...(hasModels ? { models: Object.freeze(models) } : {}),
+      });
 }
 
 /**
@@ -276,8 +316,10 @@ const CONNECTION_KEYS = new Set([
   "requestStyle",
   "apiVersion",
   "deployments",
+  "models",
   "label",
   "contextLengthOverride",
+  "contextLengthOverrides",
   "credential",
   "credentialUpdatedAt",
 ]);
@@ -287,8 +329,10 @@ const CONNECTION_UPDATE_KEYS = new Set([
   "requestStyle",
   "apiVersion",
   "deployments",
+  "models",
   "label",
   "contextLengthOverride",
+  "contextLengthOverrides",
   "credential",
 ]);
 const CONNECTION_UPDATE_REQUEST_KEYS = new Set([
@@ -309,8 +353,42 @@ const RUN_CONFIG_KEYS = new Set([
 ]);
 
 /**
- * Parse a stored connection: a destination plus how to reach it. A model is
- * not part of a connection, so it is chosen per review instead.
+ * Azure deployment names are user-defined, so their context limits must be
+ * bound to the exact model name instead of one connection-wide value.
+ *
+ * @param {Record<string, unknown>} value
+ * @param {ReturnType<typeof parseDestination>} destination
+ */
+function parseContextLengthOverrides(value, destination) {
+  if (!Object.hasOwn(value, "contextLengthOverrides")) return undefined;
+  if (destination.provider !== "azure") {
+    throw new TypeError(
+      "Per-model context length overrides are supported only for Azure.",
+    );
+  }
+  const entries = ContextLengthOverridesSchema.parse(
+    value.contextLengthOverrides,
+  ).map((entry) =>
+    Object.freeze({
+      model: parseOpenAiCompatibleModelId(entry.model),
+      contextLength: entry.contextLength,
+    }),
+  );
+  const models = entries.map((entry) => entry.model);
+  if (
+    new Set(models).size !== models.length ||
+    models.some((model) => !destination.deployments.includes(model))
+  ) {
+    throw new TypeError(
+      "Azure context length overrides must name unique configured deployments.",
+    );
+  }
+  return Object.freeze(entries);
+}
+
+/**
+ * Parse a stored connection: a destination plus how to reach it. Fallback
+ * candidates belong here, while the selected model is chosen per review.
  *
  * @param {unknown} input
  */
@@ -323,6 +401,10 @@ export function parseAiReviewerConnection(input) {
   const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
     ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
     : undefined;
+  const contextLengthOverrides = parseContextLengthOverrides(
+    value,
+    destination,
+  );
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -338,6 +420,7 @@ export function parseAiReviewerConnection(input) {
     ...destination,
     label,
     ...(contextLengthOverride == null ? {} : { contextLengthOverride }),
+    ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
   });
@@ -366,6 +449,10 @@ export function parseAiReviewerConnectionUpdate(input) {
   const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
     ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
     : undefined;
+  const contextLengthOverrides = parseContextLengthOverrides(
+    value,
+    destination,
+  );
   const credential = Object.hasOwn(value, "credential")
     ? value.credential == null
       ? null
@@ -375,6 +462,7 @@ export function parseAiReviewerConnectionUpdate(input) {
     ...destination,
     label,
     ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
+    ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
     ...(credential === undefined ? {} : { credential }),
   });
 }
@@ -431,10 +519,8 @@ export function parseAiReviewerProviderConfig(input) {
     ? ContextLengthSourceSchema.parse(value.contextLengthSource)
     : undefined;
   if (
-    (contextLengthSource === "derived" &&
-      config.provider === "openai-compatible") ||
-    (contextLengthSource === "detected" &&
-      config.provider !== "openai-compatible")
+    contextLengthSource === "derived" &&
+    config.provider === "openai-compatible"
   ) {
     throw new TypeError(
       "The AI provider context length source is inconsistent.",
@@ -505,10 +591,17 @@ export function publicAiReviewerProviderConnection(input) {
                     ? {}
                     : { apiVersion: connection.apiVersion }),
                   deployments: connection.deployments,
+                  contextLengthOverrides:
+                    connection.contextLengthOverrides ?? [],
                 }
               : {}),
           }
         : {}),
+      ...(connection.provider === "azure"
+        ? {}
+        : connection.models == null
+          ? {}
+          : { models: connection.models }),
       contextLengthOverride: connection.contextLengthOverride ?? null,
       credentialSet: credentialSet === true,
       credentialUpdatedAt: connection.credentialUpdatedAt ?? null,

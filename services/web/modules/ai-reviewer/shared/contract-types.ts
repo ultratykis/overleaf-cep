@@ -4,6 +4,8 @@ import {
   AgentErrorSchema,
   AgentEventSchema,
   AgentRequestSchema,
+  AiReviewerModeInstructionsSchema,
+  AiReviewerModeInstructionsSnapshotSchema,
   AiReviewerWorkspaceSnapshotSchema,
   AiReviewerWorkspaceSchema,
   DiscussionSubjectSchema,
@@ -29,6 +31,12 @@ import {
 export type AgentError = z.infer<typeof AgentErrorSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
+export type AiReviewerModeInstructions = z.infer<
+  typeof AiReviewerModeInstructionsSchema
+>;
+export type AiReviewerModeInstructionsSnapshot = z.infer<
+  typeof AiReviewerModeInstructionsSnapshotSchema
+>;
 export type AiReviewerWorkspaceSnapshot = z.infer<
   typeof AiReviewerWorkspaceSnapshotSchema
 >;

@@ -30,6 +30,8 @@ export default createAiReviewerRouter({
   confirmSkillGitImport: AiReviewerController.confirmSkillGitImport,
   deleteSkill: AiReviewerController.deleteSkill,
   stream: AiReviewerController.stream,
+  getModeInstructions: AiReviewerController.getModeInstructions,
+  saveModeInstructions: AiReviewerController.saveModeInstructions,
   getWorkspace: AiReviewerController.getWorkspace,
   saveWorkspace: AiReviewerController.saveWorkspace,
   getCommentProvenance: AiReviewerController.getCommentProvenance,

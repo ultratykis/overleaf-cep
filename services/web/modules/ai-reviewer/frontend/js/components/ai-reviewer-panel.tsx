@@ -12,6 +12,7 @@ import {
 import MaterialIcon from "@/shared/components/material-icon";
 import OLButton from "@/shared/components/ol/ol-button";
 import OLDropdownMenuItem from "@/shared/components/ol/ol-dropdown-menu-item";
+import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
 import { useProjectContext } from "@/shared/context/project-context";
@@ -35,6 +36,7 @@ import type {
   AgentError,
   AgentEvent,
   AgentRequest,
+  AiReviewerModeInstructions,
   AiReviewerWorkspace,
   DiscussionSubject,
   DiscussionTurn,
@@ -63,7 +65,11 @@ import {
   AiReviewerDiscussionMessages,
   type AiReviewerToolLine,
 } from "./ai-reviewer-discussion-messages";
-import { AiReviewerExpandableMarkdown } from "./ai-reviewer-markdown";
+import {
+  AI_REVIEWER_FINDING_MARKDOWN_CONTENT_LIMIT,
+  AiReviewerExpandableMarkdown,
+  AiReviewerMarkdown,
+} from "./ai-reviewer-markdown";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
   useEditorSelectionPreview,
@@ -103,6 +109,11 @@ import {
   type AiReviewerWorkspacePersistence,
 } from "../services/ai-reviewer-workspace-persistence";
 import {
+  aiReviewerModeInstructionPersistence,
+  AiReviewerModeInstructionPersistenceError,
+  type AiReviewerModeInstructionPersistence,
+} from "../services/ai-reviewer-mode-instructions";
+import {
   postAiReviewerArtifactComment,
   type ArtifactCommentPostingResult,
   type PostEditorComment,
@@ -117,6 +128,7 @@ import {
   type AiProviderModel,
   type AiProviderModelFailure,
 } from "../services/ai-provider-configuration";
+import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
 
 import "../../stylesheets/ai-reviewer.scss";
 
@@ -285,18 +297,22 @@ function modelKey(model: { connectionId: string; id: string }) {
 }
 
 function modelContextSourceLabel(
-  source: AiProviderModel["contextLengthSource"],
+  source:
+    | AiProviderModel["contextLengthSource"]
+    | NonNullable<AgentError["contextLengthSource"]>,
   t: TFunction<"translation">,
 ) {
   switch (source) {
-    case "derived":
-      return t("ai_reviewer_model_context_source_derived");
     case "detected":
       return t("ai_reviewer_model_context_source_detected");
-    case "default":
-      return t("ai_reviewer_model_context_source_default");
     case "override":
       return t("ai_reviewer_model_context_source_override");
+    case "unknown":
+      return t("ai_reviewer_model_context_source_unknown");
+    case "derived":
+      return t("ai_reviewer_model_context_source_detected");
+    case "default":
+      return t("ai_reviewer_model_context_source_unknown");
   }
 }
 
@@ -305,22 +321,23 @@ function modelContextSourceShortLabel(
   t: TFunction<"translation">,
 ) {
   switch (source) {
-    case "derived":
-      return t("ai_reviewer_model_context_source_derived_short");
     case "detected":
       return t("ai_reviewer_model_context_source_detected_short");
-    case "default":
-      return t("ai_reviewer_model_context_source_default_short");
     case "override":
       return t("ai_reviewer_model_context_source_override_short");
+    case "unknown":
+      return t("ai_reviewer_model_context_source_unknown_short");
   }
 }
 
 function modelContextLabel(
-  contextLength: number,
+  contextLength: number | null,
   source: AiProviderModel["contextLengthSource"],
   t: TFunction<"translation">,
 ) {
+  if (contextLength == null) {
+    return t("ai_reviewer_model_context_unknown");
+  }
   return t("ai_reviewer_model_context", {
     contextLength: contextLength.toLocaleString(),
     source: modelContextSourceLabel(source, t),
@@ -328,18 +345,28 @@ function modelContextLabel(
 }
 
 function modelContextShortLabel(
-  contextLength: number,
+  contextLength: number | null,
   source: AiProviderModel["contextLengthSource"],
   t: TFunction<"translation">,
 ) {
+  if (contextLength == null) {
+    return t("ai_reviewer_model_context_unknown_short");
+  }
   return t("ai_reviewer_model_context", {
     contextLength: contextLength.toLocaleString(),
     source: modelContextSourceShortLabel(source, t),
   });
 }
 
-function modelOptionLabel(model: AiProviderModel, t: TFunction<"translation">) {
-  return `${model.displayName} (${model.connectionLabel}) · ${modelContextLabel(
+function modelOptionLabel(
+  model: AiProviderModel,
+  includeId: boolean,
+  t: TFunction<"translation">,
+) {
+  const identity = includeId
+    ? `${model.displayName} — ${model.id}`
+    : model.displayName;
+  return `${identity} (${model.connectionLabel}) · ${modelContextLabel(
     model.contextLength,
     model.contextLengthSource,
     t,
@@ -373,7 +400,9 @@ function AiReviewerPortaledMenu({
   return createPortal(
     <DropdownMenu
       flip
-      className={`ai-reviewer-panel-portaled-menu ${className}`}
+      // Body portals sit outside the editor's theme boundary. Reuse the host
+      // marker that its file-tree and tab context menus use for both themes.
+      className={`ide-redesign-main ai-reviewer-panel-portaled-menu ${className}`}
       popperConfig={portaledMenuPopperConfig}
     >
       {children}
@@ -431,6 +460,8 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_authentication");
     case "configuration:AI_PROVIDER_NOT_CONFIGURED":
       return t("ai_reviewer_error_guidance_configuration");
+    case "configuration:AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED":
+      return t("ai_reviewer_provider_plaintext_credential_blocked");
     case "network:AI_PROVIDER_NETWORK_ERROR":
       return t("ai_reviewer_error_guidance_network");
     case "configuration:AI_PROJECT_CONTENT_NOT_AVAILABLE":
@@ -442,6 +473,8 @@ function agentErrorGuidance(
             contextLength: error.contextLength.toLocaleString(),
             source: modelContextSourceLabel(error.contextLengthSource, t),
           });
+    case "configuration:AI_MODEL_CONTEXT_UNKNOWN":
+      return t("ai_reviewer_error_guidance_model_context_unknown");
     // Waiting fixes a busy model but never fixes a withdrawn one, so the two
     // are told apart by the action they call for rather than by their text.
     case "rate-limit:AI_PROVIDER_MODEL_BUSY":
@@ -1289,6 +1322,7 @@ export function AiReviewerPanelView({
   copyText = copyTextToClipboard,
   postEditorComment,
   workspacePersistence,
+  modeInstructionPersistence,
   loadProviderConnections,
   loadProviderModels,
 }: {
@@ -1309,6 +1343,7 @@ export function AiReviewerPanelView({
   copyText?: CopyText;
   postEditorComment?: PostEditorComment;
   workspacePersistence?: AiReviewerWorkspacePersistence;
+  modeInstructionPersistence?: AiReviewerModeInstructionPersistence;
   loadProviderConnections?: typeof getAiProviderConnections;
   loadProviderModels?: typeof getAiProviderModels;
 }) {
@@ -1320,13 +1355,33 @@ export function AiReviewerPanelView({
   const [contextTruncatedRuns, setContextTruncatedRuns] = useState<
     ReadonlySet<number>
   >(() => new Set());
+  const [findingToolNotCalledRuns, setFindingToolNotCalledRuns] = useState<
+    ReadonlySet<number>
+  >(() => new Set());
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const selectedModelRef = useRef<WorkspaceModelSelection | null>(null);
   const [connections, setConnections] = useState<AiProviderConnection[]>([]);
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   const [showProviderSettings, setShowProviderSettings] = useState(false);
+  const [showModeInstructionSettings, setShowModeInstructionSettings] =
+    useState(false);
+  const [modeInstructions, setModeInstructions] =
+    useState<AiReviewerModeInstructions>({});
+  const [modeInstructionRevision, setModeInstructionRevision] = useState(0);
+  const [modeInstructionReady, setModeInstructionReady] = useState(
+    modeInstructionPersistence == null,
+  );
+  const [modeInstructionSaving, setModeInstructionSaving] = useState(false);
+  const [modeInstructionError, setModeInstructionError] = useState<
+    string | null
+  >(null);
+  const [modeInstructionNotice, setModeInstructionNotice] = useState<
+    string | null
+  >(null);
   const [models, setModels] = useState<AiProviderModel[]>([]);
+  const [modelQuery, setModelQuery] = useState("");
+  const [modelCatalogError, setModelCatalogError] = useState(false);
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
     [],
   );
@@ -1388,6 +1443,8 @@ export function AiReviewerPanelView({
   const nextWorkspaceOrder = useRef(0);
   const mounted = useRef(true);
   const persistenceGeneration = useRef(0);
+  const modeInstructionGeneration = useRef(0);
+  const activeModeInstructionOperation = useRef<AbortController | null>(null);
   const persistenceQueue = useRef<Promise<void>>(Promise.resolve());
   const activePersistenceOperation = useRef<PersistenceOperation | null>(null);
   const lastQueuedWorkspace = useRef<string | null>(null);
@@ -1433,13 +1490,83 @@ export function AiReviewerPanelView({
         }
         setModels(catalog.models);
         setModelFailures(catalog.failures);
+        setModelCatalogError(false);
       })
       .catch(() => {
-        // Without a live catalog the panel stays unselected. The server must
-        // not infer a destination from the number of remaining connections.
+        if (!controller.signal.aborted) {
+          setModels([]);
+          setModelFailures([]);
+          setModelCatalogError(true);
+        }
       });
     return () => controller.abort();
   }, [loadProviderModels, projectId]);
+
+  useEffect(() => {
+    modeInstructionGeneration.current += 1;
+    const generation = modeInstructionGeneration.current;
+    activeModeInstructionOperation.current?.abort(
+      cancellationReason("The review perspective scope changed."),
+    );
+    activeModeInstructionOperation.current = null;
+    setShowModeInstructionSettings(false);
+    setModeInstructions({});
+    setModeInstructionRevision(0);
+    setModeInstructionSaving(false);
+    setModeInstructionError(null);
+    setModeInstructionNotice(null);
+
+    if (modeInstructionPersistence == null) {
+      setModeInstructionReady(true);
+      return;
+    }
+
+    setModeInstructionReady(false);
+    const controller = new AbortController();
+    activeModeInstructionOperation.current = controller;
+    void modeInstructionPersistence
+      .load(projectId, controller.signal)
+      .then(
+        (snapshot) => {
+          if (
+            !mounted.current ||
+            controller.signal.aborted ||
+            modeInstructionGeneration.current !== generation
+          ) {
+            return;
+          }
+          setModeInstructions(snapshot.instructions);
+          setModeInstructionRevision(snapshot.revision);
+          setModeInstructionReady(true);
+        },
+        (error) => {
+          if (
+            !mounted.current ||
+            controller.signal.aborted ||
+            modeInstructionGeneration.current !== generation
+          ) {
+            return;
+          }
+          setModeInstructionNotice(
+            error instanceof AiReviewerModeInstructionPersistenceError &&
+              error.code === "AI_REVIEWER_MODE_INSTRUCTIONS_CHANGED"
+              ? t("ai_reviewer_perspectives_changed")
+              : t("ai_reviewer_perspectives_load_failed"),
+          );
+        },
+      )
+      .finally(() => {
+        if (activeModeInstructionOperation.current === controller) {
+          activeModeInstructionOperation.current = null;
+        }
+      });
+
+    return () => {
+      controller.abort(
+        cancellationReason("The review perspective scope changed."),
+      );
+    };
+  }, [modeInstructionPersistence, projectId, t]);
 
   const runModel = useMemo(
     () =>
@@ -1451,6 +1578,27 @@ export function AiReviewerPanelView({
       ) ?? null,
     [models, resolvedSelectedModel],
   );
+  const duplicateModelNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const model of models) {
+      const key = model.displayName.trim().toLocaleLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return new Set(
+      [...counts.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([name]) => name),
+    );
+  }, [models]);
+  const filteredModels = useMemo(() => {
+    const query = modelQuery.trim().toLocaleLowerCase();
+    if (query === "") return models;
+    return models.filter((model) =>
+      [model.displayName, model.id, model.connectionLabel].some((value) =>
+        value.toLocaleLowerCase().includes(query),
+      ),
+    );
+  }, [modelQuery, models]);
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
       setDiscussions((current) => {
@@ -1790,6 +1938,9 @@ export function AiReviewerPanelView({
       scopeKind: ReviewScopeKind,
       group?: WorkspaceRun["group"],
     ) => {
+      // A run's status and Stop control live in the timeline, so an exclusive
+      // discussion view cannot remain active when that run starts.
+      setActiveDiscussionId(null);
       clearCitationCopy();
       disposeActiveEvidenceNavigation(
         cancellationReason("The evidence navigation was replaced."),
@@ -1995,6 +2146,11 @@ export function AiReviewerPanelView({
         if (event.type === "completed") {
           if (event.contextTruncated === true) {
             setContextTruncatedRuns((current) =>
+              new Set(current).add(run.generation),
+            );
+          }
+          if (event.findingToolNotCalled === true) {
+            setFindingToolNotCalledRuns((current) =>
               new Set(current).add(run.generation),
             );
           }
@@ -3497,17 +3653,22 @@ export function AiReviewerPanelView({
         remainingDiscussions = mergedWorkspace.discussions.map((discussion) =>
           discussionFromWorkspace(discussion, t),
         );
+        const retainedRuns = workspaceRef.current.runs.filter(
+          (run) => workspaceRunFromState(run) == null,
+        );
         dispatch({
           type: "hydrate",
           runs: mergedWorkspace.runs,
+          retainedGenerations: retainedRuns.map((run) => run.generation),
         });
-        nextGeneration.current = mergedWorkspace.runs.reduce(
-          (maximum, run) => Math.max(maximum, run.generation),
-          0,
-        );
+        nextGeneration.current = [
+          ...mergedWorkspace.runs,
+          ...retainedRuns,
+        ].reduce((maximum, run) => Math.max(maximum, run.generation), 0);
         nextWorkspaceOrder.current = [
           ...mergedWorkspace.runs,
           ...mergedWorkspace.discussions,
+          ...retainedRuns,
         ].reduce((maximum, entry) => Math.max(maximum, entry.createdOrder), 0);
         lastQueuedWorkspace.current = JSON.stringify(persistedAfterDeletion);
       } else {
@@ -3617,6 +3778,7 @@ export function AiReviewerPanelView({
         const snapshot = await workspacePersistence.deleteDiscussion(
           projectId,
           discussion.id,
+          persistenceRevision.current,
           signal,
         );
         if (persistenceGeneration.current === operationGeneration) {
@@ -3808,9 +3970,81 @@ export function AiReviewerPanelView({
     workspacePersistence,
   ]);
 
+  const saveModeInstructions = useCallback(
+    (nextInstructions: AiReviewerModeInstructions) => {
+      if (modeInstructionSaving || !modeInstructionReady) {
+        return;
+      }
+      if (modeInstructionPersistence == null) {
+        setModeInstructions(nextInstructions);
+        setModeInstructionError(null);
+        setShowModeInstructionSettings(false);
+        return;
+      }
+
+      const generation = modeInstructionGeneration.current;
+      const expectedRevision = modeInstructionRevision;
+      const controller = new AbortController();
+      activeModeInstructionOperation.current = controller;
+      setModeInstructionSaving(true);
+      setModeInstructionError(null);
+      void modeInstructionPersistence
+        .save(projectId, nextInstructions, expectedRevision, controller.signal)
+        .then(
+          (snapshot) => {
+            if (
+              !mounted.current ||
+              controller.signal.aborted ||
+              modeInstructionGeneration.current !== generation
+            ) {
+              return;
+            }
+            setModeInstructions(snapshot.instructions);
+            setModeInstructionRevision(snapshot.revision);
+            setModeInstructionNotice(null);
+            setShowModeInstructionSettings(false);
+          },
+          (error) => {
+            if (
+              !mounted.current ||
+              controller.signal.aborted ||
+              modeInstructionGeneration.current !== generation
+            ) {
+              return;
+            }
+            setModeInstructionError(
+              error instanceof AiReviewerModeInstructionPersistenceError &&
+                error.code === "AI_REVIEWER_MODE_INSTRUCTIONS_CHANGED"
+                ? t("ai_reviewer_perspectives_changed")
+                : t("ai_reviewer_perspectives_save_failed"),
+            );
+          },
+        )
+        .finally(() => {
+          if (
+            mounted.current &&
+            modeInstructionGeneration.current === generation
+          ) {
+            setModeInstructionSaving(false);
+          }
+          if (activeModeInstructionOperation.current === controller) {
+            activeModeInstructionOperation.current = null;
+          }
+        });
+    },
+    [
+      modeInstructionPersistence,
+      modeInstructionReady,
+      modeInstructionRevision,
+      modeInstructionSaving,
+      projectId,
+      t,
+    ],
+  );
+
   const workspaceNotice = persistenceConflict
     ? persistenceNotice
-    : (actionNotice ?? persistenceNotice);
+    : (actionNotice ?? persistenceNotice ?? modeInstructionNotice);
 
   const renderSuggestionPreview = (
     identity: ActiveSuggestionPreview,
@@ -4001,7 +4235,7 @@ export function AiReviewerPanelView({
         <AiReviewerExpandableMarkdown
           className="ai-reviewer-panel-prose"
           content={finding.message}
-          contentLimit={240}
+          contentLimit={AI_REVIEWER_FINDING_MARKDOWN_CONTENT_LIMIT}
           checkNewLines
           translate="no"
         />
@@ -4098,7 +4332,7 @@ export function AiReviewerPanelView({
         <AiReviewerExpandableMarkdown
           className="ai-reviewer-panel-prose"
           content={finding.message}
-          contentLimit={240}
+          contentLimit={AI_REVIEWER_FINDING_MARKDOWN_CONTENT_LIMIT}
           checkNewLines
           translate="no"
         />
@@ -4217,11 +4451,13 @@ export function AiReviewerPanelView({
             replacement: suggestion.replacement,
           })}
         </p>
-        <p className="ai-reviewer-panel-prose">
-          {t("ai_reviewer_suggestion_rationale", {
+        <AiReviewerMarkdown
+          className="ai-reviewer-panel-prose"
+          content={t("ai_reviewer_suggestion_rationale", {
             rationale: suggestion.rationale,
           })}
-        </p>
+          translate="no"
+        />
         <ul className="ai-reviewer-panel-locations">
           {suggestion.evidence.map((reference, evidenceIndex) => {
             const location = evidenceLocation(reference);
@@ -4342,7 +4578,8 @@ export function AiReviewerPanelView({
     );
 
   const renderModelContextSettingsAction = (errorCode: string | null) =>
-    errorCode === "AI_MODEL_CONTEXT_TOO_SMALL" ? (
+    errorCode === "AI_MODEL_CONTEXT_TOO_SMALL" ||
+    errorCode === "AI_MODEL_CONTEXT_UNKNOWN" ? (
       <OLButton
         type="button"
         variant="link"
@@ -4484,6 +4721,14 @@ export function AiReviewerPanelView({
           {t("ai_reviewer_warning_context_truncated")}
         </div>
       )}
+      {findingToolNotCalledRuns.has(runState.generation) && (
+        <div
+          className="alert alert-info ai-reviewer-panel-notice"
+          role="status"
+        >
+          {t("ai_reviewer_notice_no_structured_findings")}
+        </div>
+      )}
       {runState.error != null && (
         <div
           className="alert alert-danger ai-reviewer-panel-notice"
@@ -4526,11 +4771,13 @@ export function AiReviewerPanelView({
             replacement: suggestion.replacement,
           })}
         </p>
-        <p className="ai-reviewer-panel-prose">
-          {t("ai_reviewer_suggestion_rationale", {
+        <AiReviewerMarkdown
+          className="ai-reviewer-panel-prose"
+          content={t("ai_reviewer_suggestion_rationale", {
             rationale: suggestion.rationale,
           })}
-        </p>
+          translate="no"
+        />
         <div className="ai-reviewer-panel-actions">
           {status === "unresolved" &&
             getSelectionContext != null &&
@@ -4862,6 +5109,10 @@ export function AiReviewerPanelView({
             t,
           ),
         });
+  const selectedModeLabel = reviewModeLabel(selectedMode, t);
+  const selectedModeDescription = t("ai_reviewer_selected_mode", {
+    mode: selectedModeLabel,
+  });
 
   const workspaceIsEmpty =
     workspace.runs.length === 0 && discussions.length === 0;
@@ -4923,22 +5174,76 @@ export function AiReviewerPanelView({
               {selectedModelLabel}
             </DropdownToggle>
             <AiReviewerPortaledMenu className="ai-reviewer-panel-model-menu">
-              {models.map((candidate) => (
+              <div
+                className="ai-reviewer-panel-model-search"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <OLFormLabel
+                  className="visually-hidden"
+                  htmlFor="ai-reviewer-model-search"
+                >
+                  {t("ai_reviewer_model_filter")}
+                </OLFormLabel>
+                <OLFormControl
+                  id="ai-reviewer-model-search"
+                  type="text"
+                  value={modelQuery}
+                  placeholder={t("ai_reviewer_model_filter")}
+                  autoComplete="off"
+                  onChange={(event) => setModelQuery(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+                      return;
+                    }
+                    // @restart/ui leaves arrow keys inside form controls. Move
+                    // explicitly into this filtered menu without changing its query.
+                    const options = event.currentTarget
+                      .closest(".ai-reviewer-panel-model-menu")
+                      ?.querySelectorAll<HTMLElement>(
+                        '[role="menuitem"]:not(:disabled)',
+                      );
+                    const option =
+                      options == null
+                        ? undefined
+                        : event.key === "ArrowDown"
+                          ? options[0]
+                          : options[options.length - 1];
+                    if (option == null) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    option.focus();
+                  }}
+                />
+              </div>
+              {filteredModels.map((candidate) => (
                 <OLDropdownMenuItem
                   key={modelKey(candidate)}
                   as="button"
                   className="ai-reviewer-panel-model-option"
                   active={candidate === runModel}
-                  aria-label={modelOptionLabel(candidate, t)}
-                  onClick={() =>
+                  aria-label={modelOptionLabel(
+                    candidate,
+                    duplicateModelNames.has(
+                      candidate.displayName.trim().toLocaleLowerCase(),
+                    ),
+                    t,
+                  )}
+                  onClick={() => {
                     setSelectedModel({
                       connectionId: candidate.connectionId,
                       model: candidate.id,
-                    })
-                  }
+                    });
+                    setModelQuery("");
+                  }}
                 >
                   <span className="ai-reviewer-panel-model-option-name">
-                    {`${candidate.displayName} (${candidate.connectionLabel})`}
+                    {`${candidate.displayName}${
+                      duplicateModelNames.has(
+                        candidate.displayName.trim().toLocaleLowerCase(),
+                      )
+                        ? ` — ${candidate.id}`
+                        : ""
+                    } (${candidate.connectionLabel})`}
                   </span>
                   <span
                     className="ai-reviewer-panel-model-option-context"
@@ -4956,6 +5261,11 @@ export function AiReviewerPanelView({
                   </span>
                 </OLDropdownMenuItem>
               ))}
+              {filteredModels.length === 0 && (
+                <p className="ai-reviewer-panel-model-empty" role="status">
+                  {t("ai_reviewer_model_filter_empty")}
+                </p>
+              )}
             </AiReviewerPortaledMenu>
           </Dropdown>
         )}
@@ -4976,6 +5286,21 @@ export function AiReviewerPanelView({
             </span>
           </OLTooltip>
           <AiReviewerPortaledMenu className="ai-reviewer-panel-overflow-menu">
+            <OLDropdownMenuItem
+              as="button"
+              disabled={
+                busy ||
+                !modeInstructionReady ||
+                modeInstructionSaving ||
+                persistenceConflict
+              }
+              onClick={() => {
+                setModeInstructionError(null);
+                setShowModeInstructionSettings(true);
+              }}
+            >
+              {t("ai_reviewer_perspectives")}
+            </OLDropdownMenuItem>
             <OLDropdownMenuItem
               as="button"
               variant="danger"
@@ -5057,6 +5382,15 @@ export function AiReviewerPanelView({
                 })}
               </p>
             )}
+            {modelCatalogError && (
+              <p
+                className="ai-reviewer-panel-model-failures form-text mb-0"
+                role="alert"
+                data-testid="ai-reviewer-model-catalog-error"
+              >
+                {t("ai_reviewer_provider_models_load_failed")}
+              </p>
+            )}
             {/* Selecting text is an intent to act on it, so these sit directly
                 above the composer and stay there whether or not results exist. */}
             {selectionPreview != null && captureSelectionSession != null && (
@@ -5104,10 +5438,10 @@ export function AiReviewerPanelView({
                   bsPrefix="ai-reviewer-panel-mode-chip"
                   variant="ghost"
                   size="sm"
-                  aria-label={t("ai_reviewer_mode")}
+                  aria-label={selectedModeDescription}
                   disabled={busy || answerStreaming}
                 >
-                  {reviewModeLabel(selectedMode, t)}
+                  {selectedModeLabel}
                 </DropdownToggle>
                 <AiReviewerPortaledMenu className="ai-reviewer-panel-mode-menu">
                   {(["referee-review", "brainstorm", null] as const).map(
@@ -5141,6 +5475,21 @@ export function AiReviewerPanelView({
         <Suspense fallback={null}>
           <AiIntegrationDetails onHide={() => setShowProviderSettings(false)} />
         </Suspense>
+      )}
+
+      {showModeInstructionSettings && (
+        <AiReviewerModeInstructionsModal
+          initialInstructions={modeInstructions}
+          saving={modeInstructionSaving}
+          error={modeInstructionError}
+          onHide={() => {
+            if (!modeInstructionSaving) {
+              setShowModeInstructionSettings(false);
+              setModeInstructionError(null);
+            }
+          }}
+          onSave={saveModeInstructions}
+        />
       )}
 
       {showDeleteWorkspaceConfirmation && (
@@ -5221,6 +5570,7 @@ export default function AiReviewerPanel() {
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}
       workspacePersistence={aiReviewerWorkspacePersistence}
+      modeInstructionPersistence={aiReviewerModeInstructionPersistence}
       loadProviderConnections={getAiProviderConnections}
       loadProviderModels={getAiProviderModels}
     />

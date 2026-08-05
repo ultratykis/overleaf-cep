@@ -71,6 +71,8 @@
   .ai-reviewer-provider-settings-field,
   .ai-reviewer-provider-settings-state,
   .ai-reviewer-provider-settings-hint,
+  .ai-reviewer-provider-plaintext-warning,
+  .ai-reviewer-provider-plaintext-credential-warning,
   .ai-reviewer-provider-request-preview,
   .ai-reviewer-provider-request-url,
   .ai-reviewer-provider-advanced,
@@ -186,11 +188,27 @@
   // block instead would stretch the credential badge across the column, which
   // reads as a filled bar rather than a badge.
   .ai-reviewer-connection-provider,
-  .ai-reviewer-connection-credential-cell time {
+  .ai-reviewer-connection-credential-cell time,
+  .ai-reviewer-connection-plaintext,
+  .ai-reviewer-connection-plaintext-credential {
     display: block;
     margin-top: var(--spacing-02);
-    color: var(--content-secondary-themed);
     font-size: var(--font-size-01);
+  }
+
+  .ai-reviewer-connection-provider,
+  .ai-reviewer-connection-credential-cell time {
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-connection-plaintext,
+  .ai-reviewer-provider-plaintext-warning {
+    color: var(--content-warning-themed);
+  }
+
+  .ai-reviewer-connection-plaintext-credential,
+  .ai-reviewer-provider-plaintext-credential-warning {
+    color: var(--content-danger-themed);
   }
 
   .ai-reviewer-connection-credential-cell .badge {
@@ -295,6 +313,7 @@
 
   .ai-reviewer-skills,
   .ai-reviewer-skills-description,
+  .ai-reviewer-skills-mode-help,
   .ai-reviewer-skills-empty,
   .ai-reviewer-skill-group-list,
   .ai-reviewer-skill-group-item,
@@ -322,6 +341,11 @@
   }
 
   .ai-reviewer-skills-description {
+    margin: 0 0 var(--spacing-02);
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-skills-mode-help {
     margin: 0 0 var(--spacing-04);
     color: var(--content-secondary-themed);
   }
@@ -641,6 +665,59 @@
   }
 }
 
+.ai-reviewer-mode-instructions-settings {
+  min-width: 0;
+  box-sizing: border-box;
+  color: var(--content-primary-themed);
+
+  .modal-content,
+  .modal-header,
+  .modal-body,
+  .modal-footer,
+  form,
+  .ai-reviewer-mode-instruction-field,
+  .ai-reviewer-mode-instruction-heading,
+  .form-control {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .modal-content,
+  .modal-body {
+    color: var(--content-primary-themed);
+    background: var(--bg-primary-themed);
+  }
+
+  .ai-reviewer-mode-instruction-field + .ai-reviewer-mode-instruction-field {
+    margin-top: var(--spacing-06);
+  }
+
+  .ai-reviewer-mode-instruction-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-04);
+  }
+
+  .form-control {
+    resize: vertical;
+    color: var(--content-primary-themed);
+    background: var(--bg-primary-themed);
+    border-color: var(--border-divider-themed);
+  }
+
+  .form-text {
+    color: var(--content-secondary-themed);
+  }
+
+  .ai-reviewer-mode-instruction-error {
+    margin-top: var(--spacing-05);
+    color: var(--content-danger-themed);
+  }
+}
+
 .ai-reviewer-panel-header {
   display: flex;
   flex: none;
@@ -956,6 +1033,8 @@
 }
 
 .ai-reviewer-markdown {
+  // Micromark already represents meaningful Markdown structure in elements;
+  // collapse the separator newlines it emits between those elements.
   white-space: normal;
 
   > :first-child {
@@ -979,6 +1058,22 @@
     background: var(--bg-tertiary-themed);
     overflow-x: auto;
     white-space: pre;
+  }
+
+  table {
+    width: 100%;
+    max-width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    white-space: normal;
+  }
+
+  th,
+  td {
+    padding: var(--spacing-02);
+    border: 1px solid var(--border-divider-themed);
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   code {
@@ -1359,6 +1454,10 @@
  * still needs a viewport ceiling because provider labels are untrusted text. */
 .ai-reviewer-panel-portaled-menu {
   box-sizing: border-box;
+  // The host theme marker is also a layout container elsewhere in the IDE;
+  // a menu must keep Bootstrap's own standalone box in both themes.
+  display: block;
+  height: auto;
 
   .dropdown-item {
     min-width: 0;
@@ -1377,6 +1476,20 @@
     gap: var(--spacing-04);
     overflow: hidden;
     white-space: nowrap;
+  }
+
+  .ai-reviewer-panel-model-search {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    padding: var(--spacing-03);
+    background: var(--bg-primary-themed);
+  }
+
+  .ai-reviewer-panel-model-empty {
+    margin: 0;
+    padding: var(--spacing-04);
+    color: var(--content-secondary-themed);
   }
 
   .ai-reviewer-panel-model-option-name {

@@ -3,7 +3,10 @@
 import { isIP } from "node:net";
 
 import { AgentGatewayError } from "./AgentGateway.mjs";
-import { parseCanonicalAiProviderBaseUrl } from "../../shared/provider-request-url.mjs";
+import {
+  isPlaintextAiProviderBaseUrl,
+  parseCanonicalAiProviderBaseUrl,
+} from "../../shared/provider-request-url.mjs";
 
 export const OPENAI_COMPATIBLE_FETCH_REDIRECT = "error";
 
@@ -31,6 +34,20 @@ export class OpenAiCompatibleEndpointPolicyError extends AgentGatewayError {
       retryable: false,
     });
     this.name = "OpenAiCompatibleEndpointPolicyError";
+  }
+}
+
+export class OpenAiCompatiblePlaintextCredentialError extends AgentGatewayError {
+  constructor() {
+    super(
+      "The API key was not sent because the endpoint uses HTTP. Use HTTPS or recreate the connection without a key.",
+      {
+        code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+        category: "configuration",
+        retryable: false,
+      },
+    );
+    this.name = "OpenAiCompatiblePlaintextCredentialError";
   }
 }
 
@@ -226,6 +243,23 @@ export function parseOpenAiCompatibleBaseUrl(input) {
     host,
     port,
   });
+}
+
+/**
+ * Refuse credentials at every outbound boundary. The scheme is the wire
+ * property that decides whether bytes are encrypted; the local/remote host
+ * classification deliberately does not participate.
+ *
+ * @param {string} baseUrl
+ * @param {boolean} credentialPresent
+ */
+export function assertOpenAiCompatibleCredentialTransport(
+  baseUrl,
+  credentialPresent,
+) {
+  if (credentialPresent && isPlaintextAiProviderBaseUrl(baseUrl)) {
+    throw new OpenAiCompatiblePlaintextCredentialError();
+  }
 }
 
 /**

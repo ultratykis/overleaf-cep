@@ -501,63 +501,68 @@ export function createAiReviewerWorkspaceStore({
      * @param {unknown} userIdInput
      * @param {unknown} projectIdInput
      * @param {unknown} discussionIdInput
+     * @param {unknown} expectedRevisionInput
      */
-    async deleteDiscussion(userIdInput, projectIdInput, discussionIdInput) {
+    async deleteDiscussion(
+      userIdInput,
+      projectIdInput,
+      discussionIdInput,
+      expectedRevisionInput,
+    ) {
       const userId = scopeIdentifier(userIdInput);
       const projectId = scopeIdentifier(projectIdInput);
       const discussionId = boundedIdentifier(discussionIdInput);
+      const revision = expectedRevision(expectedRevisionInput);
       const scopeId = workspaceScopeId(userId, projectId);
-      for (
-        let attempt = 0;
-        attempt < MAX_WORKSPACE_MUTATION_RETRIES;
-        attempt += 1
-      ) {
-        const record = await model
-          .findOne({ _id: scopeId, userId, projectId })
-          .lean()
-          .exec();
-        const snapshot = storedSnapshot(record, scopeId, userId, projectId);
-        if (snapshot == null) {
-          return emptySnapshot();
+      const record = await model
+        .findOne({ _id: scopeId, userId, projectId })
+        .lean()
+        .exec();
+      const snapshot = storedSnapshot(record, scopeId, userId, projectId);
+      if (snapshot == null) {
+        if (revision !== 0) {
+          throw new AiReviewerWorkspaceConflictError();
         }
-        const currentWorkspace = await resolveCurrentModelSelection(
-          userId,
-          snapshot.workspace,
-        );
-        const discussions = currentWorkspace.discussions.filter(
-          (discussion) => discussion.id !== discussionId,
-        );
-        if (discussions.length === currentWorkspace.discussions.length) {
-          return { ...snapshot, workspace: currentWorkspace };
-        }
-        // Only runs bound to the removed discussion became orphaned here.
-        // Other empty runs remain eligible for the deliberate load-time sweep.
-        const orphanedRequestIds = new Set(
-          currentWorkspace.discussions.flatMap((discussion) =>
-            discussion.id !== discussionId || discussion.subject == null
-              ? []
-              : [discussion.subject.sourceRequest.requestId],
-          ),
-        );
-        const withoutDiscussion = dropEmptyRunsOrphanedByDeletedDiscussion(
-          {
-            ...currentWorkspace,
-            discussions,
-          },
-          orphanedRequestIds,
-        );
-        const validated = parseWorkspace(withoutDiscussion, projectId);
-        const persisted = await persist(userId, projectId, validated, {
-          upsert: false,
-          expectedRevision: snapshot.revision,
-        });
-        if (persisted != null) {
-          return persisted;
-        }
+        return emptySnapshot();
       }
-      throw new Error(
-        "The AI reviewer workspace changed while a discussion was deleted.",
+      if (snapshot.revision !== revision) {
+        throw new AiReviewerWorkspaceConflictError();
+      }
+      const currentWorkspace = await resolveCurrentModelSelection(
+        userId,
+        snapshot.workspace,
       );
+      const discussions = currentWorkspace.discussions.filter(
+        (discussion) => discussion.id !== discussionId,
+      );
+      if (discussions.length === currentWorkspace.discussions.length) {
+        return { ...snapshot, workspace: currentWorkspace };
+      }
+      // Only runs bound to the removed discussion became orphaned here.
+      // Other empty runs remain eligible for the deliberate load-time sweep.
+      const orphanedRequestIds = new Set(
+        currentWorkspace.discussions.flatMap((discussion) =>
+          discussion.id !== discussionId || discussion.subject == null
+            ? []
+            : [discussion.subject.sourceRequest.requestId],
+        ),
+      );
+      const withoutDiscussion = dropEmptyRunsOrphanedByDeletedDiscussion(
+        {
+          ...currentWorkspace,
+          discussions,
+        },
+        orphanedRequestIds,
+      );
+      const validated = parseWorkspace(withoutDiscussion, projectId);
+      const persisted = await persist(userId, projectId, validated, {
+        upsert: false,
+        expectedRevision: revision,
+      });
+      if (persisted == null) {
+        throw new AiReviewerWorkspaceConflictError();
+      }
+      return persisted;
     },
 
     /**

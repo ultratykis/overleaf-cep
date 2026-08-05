@@ -12,6 +12,7 @@ import {
 const credential = "PRIVATE_NATIVE_PROVIDER_CREDENTIAL";
 const createdAt = "2026-07-26T00:00:00.000Z";
 const azureBaseUrl = "https://reviewer.openai.azure.com/openai";
+const plaintextAzureBaseUrl = "http://host.docker.internal:11434/openai";
 const azureApiVersion = "2025-01-01-preview";
 const azureDefaultApiVersion = "v1";
 const azureDeployment = "gpt-5.6-terra";
@@ -146,6 +147,7 @@ function conversationRequest() {
     action: "review",
     instruction: "Explain this synthetic case.",
     skill: null,
+    scope: { kind: "project" },
   };
 }
 
@@ -158,6 +160,26 @@ function agentGateway(transport, options = {}) {
 }
 
 describe("AI reviewer: native AI SDK provider transports", function () {
+  it("blocks an Azure HTTP credential before constructing the review provider", function () {
+    const createProvider = vi.fn();
+    const fetchImpl = vi.fn();
+
+    expect(
+      () =>
+        new AzureAiSdkTransport({
+          baseUrl: plaintextAzureBaseUrl,
+          requestStyle: "deployment",
+          apiVersion: azureApiVersion,
+          credential,
+          modelTag: azureDeployment,
+          createProvider,
+          fetchImpl,
+        }),
+    ).toThrow("The API key was not sent because the endpoint uses HTTP");
+    expect(createProvider).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("constructs Azure through its chat adapter and accepts its V4 model", async function () {
     const model = {
       specificationVersion: "v4",
@@ -392,7 +414,26 @@ describe("AI reviewer: native AI SDK provider transports", function () {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(requestBodies[1].contents).toEqual([
-      expect.objectContaining({ role: "user" }),
+      {
+        role: "user",
+        parts: [
+          {
+            text: [
+              "## Task",
+              "",
+              "Action: review",
+              "",
+              "## Scope",
+              "",
+              "Scope: project",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        role: "user",
+        parts: [{ text: "Explain this synthetic case." }],
+      },
       {
         role: "model",
         parts: [

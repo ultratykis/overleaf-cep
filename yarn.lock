@@ -6638,6 +6638,7 @@ __metadata:
     mediatr-ts: "npm:^2.0.1"
     mensch: "npm:^0.3.4"
     micromark: "npm:^4.0.0"
+    micromark-extension-gfm: "npm:^3.0.0"
     mini-css-extract-plugin: "npm:^2.7.6"
     minimatch: "npm:^10.2.2"
     minimist: "npm:^1.2.7"

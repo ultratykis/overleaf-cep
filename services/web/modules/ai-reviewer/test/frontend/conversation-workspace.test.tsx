@@ -164,7 +164,7 @@ function discussionSuggestion(request: AgentRequest): UnresolvedSuggestion {
     },
     original: "beta",
     replacement: "clear",
-    rationale: "Use a precise term from the discussion.",
+    rationale: "Use a **precise term** from the discussion.",
     evidence: [
       {
         path,
@@ -753,6 +753,11 @@ describe("AI reviewer: conversation workspace", function () {
     const previewButton = await screen.findByRole("button", {
       name: "Preview discussion diff 1",
     });
+    const rationale = screen.getByText("precise term");
+    expect(rationale.tagName).to.equal("STRONG");
+    expect(
+      rationale.closest(".ai-reviewer-markdown")?.textContent,
+    ).not.to.contain("**");
     fireEvent.click(previewButton);
     await screen.findByText("Suggestion preview ready");
 

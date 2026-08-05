@@ -8,8 +8,10 @@ import Settings from "@overleaf/settings";
 import { describe, expect, it, vi } from "vitest";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
+import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
 import {
+  AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH,
   DISCUSSION_CONTEXT_TURN_LIMIT,
   UnresolvedSuggestionSchema,
 } from "../../../shared/contracts.mjs";
@@ -243,6 +245,15 @@ function sentPrompt(model) {
   return model.doStreamCalls[0].prompt[1].content[0].text;
 }
 
+function sentConversationMessages(model) {
+  return model.doStreamCalls[0].prompt.slice(2).map((message) => ({
+    role: message.role,
+    text: Array.isArray(message.content)
+      ? message.content.map((part) => part.text ?? "").join("")
+      : message.content,
+  }));
+}
+
 function sentSystemInstruction(model) {
   return model.doStreamCalls[0].prompt[0].content;
 }
@@ -254,7 +265,9 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       request: () => projectRequest(),
       included: [
         "You are reviewing an academic manuscript as a referee.",
-        "For each point: quote the passage, say plainly what is wrong with it",
+        "For each actionable point, call report_finding",
+        "put every issue worth tracking in that tool",
+        "if there are none, do not call it",
       ],
       excluded: ["You are a thinking partner for work in progress"],
     },
@@ -292,6 +305,82 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     for (const text of testCase.excluded) {
       expect(systemInstruction).not.toContain(text);
     }
+  });
+
+  it("replaces each built-in perspective independently", async function () {
+    const refereePerspective =
+      "Prioritize whether the causal identification supports the main claim.";
+    const brainstormPerspective =
+      "Explore rival framings before choosing the research question.";
+    const modeInstructions = {
+      "referee-review": refereePerspective,
+      brainstorm: brainstormPerspective,
+    };
+    const { model: refereeModel } = strictStreamModel([
+      textStep("Referee response."),
+    ]);
+    const { model: brainstormModel } = strictStreamModel([
+      textStep("Brainstorm response."),
+    ]);
+
+    await collect(
+      createGateway(refereeModel, { modeInstructions }).stream(
+        projectRequest(),
+      ),
+    );
+    await collect(
+      createGateway(brainstormModel, { modeInstructions }).stream(
+        openRequest({ skill: "brainstorm" }),
+      ),
+    );
+
+    expect(sentSystemInstruction(refereeModel)).toContain(refereePerspective);
+    expect(sentSystemInstruction(refereeModel)).toContain(
+      "For each actionable point, call report_finding",
+    );
+    expect(sentSystemInstruction(refereeModel)).not.toContain(
+      "You are reviewing an academic manuscript as a referee.",
+    );
+    expect(sentSystemInstruction(brainstormModel)).toContain(
+      brainstormPerspective,
+    );
+    expect(sentSystemInstruction(brainstormModel)).not.toContain(
+      "You are a thinking partner for work in progress",
+    );
+    expect(sentSystemInstruction(brainstormModel)).not.toContain(
+      refereePerspective,
+    );
+  });
+
+  it("rejects a custom perspective beyond the production character cap", function () {
+    const { model } = strictStreamModel([textStep("Must not run.")]);
+
+    expect(() =>
+      createGateway(model, {
+        modeInstructions: {
+          "referee-review": "x".repeat(
+            AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH + 1,
+          ),
+        },
+      }),
+    ).toThrowError("modeInstructions must be bounded review perspectives");
+    expect(model.doStreamCalls).toHaveLength(0);
+  });
+
+  it("keeps the maximum custom referee perspective inside the 8k instruction reserve", async function () {
+    const { model } = strictStreamModel([textStep("Bounded response.")]);
+
+    await collect(
+      createGateway(model, {
+        modeInstructions: {
+          "referee-review": "x".repeat(AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH),
+        },
+      }).stream(projectRequest()),
+    );
+
+    expect(sentSystemInstruction(model).length).toBeLessThanOrEqual(
+      modelInputCharacterBudget(8_192),
+    );
   });
 
   it.each([
@@ -953,7 +1042,7 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     ).not.toContain("propose_suggestion");
   });
 
-  it("sends a readable prompt instead of the request envelope", async function () {
+  it("sends readable context and preserves every conversation role", async function () {
     const { model } = strictStreamModel([textStep("Readable.")]);
     const request = documentRequest();
 
@@ -963,19 +1052,10 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     expect(prompt).toContain("## Task\n\nAction: review\nSkill: line-edit");
     expect(prompt).toContain("## Scope\n\nScope: document\nFile: main.tex");
     expect(prompt).toContain(documentText);
-    expect(prompt).toContain("## Conversation");
-    let previousTurn = -1;
-    for (const turn of [
+    expect(sentConversationMessages(model)).toEqual([
       ...request.turns,
       { role: "user", text: request.instruction },
-    ]) {
-      const rendered = `${turn.role === "user" ? "User" : "Assistant"}:\n${
-        turn.text
-      }`;
-      const position = prompt.indexOf(rendered);
-      expect(position).toBeGreaterThan(previousTurn);
-      previousTurn = position;
-    }
+    ]);
     for (const wireKey of [
       "requestId",
       "projectId",
@@ -983,7 +1063,6 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       "baseRevision",
       "baseTextHash",
       '"turns"',
-      '"role"',
     ]) {
       expect(prompt).not.toContain(wireKey);
     }
@@ -1002,15 +1081,10 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     await collect(createGateway(model).stream(openRequest({ turns })));
 
     expect(DISCUSSION_CONTEXT_TURN_LIMIT).toBe(12);
-    const prompt = sentPrompt(model);
-    let previousTurn = -1;
-    for (const turn of turns) {
-      const position = prompt.indexOf(
-        `${turn.role === "user" ? "User" : "Assistant"}:\n${turn.text}`,
-      );
-      expect(position).toBeGreaterThan(previousTurn);
-      previousTurn = position;
-    }
+    expect(sentConversationMessages(model)).toEqual([
+      ...turns,
+      { role: "user", text: openRequest({ turns }).instruction },
+    ]);
 
     const { model: overLimitModel } = strictStreamModel([
       textStep("Must not run."),
@@ -1043,7 +1117,8 @@ describe("AI reviewer: one agent path for review and conversation", function () 
 
     await collect(createGateway(captureModel).stream(request));
 
-    const readablePrompt = sentPrompt(captureModel);
+    const readablePrompt = formatAgentPrompt(request, null);
+    const readableContext = sentPrompt(captureModel);
     const systemInstruction = sentSystemInstruction(captureModel);
     const exactContextLength = readablePrompt.length * 2;
     const shortContextLength = (readablePrompt.length - 1) * 2;
@@ -1078,7 +1153,7 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       ),
     );
     expect(sentSystemInstruction(exactModel)).toBe(systemInstruction);
-    expect(sentPrompt(exactModel)).toBe(readablePrompt);
+    expect(sentPrompt(exactModel)).toBe(readableContext);
   });
 
   it("keeps the provider response body and the credential out of a failure", async function () {
@@ -1111,7 +1186,7 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     }
   });
 
-  it("offers the read tools to a conversation that names no scope", async function () {
+  it("keeps run findings out of a conversation that names no scope", async function () {
     const { model } = strictStreamModel([textStep("Chapter three.")]);
     const gateway = createGateway(model, { searchZotero: async () => [] });
 
@@ -1119,11 +1194,31 @@ describe("AI reviewer: one agent path for review and conversation", function () 
 
     expect(
       model.doStreamCalls[0].tools.map((declared) => declared.name),
-    ).toEqual([
-      "read_project_file",
-      "search_zotero",
-      "report_subject",
-      "report_finding",
-    ]);
+    ).toEqual(["read_project_file", "search_zotero", "report_subject"]);
+    expect(sentSystemInstruction(model)).not.toContain("report_finding");
+    expect(sentSystemInstruction(model)).not.toContain(
+      "Do not restate a reported finding",
+    );
+  });
+
+  it("does not tell a scope-free custom referee discussion to call a withheld finding tool", async function () {
+    const { model } = strictStreamModel([textStep("Chapter three.")]);
+    const customPerspective =
+      "Assess the argument from the perspective of a skeptical area chair.";
+    const gateway = createGateway(model, {
+      searchZotero: async () => [],
+      modeInstructions: { "referee-review": customPerspective },
+    });
+
+    await collect(gateway.stream(openRequest({ skill: "referee-review" })));
+
+    expect(sentSystemInstruction(model)).toContain(customPerspective);
+    expect(sentSystemInstruction(model)).not.toContain(
+      "You are reviewing an academic manuscript as a referee.",
+    );
+    expect(sentSystemInstruction(model)).not.toContain("report_finding");
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toEqual(["read_project_file", "search_zotero", "report_subject"]);
   });
 });

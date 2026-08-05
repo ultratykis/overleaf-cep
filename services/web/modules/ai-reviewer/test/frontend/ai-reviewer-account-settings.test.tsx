@@ -45,6 +45,8 @@ const gitPreview = {
   },
   manifestFound: false,
   plugins: [],
+  skippedPlugins: [],
+  truncated: false,
   skills: [
     {
       path: "SKILL.md",
@@ -113,8 +115,13 @@ describe("AI reviewer account settings", function () {
     render(<AiReviewerAccountSettingsDetails onHide={sinon.stub()} />);
 
     expect(await screen.findByText(connection.label)).to.exist;
+    const disabledReason =
+      "Connection tests are only available within a project.";
+    expect(screen.getByText(disabledReason)).to.exist;
     expect(
-      screen.getByRole("button", { name: `Test ${connection.label}` }),
+      screen.getByRole("button", {
+        name: `Test ${connection.label}. ${disabledReason}`,
+      }),
     ).to.have.property("disabled", true);
     fireEvent.click(screen.getByRole("tab", { name: "Skills" }));
     expect(await screen.findByText(skill.name)).to.exist;

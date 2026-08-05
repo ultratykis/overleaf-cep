@@ -4,6 +4,7 @@ import React from "react";
 
 import { AiReviewerDiscussionMessages } from "../../frontend/js/components/ai-reviewer-discussion-messages";
 import {
+  AI_REVIEWER_FINDING_MARKDOWN_CONTENT_LIMIT,
   AiReviewerExpandableMarkdown,
   AiReviewerMarkdown,
 } from "../../frontend/js/components/ai-reviewer-markdown";
@@ -26,6 +27,19 @@ describe("AI reviewer: model markdown", function () {
           "```",
           "",
           "[safe link](https://example.com/review)",
+          "",
+          "| Claim | Result |",
+          "| :--- | ---: |",
+          "| Alpha | **Supported** |",
+          "",
+          "~~superseded~~",
+          "",
+          "- [x] checked task",
+          "- [ ] open task",
+          "",
+          "Evidence note[^evidence].",
+          "",
+          "[^evidence]: Footnote detail.",
         ].join("\n")}
       />,
     );
@@ -52,6 +66,62 @@ describe("AI reviewer: model markdown", function () {
     expect(link?.getAttribute("href")).to.equal("https://example.com/review");
     expect(link?.getAttribute("target")).to.equal("_blank");
     expect(link?.getAttribute("rel")).to.equal("noreferrer noopener");
+    const table = container.querySelector("table");
+    expect(table?.querySelectorAll("thead th")).to.have.length(2);
+    expect(
+      table?.querySelector("tbody td:last-child strong")?.textContent,
+    ).to.equal("Supported");
+    expect(
+      table?.querySelector("th:first-child")?.getAttribute("align"),
+    ).to.equal("left");
+    expect(
+      table?.querySelector("th:last-child")?.getAttribute("align"),
+    ).to.equal("right");
+    expect(container.querySelector("del")?.textContent).to.equal("superseded");
+    const tasks = container.querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"]',
+    );
+    expect(tasks).to.have.length(2);
+    expect(tasks[0].checked).to.equal(true);
+    expect(tasks[0].disabled).to.equal(true);
+    expect(tasks[1].checked).to.equal(false);
+    const footnoteReference = container.querySelector<HTMLAnchorElement>(
+      "a[data-footnote-ref]",
+    );
+    const footnoteId = footnoteReference?.getAttribute("href")?.slice(1);
+    expect(footnoteId).to.match(/^ai-reviewer-.+-fn-evidence$/u);
+    expect(container.querySelector(`[id="${footnoteId}"]`)).not.to.equal(null);
+    expect(footnoteReference?.getAttribute("target")).to.equal(null);
+    const footnoteLabelId = footnoteReference?.getAttribute("aria-describedby");
+    const footnoteLabel = container.querySelector(`[id="${footnoteLabelId}"]`);
+    expect(footnoteLabel?.classList.contains("visually-hidden")).to.equal(true);
+    expect(footnoteLabel?.textContent).to.equal("Footnotes");
+    expect(
+      container.querySelector("section[data-footnotes] li")?.textContent,
+    ).to.contain("Footnote detail.");
+  });
+
+  it("namespaces every footnote id across adjacent markdown blocks", function () {
+    const { container } = render(
+      <>
+        <AiReviewerMarkdown content={"First[^1].\n\n[^1]: First note."} />
+        <AiReviewerMarkdown content={"Second[^1].\n\n[^1]: Second note."} />
+      </>,
+    );
+
+    const ids = Array.from(container.querySelectorAll<HTMLElement>("[id]"))
+      .map((element) => element.id)
+      .filter(Boolean);
+    expect(new Set(ids).size).to.equal(ids.length);
+    for (const link of container.querySelectorAll<HTMLAnchorElement>(
+      'a[href^="#"]',
+    )) {
+      expect(
+        container.querySelector(
+          `[id="${link.getAttribute("href")?.slice(1)}"]`,
+        ),
+      ).not.to.equal(null);
+    }
   });
 
   it("keeps raw HTML inert and removes a javascript link destination", function () {
@@ -89,13 +159,17 @@ describe("AI reviewer: model markdown", function () {
   });
 
   it("keeps show more and show less working on parsed markdown", function () {
+    const content = [
+      `> **Visible words continue** ${"bounded detail ".repeat(20)}`,
+      "",
+      "| Check | State |",
+      "| --- | --- |",
+      "| Markdown | rendered |",
+    ].join("\n");
     const { container } = render(
       <AiReviewerExpandableMarkdown
-        content={
-          "> **Visible words continue**\n\n- first\n- second\n\nMore details"
-        }
-        contentLimit={18}
-        checkNewLines={false}
+        content={content}
+        contentLimit={AI_REVIEWER_FINDING_MARKDOWN_CONTENT_LIMIT}
       />,
     );
 
@@ -103,14 +177,18 @@ describe("AI reviewer: model markdown", function () {
     const showMore = screen.getByRole("button", { name: "show more" });
     expect(collapsedQuote).not.to.equal(null);
     expect(collapsedQuote?.contains(showMore)).to.equal(false);
-    expect(container.querySelector("ul")).to.equal(null);
+    expect(collapsedQuote?.querySelector("strong")?.textContent).to.equal(
+      "Visible words continue",
+    );
+    expect(collapsedQuote?.textContent).not.to.contain("**");
+    expect(container.querySelector("table")).to.equal(null);
     fireEvent.click(showMore);
     expect(container.querySelector("strong")?.textContent).to.equal(
       "Visible words continue",
     );
-    expect(container.querySelectorAll("ul > li")).to.have.length(2);
+    expect(container.querySelectorAll("table tbody td")).to.have.length(2);
     fireEvent.click(screen.getByRole("button", { name: "show less" }));
-    expect(container.querySelector("ul")).to.equal(null);
+    expect(container.querySelector("table")).to.equal(null);
     expect(container.querySelector("blockquote")).not.to.equal(null);
   });
 });

@@ -86,13 +86,13 @@ COPY libraries/redis-wrapper/ /overleaf/libraries/redis-wrapper/
 COPY libraries/settings/ /overleaf/libraries/settings/
 COPY libraries/stream-utils/ /overleaf/libraries/stream-utils/
 COPY libraries/validation-tools/ /overleaf/libraries/validation-tools/
-COPY services/web/ /overleaf/services/web/
+COPY --chown=node:node services/web/ /overleaf/services/web/
 COPY tools/migrations/ /overleaf/tools/migrations/
 
 # Build the latex parser
 RUN cd /overleaf/services/web && yarn run 'lezer-latex:generate'
 
-# The module folders are owned as root. The node user cannot create them. Create them in advance.
+# Generate module Makefiles before the runtime drops root privileges.
 RUN cd /overleaf/services/web && make create_module_Makefiles
 
 USER node
@@ -126,7 +126,7 @@ COPY libraries/redis-wrapper/ /overleaf/libraries/redis-wrapper/
 COPY libraries/settings/ /overleaf/libraries/settings/
 COPY libraries/stream-utils/ /overleaf/libraries/stream-utils/
 COPY libraries/validation-tools/ /overleaf/libraries/validation-tools/
-COPY services/web/ /overleaf/services/web/
+COPY --chown=node:node services/web/ /overleaf/services/web/
 COPY tools/migrations/ /overleaf/tools/migrations/
 
 # Omit Server Pro/CE specific scripts from SaaS image

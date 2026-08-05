@@ -1,71 +1,92 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  DEFAULT_MODEL_CONTEXT_LENGTH,
-  deriveNativeModelContextLength,
   MAX_DETECTED_MODEL_CONTEXT_LENGTH,
+  MODEL_CONTEXT_LENGTH_FIELD_PATHS,
+  modelContextLengthFromFields,
   resolveModelContextLength,
 } from "../../../app/src/ModelContextLength.mjs";
 
 describe("AI reviewer model context length", function () {
-  it("derives the Gemini context length from an explicit text-model entry", async function () {
-    expect(deriveNativeModelContextLength("gemini", "gemini-2.5-pro")).toBe(
-      1_048_576,
-    );
+  it("keeps every supported model-list field path in one ordered table", function () {
+    expect(MODEL_CONTEXT_LENGTH_FIELD_PATHS).toEqual([
+      ["max_input_tokens"],
+      ["inputTokenLimit"],
+      ["max_model_len"],
+      ["max_context_length"],
+      ["n_ctx"],
+      ["context_window"],
+      ["context_length"],
+      ["metadata", "context_length"],
+      ["contextLength"],
+    ]);
+    expect(
+      modelContextLengthFromFields({
+        max_input_tokens: 200_000,
+        inputTokenLimit: 1_048_576,
+      }),
+    ).toBe(200_000);
+    expect(
+      modelContextLengthFromFields({
+        metadata: { context_length: 131_072 },
+      }),
+    ).toBe(131_072);
+  });
+
+  it.each([0, -1, 1.5, "32768", MAX_DETECTED_MODEL_CONTEXT_LENGTH + 1])(
+    "does not trust unusable model-list value %j",
+    function (detected) {
+      expect(modelContextLengthFromFields({ context_length: detected })).toBe(
+        null,
+      );
+    },
+  );
+
+  it("uses Gemini and Claude API metadata instead of model-name tables", async function () {
     expect(
       await resolveModelContextLength({
         provider: "gemini",
-        model: "models/gemini-2.5-pro",
-        contextLengthOverride: null,
+        model: "models/gemini-future",
+        detectedContextLength: 1_048_576,
       }),
     ).toEqual({
       contextLength: 1_048_576,
-      contextLengthSource: "derived",
+      contextLengthSource: "detected",
+    });
+    expect(
+      await resolveModelContextLength({
+        provider: "claude",
+        model: "claude-future",
+        detectedContextLength: 200_000,
+      }),
+    ).toEqual({
+      contextLength: 200_000,
+      contextLengthSource: "detected",
     });
   });
 
-  it("derives the Claude context length from its known model family", async function () {
+  it("keeps even a formerly built-in native model unknown without API metadata", async function () {
     expect(
-      deriveNativeModelContextLength("claude", "claude-sonnet-4-20250514"),
-    ).toBe(200_000);
+      await resolveModelContextLength({
+        provider: "gemini",
+        model: "gemini-2.5-pro",
+      }),
+    ).toEqual({
+      contextLength: null,
+      contextLengthSource: "unknown",
+    });
     expect(
       await resolveModelContextLength({
         provider: "claude",
         model: "claude-sonnet-4-20250514",
-        contextLengthOverride: null,
       }),
     ).toEqual({
-      contextLength: 200_000,
-      contextLengthSource: "derived",
+      contextLength: null,
+      contextLengthSource: "unknown",
     });
   });
 
-  it("does not overstate a specialised Gemini model through a broad prefix", async function () {
-    expect(
-      await resolveModelContextLength({
-        provider: "gemini",
-        model: "gemini-2.5-pro-preview-tts",
-        contextLengthOverride: null,
-      }),
-    ).toEqual({
-      contextLength: DEFAULT_MODEL_CONTEXT_LENGTH,
-      contextLengthSource: "default",
-    });
-  });
-
-  it("uses the conservative default for an unknown Claude model", async function () {
-    expect(
-      await resolveModelContextLength({
-        provider: "claude",
-        model: "claude-unknown-future-model",
-      }),
-    ).toEqual({
-      contextLength: 4_096,
-      contextLengthSource: "default",
-    });
-  });
-
-  it("uses a valid OpenAI-compatible detection result", async function () {
+  it("prefers an OpenAI-compatible runtime allocation to its list value", async function () {
     const detectOpenAiCompatibleContextLength = vi.fn(async () => 32_768);
     const input = {
       provider: "openai-compatible",
@@ -73,6 +94,7 @@ describe("AI reviewer model context length", function () {
       model: "hosted/reviewer",
       credential: "PRIVATE_CONTEXT_DETECTION_CREDENTIAL",
       contextLengthOverride: null,
+      detectedContextLength: 131_072,
     };
 
     expect(
@@ -92,14 +114,14 @@ describe("AI reviewer model context length", function () {
     );
   });
 
-  it("falls back when OpenAI-compatible detection fails", async function () {
+  it("falls back to the compatible model-list value when allocation discovery fails", async function () {
     expect(
       await resolveModelContextLength(
         {
           provider: "openai-compatible",
-          baseUrl: "http://127.0.0.1:11434/v1",
-          model: "qwen3.5:4b",
-          contextLengthOverride: null,
+          baseUrl: "http://127.0.0.1:8000/v1",
+          model: "reviewer",
+          detectedContextLength: 65_536,
         },
         {
           detectOpenAiCompatibleContextLength: vi.fn(async () => {
@@ -108,31 +130,26 @@ describe("AI reviewer model context length", function () {
         },
       ),
     ).toEqual({
-      contextLength: DEFAULT_MODEL_CONTEXT_LENGTH,
-      contextLengthSource: "default",
+      contextLength: 65_536,
+      contextLengthSource: "detected",
     });
   });
 
-  it.each([0, -1, 1.5, "32768", MAX_DETECTED_MODEL_CONTEXT_LENGTH + 1])(
-    "falls back instead of trusting unusable detection value %j",
-    async function (detected) {
-      expect(
-        await resolveModelContextLength(
-          {
-            provider: "openai-compatible",
-            baseUrl: "http://127.0.0.1:11434/v1",
-            model: "qwen3.5:4b",
-          },
-          {
-            detectOpenAiCompatibleContextLength: vi.fn(async () => detected),
-          },
-        ),
-      ).toEqual({
-        contextLength: DEFAULT_MODEL_CONTEXT_LENGTH,
-        contextLengthSource: "default",
-      });
-    },
-  );
+  it("keeps a compatible model unknown when neither source returns a value", async function () {
+    expect(
+      await resolveModelContextLength(
+        {
+          provider: "openai-compatible",
+          baseUrl: "http://127.0.0.1:8000/v1",
+          model: "reviewer",
+        },
+        { detectOpenAiCompatibleContextLength: vi.fn(async () => null) },
+      ),
+    ).toEqual({
+      contextLength: null,
+      contextLengthSource: "unknown",
+    });
+  });
 
   it("uses the advanced override without contacting the endpoint", async function () {
     const detectOpenAiCompatibleContextLength = vi.fn();

@@ -4,7 +4,10 @@ import fs from "node:fs";
 import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
-import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import {
+  AgentGatewayAbortError,
+  AgentGatewayError,
+} from "../../../app/src/AgentGateway.mjs";
 import {
   parseAiReviewerConnection,
   parseAiReviewerConnectionUpdate,
@@ -47,6 +50,7 @@ const geminiModel = "gemini-2.5-pro";
 const claudeModel = "claude-sonnet-4-20250514";
 const azureResource = "reviewer-resource";
 const azureBaseUrl = `https://${azureResource}.openai.azure.com/openai`;
+const plaintextAzureBaseUrl = "http://host.docker.internal:11434/openai";
 const azureApiVersion = "2025-01-01-preview";
 const azureDeployment = "gpt-5.6-terra";
 const azurePortalEndpoint = `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
@@ -88,6 +92,7 @@ const geminiConfiguration = Object.freeze({
   provider: "gemini",
   model: geminiModel,
   contextLength,
+  contextLengthSource: "detected",
   credential,
   credentialUpdatedAt,
 });
@@ -95,6 +100,7 @@ const claudeConfiguration = Object.freeze({
   provider: "claude",
   model: claudeModel,
   contextLength,
+  contextLengthSource: "detected",
   credential,
   credentialUpdatedAt,
 });
@@ -532,6 +538,10 @@ function providerControllerFixture({
     listModels: vi.fn(async () => [
       { id: model, displayName: "Configured model" },
     ]),
+    contextLengthForModelList: vi.fn(() => ({
+      contextLength,
+      contextLengthSource: "override",
+    })),
     resolveContextLength: vi.fn(async () => ({
       contextLength,
       contextLengthSource: "override",
@@ -624,6 +634,7 @@ describe("AI reviewer provider configuration", function () {
         requestStyle: "deployment",
         apiVersion: azureApiVersion,
         deployments: [azureDeployment],
+        contextLengthOverrides: [],
         contextLengthOverride: null,
         credentialSet: true,
         credentialUpdatedAt: null,
@@ -659,6 +670,38 @@ describe("AI reviewer provider configuration", function () {
     });
   });
 
+  it("binds each Azure context override to one configured deployment", function () {
+    expect(
+      parseAiReviewerConnectionUpdate({
+        ...azureConnectionWrite,
+        deployments: [azureDeployment, "reviewer-secondary"],
+        contextLengthOverrides: [
+          { model: azureDeployment, contextLength: 400_000 },
+          { model: "reviewer-secondary", contextLength: 128_000 },
+        ],
+      }),
+    ).toMatchObject({
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+        { model: "reviewer-secondary", contextLength: 128_000 },
+      ],
+    });
+    expect(() =>
+      parseAiReviewerConnectionUpdate({
+        ...azureConnectionWrite,
+        contextLengthOverrides: [
+          { model: "not-configured", contextLength: 128_000 },
+        ],
+      }),
+    ).toThrow(/configured deployments/u);
+    expect(() =>
+      parseAiReviewerConnectionUpdate({
+        ...connectionWrite,
+        contextLengthOverrides: [],
+      }),
+    ).toThrow(/only for Azure/u);
+  });
+
   it("keeps an unchosen Azure API version absent but rejects it on other kinds", function () {
     const blankVersion = parseAiReviewerConnectionUpdate(
       blankAzureConnectionWrite,
@@ -689,8 +732,12 @@ describe("AI reviewer provider configuration", function () {
         provider: "gemini",
         model: "models/gemini-3.5-flash",
         contextLength: 8_192,
-      }).model,
-    ).toBe("gemini-3.5-flash");
+        contextLengthSource: "detected",
+      }),
+    ).toMatchObject({
+      model: "gemini-3.5-flash",
+      contextLengthSource: "detected",
+    });
   });
 
   it("keeps the AI reviewer locale and extracted message key sets aligned", function () {
@@ -1117,7 +1164,12 @@ describe("AI reviewer provider configuration", function () {
       now: () => credentialUpdatedAt,
     });
 
-    const created = await store.create(userId, azureConnectionWrite);
+    const created = await store.create(userId, {
+      ...azureConnectionWrite,
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+      ],
+    });
     expect(await store.get(userId)).toEqual({
       id: created.id,
       provider: "azure",
@@ -1125,6 +1177,9 @@ describe("AI reviewer provider configuration", function () {
       requestStyle: "deployment",
       apiVersion: azureApiVersion,
       deployments: [azureDeployment],
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+      ],
       label: `${azureResource}.openai.azure.com`,
       credential,
       credentialUpdatedAt,
@@ -1140,6 +1195,9 @@ describe("AI reviewer provider configuration", function () {
       requestStyle: "deployment",
       apiVersion: azureApiVersion,
       deployments: [azureDeployment],
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+      ],
       credentialEncrypted: "ciphertext-1",
     });
 
@@ -1152,6 +1210,10 @@ describe("AI reviewer provider configuration", function () {
         requestStyle: "deployment",
         apiVersion: "2025-04-01-preview",
         deployments: [azureDeployment, "reviewer-secondary"],
+        contextLengthOverrides: [
+          { model: azureDeployment, contextLength: 400_000 },
+          { model: "reviewer-secondary", contextLength: 128_000 },
+        ],
       },
       created.revision,
     );
@@ -1159,6 +1221,10 @@ describe("AI reviewer provider configuration", function () {
       requestStyle: "deployment",
       apiVersion: "2025-04-01-preview",
       deployments: [azureDeployment, "reviewer-secondary"],
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+        { model: "reviewer-secondary", contextLength: 128_000 },
+      ],
       credential,
       credentialUpdatedAt,
     });
@@ -1172,6 +1238,9 @@ describe("AI reviewer provider configuration", function () {
         baseUrl: azureBaseUrl,
         requestStyle: "v1",
         deployments: [azureDeployment],
+        contextLengthOverrides: [
+          { model: azureDeployment, contextLength: 400_000 },
+        ],
       },
       deploymentSaved.revision,
     );
@@ -1179,6 +1248,9 @@ describe("AI reviewer provider configuration", function () {
     expect(v1Connection).toMatchObject({
       requestStyle: "v1",
       deployments: [azureDeployment],
+      contextLengthOverrides: [
+        { model: azureDeployment, contextLength: 400_000 },
+      ],
       credential,
       credentialUpdatedAt,
     });
@@ -1690,32 +1762,66 @@ describe("AI reviewer provider configuration", function () {
     );
   });
 
+  it("blocks an Azure HTTP credential before the connection-test transport is built", async function () {
+    const azureTransportFactory = vi.fn();
+    const service = createAiReviewerProviderService({ azureTransportFactory });
+
+    expect(
+      await captureError(
+        service.testConnection({
+          ...azureConnectionWrite,
+          baseUrl: plaintextAzureBaseUrl,
+        }),
+      ),
+    ).toMatchObject({
+      code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(azureTransportFactory).not.toHaveBeenCalled();
+  });
+
   it("resolves a context length from the connection and the selected model", async function () {
     const signal = new AbortController().signal;
     const contextLengthDetector = vi.fn(async () => 32_768);
+    let now = 1_000;
     const service = createAiReviewerProviderService({
       contextLengthDetector,
       contextLengthDetectionSignalFactory: () => signal,
+      modelNow: () => now,
     });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
 
-    expect(
-      await service.resolveContextLength(
-        {
-          provider: "openai-compatible",
-          baseUrl: remoteBaseUrl,
-          credential,
-        },
-        remoteModel,
-      ),
-    ).toEqual({
-      contextLength: 32_768,
-      contextLengthSource: "detected",
+    expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
+      contextLength: null,
+      contextLengthSource: "unknown",
     });
+    expect(contextLengthDetector).not.toHaveBeenCalled();
+
+    expect(await service.resolveContextLength(connection, remoteModel)).toEqual(
+      {
+        contextLength: 32_768,
+        contextLengthSource: "detected",
+      },
+    );
     expect(contextLengthDetector).toHaveBeenCalledExactlyOnceWith({
       baseUrl: remoteBaseUrl,
       model: remoteModel,
       credential,
       signal,
+    });
+    expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+    });
+    now += 60_001;
+    expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
+      contextLength: null,
+      contextLengthSource: "unknown",
     });
 
     // The connection's escape hatch wins over anything the endpoint says.
@@ -1735,15 +1841,69 @@ describe("AI reviewer provider configuration", function () {
     });
     expect(contextLengthDetector).toHaveBeenCalledOnce();
 
-    // Azure exposes no data-plane context metadata. Keep its user-named
-    // deployment on the conservative default without probing for a model name.
+    // Azure exposes no data-plane context metadata, so a deployment stays
+    // unknown until its exact user-named override is present.
     expect(
       await service.resolveContextLength(azureConnectionWrite, azureDeployment),
     ).toEqual({
-      contextLength: 4_096,
-      contextLengthSource: "default",
+      contextLength: null,
+      contextLengthSource: "unknown",
     });
     expect(contextLengthDetector).toHaveBeenCalledOnce();
+    expect(
+      await service.resolveContextLength(
+        {
+          ...azureConnectionWrite,
+          deployments: [azureDeployment, "reviewer-secondary"],
+          contextLengthOverrides: [
+            { model: azureDeployment, contextLength: 400_000 },
+            { model: "reviewer-secondary", contextLength: 128_000 },
+          ],
+        },
+        "reviewer-secondary",
+      ),
+    ).toEqual({
+      contextLength: 128_000,
+      contextLengthSource: "override",
+    });
+  });
+
+  it("passes caller cancellation through selected-model context discovery", async function () {
+    const caller = new AbortController();
+    const contextLengthDetector = vi.fn(
+      ({ signal }) =>
+        new Promise((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const service = createAiReviewerProviderService({
+      contextLengthDetector,
+      contextLengthDetectionSignalFactory: () => AbortSignal.timeout(60_000),
+    });
+    const captured = captureError(
+      service.resolveContextLength(
+        {
+          provider: "openai-compatible",
+          baseUrl: remoteBaseUrl,
+          credential,
+        },
+        remoteModel,
+        { signal: caller.signal, cacheKey: `${userId}\u0000context` },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(contextLengthDetector).toHaveBeenCalledOnce(),
+    );
+
+    caller.abort(new AgentGatewayAbortError());
+
+    expect(await captured).toMatchObject({
+      code: "AI_REQUEST_ABORTED",
+      category: "aborted",
+    });
+    expect(contextLengthDetector.mock.calls[0][0].signal.aborted).toBe(true);
   });
 
   it("passes the credential only into transport construction", async function () {
@@ -1864,9 +2024,13 @@ describe("AI reviewer provider configuration", function () {
       expectedUrl: `${remoteBaseUrl}/models`,
       expectedHeader: ["authorization", `Bearer ${credential}`],
       payload: {
-        data: [{ id: remoteModel }, { id: "text-embedding-3-small" }],
+        data: [
+          { id: remoteModel, context_window: 131_072 },
+          { id: "text-embedding-3-small" },
+        ],
       },
       expected: [{ id: remoteModel, displayName: remoteModel }],
+      expectedContextLength: 131_072,
     },
     {
       config: { provider: "gemini", credential },
@@ -1877,6 +2041,7 @@ describe("AI reviewer provider configuration", function () {
           {
             name: `models/${geminiModel}`,
             displayName: "Gemini 2.5 Pro",
+            inputTokenLimit: 1_048_576,
             supportedGenerationMethods: ["generateContent"],
           },
           {
@@ -1886,6 +2051,7 @@ describe("AI reviewer provider configuration", function () {
         ],
       },
       expected: [{ id: geminiModel, displayName: "Gemini 2.5 Pro" }],
+      expectedContextLength: 1_048_576,
     },
     {
       config: { provider: "claude", credential },
@@ -1897,11 +2063,13 @@ describe("AI reviewer provider configuration", function () {
             type: "model",
             id: claudeModel,
             display_name: "Claude Sonnet 4",
+            max_input_tokens: 200_000,
           },
           { type: "model", id: "claude-embedding-v1" },
         ],
       },
       expected: [{ id: claudeModel, displayName: "Claude Sonnet 4" }],
+      expectedContextLength: 200_000,
     },
   ])(
     "discovers, filters, and caches $config.provider models through guarded fetch",
@@ -1911,6 +2079,7 @@ describe("AI reviewer provider configuration", function () {
       expectedHeader,
       payload,
       expected,
+      expectedContextLength,
     }) {
       const modelFetchImpl = vi.fn(async (input, init) => {
         expect(String(input)).toBe(expectedUrl);
@@ -1932,6 +2101,14 @@ describe("AI reviewer provider configuration", function () {
       expect(await service.listModels(config, { cacheKey: userId })).toEqual(
         expected,
       );
+      expect(
+        service.contextLengthForModelList(config, expected[0].id, {
+          cacheKey: userId,
+        }),
+      ).toEqual({
+        contextLength: expectedContextLength,
+        contextLengthSource: "detected",
+      });
       expect(modelFetchImpl).toHaveBeenCalledOnce();
       expect(await service.listModels(config, { cacheKey: userId })).toEqual(
         expected,
@@ -1942,6 +2119,97 @@ describe("AI reviewer provider configuration", function () {
       );
     },
   );
+
+  it("blocks an HTTP model-list credential before cache lookup or fetch", async function () {
+    const modelFetchImpl = vi.fn();
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+    const plaintextConnection = {
+      id: storedConnectionId,
+      provider: "openai-compatible",
+      baseUrl,
+      label: "localhost:11434",
+      credential,
+    };
+
+    const error = await captureError(
+      service.listModels(plaintextConnection, { cacheKey: userId }),
+    );
+    expect(error).toMatchObject({
+      code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(modelFetchImpl).not.toHaveBeenCalled();
+
+    const controller = createAiReviewerProviderController({
+      configStore: { getAll: vi.fn(async () => [plaintextConnection]) },
+      providerService: service,
+    });
+    const response = new FakeResponse();
+    await controller.listModels(httpRequest(), response);
+    expect(response.body).toEqual({
+      models: [],
+      failures: [
+        {
+          connectionId: storedConnectionId,
+          connectionLabel: "localhost:11434",
+          code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+          category: "configuration",
+        },
+      ],
+    });
+    expect(modelFetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("blocks an Azure HTTP credential before returning its entered deployments", async function () {
+    const modelFetchImpl = vi.fn();
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+
+    expect(
+      await captureError(
+        service.listModels({
+          ...azureConnectionWrite,
+          baseUrl: plaintextAzureBaseUrl,
+        }),
+      ),
+    ).toMatchObject({
+      code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(modelFetchImpl).not.toHaveBeenCalled();
+  });
+
+  // The cache exists so opening the model list stops probing. Scope is the
+  // other half of that bargain: one user's detected value must never answer
+  // another user's request, even for an identically shaped connection.
+  it("keeps the context length cache scoped to the requesting user", async function () {
+    const contextLengthDetector = vi.fn(async () => 262_144);
+    const service = createAiReviewerProviderService({ contextLengthDetector });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    const first = await service.resolveContextLength(connection, remoteModel, {
+      cacheKey: "user-aaaaaaaaaaaaaaaaaaaaaaaa\u0000connection-0001",
+    });
+    expect(first.contextLength).to.equal(262_144);
+    expect(contextLengthDetector).toHaveBeenCalledOnce();
+
+    // Same user, same connection: served from the cache.
+    await service.resolveContextLength(connection, remoteModel, {
+      cacheKey: "user-aaaaaaaaaaaaaaaaaaaaaaaa\u0000connection-0001",
+    });
+    expect(contextLengthDetector).toHaveBeenCalledOnce();
+
+    // Different user: must resolve on its own credentials, not reuse the entry.
+    await service.resolveContextLength(connection, remoteModel, {
+      cacheKey: "user-bbbbbbbbbbbbbbbbbbbbbbbb\u0000connection-0001",
+    });
+    expect(contextLengthDetector).toHaveBeenCalledTimes(2);
+  });
 
   it("uses user-entered Azure deployment names instead of fabricating a model catalogue", async function () {
     const modelFetchImpl = vi.fn();
@@ -1976,6 +2244,14 @@ describe("AI reviewer provider configuration", function () {
               { name: "bge-m3:latest", capabilities: ["embedding"] },
               { name: "plain:latest", capabilities: ["completion"] },
             ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (String(input).endsWith("/api/ps")) {
+        return new Response(
+          JSON.stringify({
+            models: [{ name: "qwen3.5:4b", context_length: 4_096 }],
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -2017,10 +2293,50 @@ describe("AI reviewer provider configuration", function () {
         baseUrl: "http://127.0.0.1:11434/v1",
       }),
     ).toEqual([{ id: "qwen3.5:4b", displayName: "qwen3.5:4b" }]);
+    expect(
+      service.contextLengthForModelList(
+        {
+          provider: "openai-compatible",
+          baseUrl: "http://127.0.0.1:11434/v1",
+        },
+        "qwen3.5:4b",
+      ),
+    ).toEqual({ contextLength: 4_096, contextLengthSource: "detected" });
     expect(requests).toEqual([
       "http://127.0.0.1:11434/v1/models",
       "http://127.0.0.1:11434/api/tags",
+      "http://127.0.0.1:11434/api/ps",
     ]);
+  });
+
+  it("removes known non-review model families while retaining unknown generation models", async function () {
+    const modelFetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              { id: "lyria-3", name: "Lyria 3" },
+              { id: "nano-banana-pro", name: "Nano Banana Pro" },
+              { id: "nano-banana-pro-preview", name: "Nano Banana Pro" },
+              { id: "robotics-er-1.5", name: "Robotics-ER" },
+              { id: "computer-use-preview", name: "Computer Use" },
+              { id: "tts-1", name: "TTS" },
+              { id: "deep-research-pro", name: "Deep Research" },
+              { id: "future-reviewer-1", name: "Future Reviewer" },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+
+    expect(
+      await service.listModels({
+        provider: "openai-compatible",
+        baseUrl: "https://models.example.com/v1",
+        credential,
+      }),
+    ).toEqual([{ id: "future-reviewer-1", displayName: "Future Reviewer" }]);
   });
 
   it("uses only /v1/models for a compatible endpoint without Ollama markers", async function () {
@@ -2110,8 +2426,13 @@ describe("AI reviewer provider configuration", function () {
       },
     );
     expect(
+      available.providerService.contextLengthForModelList,
+    ).toHaveBeenCalledExactlyOnceWith({ ...otherConnection, baseUrl }, model, {
+      cacheKey: `${userId}\u0000${storedConnectionId}`,
+    });
+    expect(
       available.providerService.resolveContextLength,
-    ).toHaveBeenCalledExactlyOnceWith({ ...otherConnection, baseUrl }, model);
+    ).not.toHaveBeenCalled();
     expect(response.body).toEqual({
       models: [
         {
@@ -2720,6 +3041,7 @@ describe("AI reviewer provider configuration", function () {
       contextLength,
       contextLengthSource: "override",
       skills: [],
+      modeInstructions: {},
       readProjectFile,
       projectContext: undefined,
       searchZotero: undefined,
@@ -3181,7 +3503,7 @@ Cite \cite{missing}`;
       ]),
       resolveContextLength: vi.fn(async () => ({
         contextLength: 4_096,
-        contextLengthSource: "default",
+        contextLengthSource: "detected",
       })),
       createAgentGateway: vi.fn(() => {
         throw new Error("The provider must not be reached.");
@@ -3217,7 +3539,7 @@ Cite \cite{missing}`;
           message: "The request does not fit the selected model context.",
           retryable: false,
           contextLength: 4_096,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
       },
     ]);
@@ -3251,7 +3573,7 @@ Cite \cite{missing}`;
       ]),
       resolveContextLength: vi.fn(async () => ({
         contextLength: selectedContextLength,
-        contextLengthSource: "default",
+        contextLengthSource: "detected",
       })),
       createAgentGateway: vi.fn(() => ({
         async *stream() {
@@ -3283,6 +3605,10 @@ Cite \cite{missing}`;
     expect(providerService.resolveContextLength).toHaveBeenCalledWith(
       otherConnection,
       selectedModel,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${storedConnectionId}`,
+      }),
     );
     expect(requestScopeReader.read).toHaveBeenCalledWith(
       expect.anything(),
@@ -3296,6 +3622,43 @@ Cite \cite{missing}`;
       }),
       expect.anything(),
     );
+  });
+
+  it("refuses an unknown context length before every shared budget path", async function () {
+    const providerService = {
+      listModels: vi.fn(async () => [
+        { id: otherModel, displayName: otherModel },
+      ]),
+      resolveContextLength: vi.fn(async () => ({
+        contextLength: null,
+        contextLengthSource: "unknown",
+      })),
+      createAgentGateway: vi.fn(),
+    };
+    const requestScopeReader = { read: vi.fn() };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConnection) },
+      providerService,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "event-context-unknown",
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(parseNdjson(response)[0].error).toEqual({
+      code: "AI_MODEL_CONTEXT_UNKNOWN",
+      category: "configuration",
+      message:
+        "The selected model context length is unknown. For Ollama, load the model first or set it in Connection settings, then run the review again.",
+      retryable: false,
+    });
+    expect(requestScopeReader.read).not.toHaveBeenCalled();
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
   });
 
   it("rejects an unlisted run model without exposing private provider data", async function () {

@@ -15,6 +15,8 @@ import {
   streamAgentEvents,
 } from "../../frontend/js/services/agent-stream";
 import type { AiProviderConnection } from "../../frontend/js/services/ai-provider-configuration";
+import type { AiReviewerModeInstructionPersistence } from "../../frontend/js/services/ai-reviewer-mode-instructions";
+import { AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH } from "../../shared/contracts.mjs";
 
 type StreamCall = Parameters<typeof streamAgentEvents>[0];
 
@@ -70,7 +72,7 @@ const categoryFailureGuidance = {
 const projectContentFailureGuidance =
   "AI Reviewer could not read the required project content. Check that the project files are available, then try again.";
 const modelContextTooSmallGuidance =
-  "The request does not fit this model's context length (4,096 tokens; default because the model value could not be determined). Narrow the scope, choose a model with a larger context length, or set the context length in Connection settings.";
+  "The request does not fit this model's context length (4,096 tokens; provider-detected value). Narrow the scope, choose a model with a larger context length, or set the context length in Connection settings.";
 const streamFailureGuidance =
   "AI Reviewer could not complete the request or read its response. Check your network connection and AI Reviewer settings, then try again.";
 const requestFailureGuidance =
@@ -79,6 +81,8 @@ const afterTerminalFailureGuidance =
   "AI Reviewer received data after completion. Try the review again; if it keeps happening, switch models or check the AI Reviewer settings.";
 const concurrencyFailureGuidance =
   "An AI review is already running. Wait for it to finish, then try again.";
+const plaintextCredentialFailureGuidance =
+  "API key blocked. Use HTTPS or recreate without a key.";
 const codeFailureGuidance: Partial<Record<string, string>> = {
   AI_PROJECT_CONTENT_NOT_AVAILABLE: projectContentFailureGuidance,
   AI_STREAM_NETWORK_ERROR: streamFailureGuidance,
@@ -91,6 +95,7 @@ const codeFailureGuidance: Partial<Record<string, string>> = {
   AI_DISCUSSION_REQUEST_INVALID: requestFailureGuidance,
   AI_STREAM_AFTER_TERMINAL: afterTerminalFailureGuidance,
   AI_REVIEWER_CONCURRENCY_LIMITED: concurrencyFailureGuidance,
+  AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED: plaintextCredentialFailureGuidance,
 };
 const emittedFailureGuidanceCases = [
   { code: "AI_REQUEST_ABORTED", category: "aborted", retryable: false },
@@ -101,6 +106,11 @@ const emittedFailureGuidanceCases = [
   },
   {
     code: "AI_PROVIDER_NOT_CONFIGURED",
+    category: "configuration",
+    retryable: false,
+  },
+  {
+    code: "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
     category: "configuration",
     retryable: false,
   },
@@ -220,11 +230,7 @@ function catalogModel(
   id: string,
   displayName: string,
   contextLength = 4_096,
-  contextLengthSource:
-    | "derived"
-    | "detected"
-    | "default"
-    | "override" = "default",
+  contextLengthSource: "detected" | "override" | "unknown" = "detected",
 ) {
   return {
     id,
@@ -413,7 +419,7 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
     fireEvent.click(
       screen.getByRole("menuitem", {
-        name: `Alternate reviewer (${localConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
+        name: `Alternate reviewer (${localConnection.label}) · 4,096 tokens · provider-detected value`,
       }),
     );
     runSelectionReview();
@@ -467,15 +473,15 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
     // The same model id from two connections stays two distinguishable options.
     expect(modelOptions()).to.deep.equal([
-      `Shared model (${localConnection.label})· 4,096 tokens · default`,
-      `Shared model (${claudeConnection.label})· 4,096 tokens · default`,
-      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · default`,
+      `Shared model — shared-model (${localConnection.label})· 4,096 tokens · detected`,
+      `Shared model — shared-model (${claudeConnection.label})· 4,096 tokens · detected`,
+      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · detected`,
     ]);
     expect(loadProviderModels.firstCall.args[0]).to.equal(projectId);
 
     fireEvent.click(
       screen.getAllByRole("menuitem", {
-        name: `Shared model (${claudeConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
+        name: `Shared model — shared-model (${claudeConnection.label}) · 4,096 tokens · provider-detected value`,
       })[0],
     );
     runSelectionReview();
@@ -487,7 +493,7 @@ describe("AI reviewer: panel layout", function () {
     });
   });
 
-  it("portals both header menus outside the clipped panel", async function () {
+  it("portals all three menus outside the clipped panel with the editor theme boundary", async function () {
     renderPanel({
       loadProviderConnections: sinon
         .stub()
@@ -506,12 +512,25 @@ describe("AI reviewer: panel layout", function () {
     expect(modelMenu).not.to.equal(null);
     expect(panel.contains(modelMenu)).to.equal(false);
     expect(modelMenu?.parentElement).to.equal(document.body);
+    expect(modelMenu?.classList.contains("ide-redesign-main")).to.equal(true);
 
     fireEvent.click(
       screen.getByRole("menuitem", {
-        name: `Portal model (${localConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
+        name: `Portal model (${localConnection.label}) · 4,096 tokens · provider-detected value`,
       }),
     );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Selected mode — Freeform" }),
+    );
+    const modeMenu = document.querySelector<HTMLElement>(
+      ".ai-reviewer-panel-mode-menu",
+    );
+    expect(modeMenu).not.to.equal(null);
+    expect(panel.contains(modeMenu)).to.equal(false);
+    expect(modeMenu?.parentElement).to.equal(document.body);
+    expect(modeMenu?.classList.contains("ide-redesign-main")).to.equal(true);
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Freeform" }));
     fireEvent.click(screen.getByRole("button", { name: "More options" }));
     const overflowMenu = document.querySelector<HTMLElement>(
       ".ai-reviewer-panel-overflow-menu",
@@ -519,6 +538,9 @@ describe("AI reviewer: panel layout", function () {
     expect(overflowMenu).not.to.equal(null);
     expect(panel.contains(overflowMenu)).to.equal(false);
     expect(overflowMenu?.parentElement).to.equal(document.body);
+    expect(overflowMenu?.classList.contains("ide-redesign-main")).to.equal(
+      true,
+    );
   });
 
   it("keeps a reachable connection's models when another one fails", async function () {
@@ -547,7 +569,7 @@ describe("AI reviewer: panel layout", function () {
 
     await openModelChip();
     expect(modelOptions()).to.deep.equal([
-      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · default`,
+      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · detected`,
     ]);
     const failures = screen.getByTestId("ai-reviewer-model-failures");
     expect(failures.textContent).to.equal(
@@ -657,6 +679,28 @@ describe("AI reviewer: panel layout", function () {
     expect(within(run).getByRole("heading", { name: "No subject" })).to.exist;
   });
 
+  it("shows when a completed review did not call the offered finding tool", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-no-structured-findings-completed",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+        findingToolNotCalled: true,
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+
+    expect(
+      within(run).getByText("This model did not return structured findings."),
+    ).to.exist;
+  });
+
   it("keeps reset out of the main flow and requires confirmation", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       emitCompletedReview(call);
@@ -688,6 +732,67 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.getByText(emptyState)).to.exist;
   });
 
+  it("edits each project perspective separately and resets one to built-in", async function () {
+    const persistence: AiReviewerModeInstructionPersistence = {
+      load: sinon.stub().resolves({
+        revision: 7,
+        instructions: {
+          "referee-review": "Check causal claims.",
+          brainstorm: "Generate competing explanations.",
+        },
+      }),
+      save: sinon.stub().resolves({
+        revision: 8,
+        instructions: { brainstorm: "Compare two concrete framings." },
+      }),
+    };
+    renderPanel({
+      modeInstructionPersistence: persistence,
+      loadProviderConnections: sinon.stub().resolves({ connections: [] }),
+      loadProviderModels: sinon.stub().resolves({ models: [], failures: [] }),
+    });
+
+    await waitFor(() => {
+      expect(persistence.load).to.have.been.calledWith(
+        projectId,
+        sinon.match.has("aborted", false),
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Review perspectives" }),
+    );
+
+    const review = screen.getByRole("textbox", { name: "Review mode" });
+    const brainstorm = screen.getByRole("textbox", {
+      name: "Brainstorm mode",
+    });
+    expect(review).to.have.property("value", "Check causal claims.");
+    expect(brainstorm).to.have.property(
+      "value",
+      "Generate competing explanations.",
+    );
+    expect(review).to.have.property(
+      "maxLength",
+      AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Use built-in" })[0]);
+    fireEvent.change(brainstorm, {
+      target: { value: "Compare two concrete framings." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(persistence.save).to.have.been.calledWith(
+        projectId,
+        { brainstorm: "Compare two concrete framings." },
+        7,
+        sinon.match.has("aborted", false),
+      );
+    });
+  });
+
   for (const failure of emittedFailureGuidanceCases) {
     it(`shows actionable guidance for ${failure.category}:${failure.code} without matching message prose`, async function () {
       const boundedMessage = `Unrelated bounded wording for ${failure.code}.`;
@@ -714,7 +819,7 @@ describe("AI reviewer: panel layout", function () {
     });
   }
 
-  it("shows the context value, fallback source, and settings link when the model budget is too small", async function () {
+  it("shows the context value, source, and settings link when the model budget is too small", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       call.onEvent({
         type: "error",
@@ -728,7 +833,7 @@ describe("AI reviewer: panel layout", function () {
           message: "Bounded server wording that the panel must not display.",
           retryable: false,
           contextLength: 4_096,
-          contextLengthSource: "default",
+          contextLengthSource: "detected",
         },
       });
     });
@@ -738,6 +843,30 @@ describe("AI reviewer: panel layout", function () {
     const alert = await screen.findByRole("alert");
 
     expect(alert.textContent).to.include(modelContextTooSmallGuidance);
+    expect(
+      within(alert).getByRole("button", { name: "Open connection settings" }),
+    ).to.exist;
+  });
+
+  it("explains where to set an unknown context length without showing server prose", async function () {
+    const serverMessage = "PRIVATE_UNKNOWN_CONTEXT_SERVER_WORDING";
+    const streamRequest = sinon.stub().rejects(
+      new AgentStreamError({
+        code: "AI_MODEL_CONTEXT_UNKNOWN",
+        category: "configuration",
+        message: serverMessage,
+        retryable: false,
+      }),
+    );
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+    const alert = await screen.findByRole("alert");
+
+    expect(alert.textContent).to.include(
+      "For Ollama, load the model first or set its context length in Connection settings, then run the review again.",
+    );
+    expect(alert.textContent).not.to.include(serverMessage);
     expect(
       within(alert).getByRole("button", { name: "Open connection settings" }),
     ).to.exist;

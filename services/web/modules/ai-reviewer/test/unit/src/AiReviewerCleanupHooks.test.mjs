@@ -10,6 +10,8 @@ describe("AI reviewer cleanup hooks", function () {
     const deleteWorkspaceUser = vi.fn();
     const deleteProvenanceProject = vi.fn();
     const deleteSkillsUser = vi.fn();
+    const deleteModeInstructionsProject = vi.fn();
+    const deleteModeInstructionsUser = vi.fn();
     const createAiReviewerWorkspaceStore = vi.fn(() => ({
       deleteProject: deleteWorkspaceProject,
       deleteUser: deleteWorkspaceUser,
@@ -33,6 +35,12 @@ describe("AI reviewer cleanup hooks", function () {
         deleteUser: deleteSkillsUser,
       })),
     }));
+    vi.doMock("../../../app/src/AiReviewerModeInstructionStore.mjs", () => ({
+      createAiReviewerModeInstructionStore: vi.fn(() => ({
+        deleteProject: deleteModeInstructionsProject,
+        deleteUser: deleteModeInstructionsUser,
+      })),
+    }));
 
     const { default: hooks } =
       await import("../../../app/src/AiReviewerCleanupHooks.mjs");
@@ -47,6 +55,9 @@ describe("AI reviewer cleanup hooks", function () {
     expect(deleteSkillsUser).toHaveBeenCalledExactlyOnceWith(
       "669e48d55ee80e3a12940701",
     );
+    expect(deleteModeInstructionsUser).toHaveBeenCalledExactlyOnceWith(
+      "669e48d55ee80e3a12940701",
+    );
     expect(createAiReviewerCommentProvenanceStore).not.toHaveBeenCalled();
     expect(deleteProvenanceProject).not.toHaveBeenCalled();
 
@@ -55,6 +66,9 @@ describe("AI reviewer cleanup hooks", function () {
       "669e48d55ee80e3a12940711",
     );
     expect(deleteProvenanceProject).toHaveBeenCalledExactlyOnceWith(
+      "669e48d55ee80e3a12940711",
+    );
+    expect(deleteModeInstructionsProject).toHaveBeenCalledExactlyOnceWith(
       "669e48d55ee80e3a12940711",
     );
   });
@@ -68,6 +82,9 @@ describe("AI reviewer cleanup hooks", function () {
     });
     const deleteSkillsUser = vi.fn(async () => {
       throw new Error("skills cleanup failed");
+    });
+    const deleteModeInstructionsUser = vi.fn(async () => {
+      throw new Error("mode instructions cleanup failed");
     });
     vi.doMock("../../../app/src/AiReviewerWorkspaceStore.mjs", () => ({
       createAiReviewerWorkspaceStore: vi.fn(() => ({
@@ -84,6 +101,11 @@ describe("AI reviewer cleanup hooks", function () {
         deleteUser: deleteSkillsUser,
       })),
     }));
+    vi.doMock("../../../app/src/AiReviewerModeInstructionStore.mjs", () => ({
+      createAiReviewerModeInstructionStore: vi.fn(() => ({
+        deleteUser: deleteModeInstructionsUser,
+      })),
+    }));
 
     const { default: hooks } =
       await import("../../../app/src/AiReviewerCleanupHooks.mjs");
@@ -92,5 +114,6 @@ describe("AI reviewer cleanup hooks", function () {
     expect(deleteWorkspaceUser).toHaveBeenCalledOnce();
     expect(deleteProviderConfigUser).toHaveBeenCalledOnce();
     expect(deleteSkillsUser).toHaveBeenCalledOnce();
+    expect(deleteModeInstructionsUser).toHaveBeenCalledOnce();
   });
 });

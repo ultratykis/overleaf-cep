@@ -8,9 +8,13 @@ import {
 
 export type AiProvider = "openai-compatible" | "gemini" | "claude" | "azure";
 export type AzureOpenAiRequestStyle = "v1" | "deployment";
+export type ModelContextLengthOverride = {
+  model: string;
+  contextLength: number;
+};
 
-// A connection is a destination and how to reach it. The model is chosen per
-// review instead, so it is not part of this shape.
+// A connection owns destination metadata and optional fallback candidates. The
+// selected model is still chosen per review and is not part of this shape.
 type AiProviderConfigurationCommon = {
   contextLengthOverride: number | null;
   credentialSet: boolean;
@@ -21,12 +25,15 @@ export type AiProviderConfiguration =
   | (AiProviderConfigurationCommon & {
       provider: "openai-compatible";
       baseUrl: string;
+      models?: string[];
     })
   | (AiProviderConfigurationCommon & {
       provider: "gemini";
+      models?: string[];
     })
   | (AiProviderConfigurationCommon & {
       provider: "claude";
+      models?: string[];
     })
   | (AiProviderConfigurationCommon & {
       provider: "azure";
@@ -34,6 +41,7 @@ export type AiProviderConfiguration =
       requestStyle: AzureOpenAiRequestStyle;
       apiVersion?: string;
       deployments: string[];
+      contextLengthOverrides: ModelContextLengthOverride[];
     });
 
 type AiProviderConfigurationWriteCommon = {
@@ -47,12 +55,15 @@ export type AiProviderConfigurationWrite =
   | (AiProviderConfigurationWriteCommon & {
       provider: "openai-compatible";
       baseUrl: string;
+      models: string[];
     })
   | (AiProviderConfigurationWriteCommon & {
       provider: "gemini";
+      models: string[];
     })
   | (AiProviderConfigurationWriteCommon & {
       provider: "claude";
+      models: string[];
     })
   | (AiProviderConfigurationWriteCommon & {
       provider: "azure";
@@ -60,6 +71,7 @@ export type AiProviderConfigurationWrite =
       requestStyle: AzureOpenAiRequestStyle;
       apiVersion?: string;
       deployments: string[];
+      contextLengthOverrides: ModelContextLengthOverride[];
     });
 
 export type AiProviderConnection = {
@@ -87,8 +99,8 @@ export type AiProviderModel = {
   displayName: string;
   connectionId: string;
   connectionLabel: string;
-  contextLength: number;
-  contextLengthSource: "derived" | "detected" | "default" | "override";
+  contextLength: number | null;
+  contextLengthSource: "detected" | "override" | "unknown";
 };
 
 /**
@@ -117,6 +129,7 @@ const errorCodes = new Set<AiProviderConfigurationClientErrorCode>([
   "AI_PROVIDER_NETWORK_FAILED",
   "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
   "AI_PROVIDER_NOT_CONFIGURED",
+  "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED",
   "AI_PROVIDER_RATE_LIMITED",
   "AI_PROVIDER_SCHEMA_INVALID",
   "AI_REQUEST_TIMEOUT",
@@ -133,6 +146,7 @@ export type AiProviderConfigurationClientErrorCode =
   | "AI_PROVIDER_NETWORK_FAILED"
   | "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED"
   | "AI_PROVIDER_NOT_CONFIGURED"
+  | "AI_PROVIDER_PLAINTEXT_CREDENTIAL_BLOCKED"
   | "AI_PROVIDER_RATE_LIMITED"
   | "AI_PROVIDER_SCHEMA_INVALID"
   | "AI_REQUEST_TIMEOUT"
@@ -190,6 +204,7 @@ function connectionBody(config: AiProviderConfigurationWrite) {
       return {
         provider: config.provider,
         baseUrl: config.baseUrl,
+        models: [...config.models],
         label: config.label,
         contextLengthOverride: config.contextLengthOverride,
         ...credential,
@@ -198,6 +213,7 @@ function connectionBody(config: AiProviderConfigurationWrite) {
     case "claude":
       return {
         provider: config.provider,
+        models: [...config.models],
         label: config.label,
         contextLengthOverride: config.contextLengthOverride,
         ...credential,
@@ -211,8 +227,11 @@ function connectionBody(config: AiProviderConfigurationWrite) {
           ? {}
           : { apiVersion: config.apiVersion }),
         deployments: [...config.deployments],
+        contextLengthOverrides: config.contextLengthOverrides.map((entry) => ({
+          ...entry,
+        })),
         label: config.label,
-        contextLengthOverride: config.contextLengthOverride,
+        contextLengthOverride: null,
         ...credential,
       };
   }

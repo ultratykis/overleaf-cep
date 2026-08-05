@@ -312,6 +312,27 @@ export const WorkspaceSuggestionSchema = z
 
 const WorkspaceOrderSchema = z.number().int().nonnegative();
 export const WorkspaceRevisionSchema = z.number().int().nonnegative();
+// A custom perspective shares the instruction reserve with fixed tool and
+// safety guidance. This cap keeps the worst-case referee instruction within
+// the conservative reserve of the supported 8k context baseline.
+export const AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH = 2_000;
+const ModeInstructionSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH);
+export const AiReviewerModeInstructionsSchema = z
+  .object({
+    "referee-review": ModeInstructionSchema.optional(),
+    brainstorm: ModeInstructionSchema.optional(),
+  })
+  .strict();
+export const AiReviewerModeInstructionsSnapshotSchema = z
+  .object({
+    revision: WorkspaceRevisionSchema,
+    instructions: AiReviewerModeInstructionsSchema,
+  })
+  .strict();
 const WorkspaceRunGroupSchema = z
   .object({
     id: IdentifierSchema,
@@ -719,6 +740,7 @@ const CompletedEventSchema = z
     ...EventBase,
     finishReason: z.enum(["stop", "cancelled", "length", "tool-calls"]),
     contextTruncated: z.literal(true).optional(),
+    findingToolNotCalled: z.literal(true).optional(),
     usage: z
       .object({
         inputTokens: z.number().int().nonnegative(),

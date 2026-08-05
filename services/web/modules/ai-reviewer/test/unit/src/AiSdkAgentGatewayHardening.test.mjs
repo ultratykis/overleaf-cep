@@ -3,6 +3,7 @@ import {
   NoObjectGeneratedError,
   RetryError,
   simulateReadableStream,
+  streamText,
 } from "ai";
 // The AI SDK exports this test entrypoint, but the repository's import
 // resolver does not currently resolve package export subpaths.
@@ -10,7 +11,11 @@ import {
 import { MockLanguageModelV3 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 
-import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
+import {
+  AI_REVIEWER_MAX_RETRIES,
+  AiSdkAgentGateway,
+} from "../../../app/src/AiSdkAgentGateway.mjs";
+import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
 import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
 import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
@@ -836,30 +841,41 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     },
   );
 
-  it("classifies a RetryError from its last SDK error", async function () {
-    const lastError = new APICallError({
-      message: "Synthetic rate limit.",
+  it("leaves the first provider failure unwrapped when retries are disabled", async function () {
+    const providerError = new APICallError({
+      message: "Synthetic retryable failure.",
       url: "https://provider.invalid/v1/chat",
       requestBodyValues: { fixture: true },
-      statusCode: 429,
+      statusCode: 503,
+      responseHeaders: { "retry-after-ms": "0" },
       isRetryable: true,
     });
-    const retryError = new RetryError({
-      message: "Synthetic retries exhausted.",
-      reason: "maxRetriesExceeded",
-      errors: [new Error("Synthetic first attempt."), lastError],
+    const doStream = vi.fn(async () => {
+      throw providerError;
     });
-    const gateway = createGateway(throwingModel(retryError));
+    const model = new MockLanguageModelV3({
+      provider: "fixture",
+      modelId: "fixture-model",
+      doStream,
+    });
+    const result = streamText({
+      model,
+      prompt: "Synthetic retry measurement.",
+      maxRetries: AI_REVIEWER_MAX_RETRIES,
+      onError: () => {},
+    });
+    let observedError;
+    for await (const part of result.fullStream) {
+      if (part.type === "error") {
+        observedError = part.error;
+      }
+    }
 
-    expect(
-      await captureError(collect(gateway.stream(projectRequest()))),
-    ).toMatchObject({
-      code: "AI_PROVIDER_RATE_LIMITED",
-      category: "rate-limit",
-      retryable: true,
-      providerStatusCode: 429,
-      providerErrorType: "AI_APICallError",
-    });
+    expect(AI_REVIEWER_MAX_RETRIES).toBe(0);
+    expect(doStream).toHaveBeenCalledOnce();
+    expect(observedError).toBe(providerError);
+    expect(APICallError.isInstance(observedError)).toBe(true);
+    expect(RetryError.isInstance(observedError)).toBe(false);
   });
 
   it("rejects a malformed reported finding as a bounded schema error", async function () {
@@ -2528,7 +2544,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(snapshot.context.relationships.length).toBeLessThan(80);
     expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
     const systemInstruction = model.doStreamCalls[0].prompt[0].content;
-    const readablePrompt = model.doStreamCalls[0].prompt[1].content[0].text;
+    const readablePrompt = formatAgentPrompt(request, snapshot.context);
     const promptBudget = modelInputCharacterBudget(contextLength);
     expect(systemInstruction.length).toBeGreaterThan(0);
     expect(readablePrompt.length).toBeLessThanOrEqual(promptBudget);
@@ -2582,7 +2598,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     );
 
     const systemInstruction = model.doStreamCalls[0].prompt[0].content;
-    const readablePrompt = model.doStreamCalls[0].prompt[1].content[0].text;
+    const readablePrompt = formatAgentPrompt(request, snapshot.context);
     const promptBudget = modelInputCharacterBudget(contextLength);
     expect(systemInstruction.length + readablePrompt.length).toBeLessThan(
       promptBudget,

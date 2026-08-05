@@ -25,7 +25,6 @@ const PROVIDER_ERROR_TYPES = new Set([
   "AI_NoOutputGeneratedError",
   "AI_NoSuchModelError",
   "AI_NoSuchToolError",
-  "AI_RetryError",
   "AI_TypeValidationError",
 ]);
 const MODEL_CONTEXT_LENGTH_SOURCES = new Set([
