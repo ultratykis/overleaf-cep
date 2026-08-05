@@ -54,6 +54,14 @@ export async function getThread(projectId, threadId) {
   })
 }
 
+export async function getThreadState(projectId, threadId) {
+  return await asyncRequest({
+    method: 'get',
+    url: `/project/${projectId}/thread/${threadId}/state`,
+    json: true,
+  })
+}
+
 export async function getThreads(projectId) {
   return await asyncRequest({
     method: 'get',

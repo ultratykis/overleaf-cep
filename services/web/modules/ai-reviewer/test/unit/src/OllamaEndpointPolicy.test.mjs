@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertAllowedResolvedIpAddress,
   OPENAI_COMPATIBLE_FETCH_REDIRECT,
   OpenAiCompatibleEndpointPolicyError,
   parseOpenAiCompatibleBaseUrl,
@@ -251,6 +252,44 @@ describe("AI reviewer: OpenAI-compatible endpoint policy", function () {
     "https://api.example.com/v1\n",
   ])("rejects HTTPS bypass form %s", function (input) {
     expectPolicyError(input);
+  });
+});
+
+describe("AI reviewer: resolved OpenAI-compatible addresses", function () {
+  it.each([
+    "169.254.0.1",
+    "169.254.169.254",
+    "fe80::1",
+    "febf:ffff::1",
+    "fc00::1",
+    "fd00:ec2::254",
+    "::ffff:169.254.169.254",
+  ])(
+    "rejects forbidden resolved address %s without disclosing it",
+    function (address) {
+      let error;
+      try {
+        assertAllowedResolvedIpAddress(address);
+      } catch (cause) {
+        error = cause;
+      }
+
+      expect(error).toBeInstanceOf(OpenAiCompatibleEndpointPolicyError);
+      expect(String(error)).not.toContain(address);
+    },
+  );
+
+  it.each([
+    "127.0.0.1",
+    "::1",
+    "10.0.0.1",
+    "172.16.0.1",
+    "192.168.1.50",
+    "8.8.8.8",
+    "2001:4860:4860::8888",
+    "::ffff:192.168.1.50",
+  ])("allows resolved address %s", function (address) {
+    expect(() => assertAllowedResolvedIpAddress(address)).not.toThrow();
   });
 });
 

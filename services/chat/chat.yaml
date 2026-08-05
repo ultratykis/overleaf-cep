@@ -345,6 +345,55 @@ paths:
       description: |-
         Reopen Thread with ThreadID and ProjectID provided.
         i.e unmark it as resolved.
+  "/project/{projectId}/thread/{threadId}/state":
+    parameters:
+      - schema:
+          type: string
+        name: projectId
+        in: path
+        required: true
+      - schema:
+          type: string
+        name: threadId
+        in: path
+        required: true
+    get:
+      summary: Get thread state
+      operationId: getThreadState
+      responses:
+        "200":
+          description: Content-free thread state
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - state
+                properties:
+                  state:
+                    type: string
+                    enum:
+                      - absent
+                      - current
+                      - resolved
+                      - ambiguous
+        "400":
+          description: Invalid project or thread ID
+        "500":
+          description: Thread state unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required:
+                  - error
+                properties:
+                  error:
+                    type: string
+                    enum:
+                      - thread_state_unavailable
   "/project/{projectId}/thread/{threadId}":
     parameters:
       - schema:

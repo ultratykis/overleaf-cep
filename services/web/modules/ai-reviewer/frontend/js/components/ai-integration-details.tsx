@@ -29,15 +29,16 @@ import {
   type AiProvider,
   type AiProviderConfiguration,
   type AiProviderConfigurationClientErrorCode,
-  type AiProviderContextLengthSource,
-  type AiProviderConfigurationResponse,
+  type AiProviderConnection,
   type AiProviderConfigurationWrite,
-  getAiProviderConfiguration,
-  saveAiProviderConfiguration,
+  createAiProviderConnection,
+  deleteAiProviderConnection,
+  getAiProviderConnections,
   testAiProviderConnection,
+  updateAiProviderConnection,
 } from "../services/ai-provider-configuration";
 
-type OperationKind = "save" | "test";
+type OperationKind = "save" | "test" | "connections";
 type Operation = { generation: number; controller: AbortController };
 type Notice =
   | { type: "success"; kind: "connectionSuccessful" }
@@ -47,34 +48,36 @@ type Notice =
     };
 type ConfigurationDraft = {
   provider: AiProviderConfiguration["provider"];
+  label: string;
   baseUrl: string;
-  model: string;
   contextLengthOverride: string;
   credential: string;
 };
 type ConfigurationField =
+  | "label"
   | "baseUrl"
-  | "model"
   | "contextLengthOverride"
   | "credential";
 
 type Props = {
   projectId: string;
   onHide: () => void;
-  getConfiguration: typeof getAiProviderConfiguration;
-  saveConfiguration: typeof saveAiProviderConfiguration;
+  listConnections: typeof getAiProviderConnections;
+  createConnection: typeof createAiProviderConnection;
+  updateConnection: typeof updateAiProviderConnection;
+  deleteConnection: typeof deleteAiProviderConnection;
   testConnection: typeof testAiProviderConnection;
 };
 
 const emptyConfiguration: ConfigurationDraft = {
   provider: "openai-compatible",
+  label: "",
   baseUrl: "",
-  model: "",
   contextLengthOverride: "",
   credential: "",
 };
 
-const fields: ConfigurationField[] = ["baseUrl", "model", "credential"];
+const fields: ConfigurationField[] = ["label", "baseUrl", "credential"];
 
 const providers: AiProvider[] = ["openai-compatible", "gemini", "claude"];
 
@@ -93,9 +96,7 @@ function copyPublicConfiguration(
   configuration: AiProviderConfiguration,
 ): AiProviderConfiguration {
   const common = {
-    model: configuration.model,
-    contextLength: configuration.contextLength,
-    contextLengthSource: configuration.contextLengthSource,
+    contextLengthOverride: configuration.contextLengthOverride,
     credentialSet: configuration.credentialSet,
     credentialUpdatedAt: configuration.credentialUpdatedAt,
   };
@@ -119,33 +120,48 @@ function copyPublicConfiguration(
   }
 }
 
-function draftFromConfiguration(
-  configuration: AiProviderConfiguration,
+function copyPublicConnection(
+  connection: AiProviderConnection,
+): AiProviderConnection {
+  return {
+    id: connection.id,
+    label: connection.label,
+    classification: connection.classification,
+    config: copyPublicConfiguration(connection.config),
+  };
+}
+
+/**
+ * A connection with no label of its own is served under a derived one, so the
+ * field shows that name. Clearing the field asks the server to derive again.
+ */
+function draftFromConnection(
+  connection: AiProviderConnection,
 ): ConfigurationDraft {
   const common = {
-    model: configuration.model,
+    label: connection.label,
     contextLengthOverride:
-      configuration.contextLengthSource === "override"
-        ? String(configuration.contextLength)
-        : "",
+      connection.config.contextLengthOverride == null
+        ? ""
+        : String(connection.config.contextLengthOverride),
     credential: "",
   };
-  switch (configuration.provider) {
+  switch (connection.config.provider) {
     case "openai-compatible":
       return {
-        provider: configuration.provider,
-        baseUrl: configuration.baseUrl,
+        provider: connection.config.provider,
+        baseUrl: connection.config.baseUrl,
         ...common,
       };
     case "gemini":
       return {
-        provider: configuration.provider,
+        provider: connection.config.provider,
         baseUrl: "",
         ...common,
       };
     case "claude":
       return {
-        provider: configuration.provider,
+        provider: connection.config.provider,
         baseUrl: "",
         ...common,
       };
@@ -165,30 +181,14 @@ function providerLabel(provider: AiProvider, t: TFunction): string {
 
 function fieldLabel(field: ConfigurationField, t: TFunction): string {
   switch (field) {
+    case "label":
+      return t("ai_reviewer_provider_label");
     case "baseUrl":
       return t("ai_reviewer_provider_base_url");
-    case "model":
-      return t("ai_reviewer_provider_model");
     case "contextLengthOverride":
       return t("ai_reviewer_provider_context_length_override");
     case "credential":
       return t("ai_reviewer_provider_credential");
-  }
-}
-
-function contextLengthSourceLabel(
-  source: AiProviderContextLengthSource,
-  t: TFunction,
-): string {
-  switch (source) {
-    case "derived":
-      return t("ai_reviewer_provider_context_length_source_derived");
-    case "detected":
-      return t("ai_reviewer_provider_context_length_source_detected");
-    case "default":
-      return t("ai_reviewer_provider_context_length_source_default");
-    case "override":
-      return t("ai_reviewer_provider_context_length_source_override");
   }
 }
 
@@ -214,6 +214,12 @@ function noticeContent(notice: Notice, t: TFunction): string {
       return t("ai_reviewer_error_provider_credentials_rejected");
     case "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED":
       return t("ai_reviewer_provider_configuration_persistence_failed");
+    case "AI_PROVIDER_CONNECTION_LIMIT_REACHED":
+      return t("ai_reviewer_connection_limit_reached");
+    case "AI_PROVIDER_CONNECTION_NOT_FOUND":
+      return t("ai_reviewer_connection_not_found");
+    case "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED":
+      return t("ai_reviewer_provider_models_unavailable");
     case "AI_PROVIDER_NETWORK_FAILED":
       return t("ai_reviewer_provider_network_failed");
     case "AI_PROVIDER_NOT_CONFIGURED":
@@ -234,17 +240,19 @@ function noticeContent(notice: Notice, t: TFunction): string {
 export function AiIntegrationDetailsView({
   projectId,
   onHide,
-  getConfiguration,
-  saveConfiguration,
+  listConnections,
+  createConnection,
+  updateConnection,
+  deleteConnection,
   testConnection,
 }: Props) {
   const { t } = useTranslation();
-  const [saved, setSaved] = useState<
-    AiProviderConfiguration | null | undefined
+  const [connections, setConnections] = useState<
+    AiProviderConnection[] | undefined
   >();
-  const [classification, setClassification] = useState<
-    "local" | "remote" | null
-  >(null);
+  // A null selection is the draft for a connection that does not exist yet,
+  // which is also what a user with no connection at all starts from.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState({ ...emptyConfiguration });
   const [busy, setBusy] = useState<OperationKind | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -281,14 +289,20 @@ export function AiIntegrationDetailsView({
     return true;
   }, []);
 
-  const applyResponse = useCallback(
-    (response: AiProviderConfigurationResponse) => {
-      const next = response.config
-        ? copyPublicConfiguration(response.config)
-        : null;
-      setSaved(next);
-      setClassification(response.classification);
-      setDraft(next ? draftFromConfiguration(next) : { ...emptyConfiguration });
+  /**
+   * Adopt a server listing wholesale. `nextId` names the connection the form
+   * should edit afterwards; an unknown one falls back to the new-connection
+   * draft, which is what deleting the edited connection has to do.
+   */
+  const applyConnections = useCallback(
+    (list: AiProviderConnection[], nextId: string | null) => {
+      const copied = list.map(copyPublicConnection);
+      const selected = copied.find((entry) => entry.id === nextId) ?? null;
+      setConnections(copied);
+      setSelectedId(selected?.id ?? null);
+      setDraft(
+        selected ? draftFromConnection(selected) : { ...emptyConfiguration },
+      );
       setBusy(null);
       setNotice(null);
     },
@@ -297,14 +311,20 @@ export function AiIntegrationDetailsView({
 
   useEffect(() => {
     const operation = begin();
-    setSaved(undefined);
-    setClassification(null);
+    setConnections(undefined);
+    setSelectedId(null);
     setDraft({ ...emptyConfiguration });
     setBusy(null);
     setNotice(null);
 
-    void getConfiguration(projectId, operation.controller.signal).then(
-      (response) => complete(operation) && applyResponse(response),
+    void listConnections(projectId, operation.controller.signal).then(
+      (response) => {
+        if (!complete(operation)) return;
+        applyConnections(
+          response.connections,
+          response.connections[0]?.id ?? null,
+        );
+      },
       (error) => {
         if (complete(operation)) {
           setNotice(errorNotice(error));
@@ -312,14 +332,19 @@ export function AiIntegrationDetailsView({
       },
     );
     return cancel;
-  }, [applyResponse, begin, cancel, complete, getConfiguration, projectId]);
+  }, [applyConnections, begin, cancel, complete, listConnections, projectId]);
 
+  const selected =
+    connections?.find((entry) => entry.id === selectedId) ?? null;
+  const saved =
+    connections === undefined ? undefined : (selected?.config ?? null);
+  const classification = selected?.classification ?? null;
   const dirty =
     saved?.provider !== draft.provider ||
-    saved?.model !== draft.model ||
-    (saved?.contextLengthSource === "override"
-      ? String(saved.contextLength)
-      : "") !== draft.contextLengthOverride ||
+    (selected?.label ?? "") !== draft.label ||
+    (saved?.contextLengthOverride == null
+      ? ""
+      : String(saved.contextLengthOverride)) !== draft.contextLengthOverride ||
     (draft.provider === "openai-compatible" &&
       (saved?.provider !== "openai-compatible" ||
         saved.baseUrl !== draft.baseUrl)) ||
@@ -340,22 +365,14 @@ export function AiIntegrationDetailsView({
     !(saved?.provider === draft.provider && saved.credentialSet);
   const valid =
     (draft.provider !== "openai-compatible" || draft.baseUrl.trim() !== "") &&
-    draft.model.trim() !== "" &&
     validContextLengthOverride &&
     credentialAvailable;
   const canSave = saved !== undefined && busy === null && dirty && valid;
   const canTest =
     saved != null && busy === null && !dirty && credentialAvailable;
-
   const updateDraft = (field: ConfigurationField, value: string) => {
     if (busy) cancel();
-    setDraft((current) => ({
-      ...current,
-      [field]: value,
-      ...(field === "baseUrl" || field === "model"
-        ? { contextLengthOverride: "" }
-        : {}),
-    }));
+    setDraft((current) => ({ ...current, [field]: value }));
     setBusy(null);
     setNotice(null);
   };
@@ -398,13 +415,14 @@ export function AiIntegrationDetailsView({
     if (!canSave) return;
     const credential =
       draft.credential === "" ? {} : { credential: draft.credential };
+    const label = draft.label.trim();
     let requested: AiProviderConfigurationWrite;
     switch (draft.provider) {
       case "openai-compatible":
         requested = {
           provider: draft.provider,
           baseUrl: draft.baseUrl,
-          model: draft.model,
+          label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
         };
@@ -412,7 +430,7 @@ export function AiIntegrationDetailsView({
       case "gemini":
         requested = {
           provider: draft.provider,
-          model: draft.model,
+          label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
         };
@@ -420,37 +438,82 @@ export function AiIntegrationDetailsView({
       case "claude":
         requested = {
           provider: draft.provider,
-          model: draft.model,
+          label,
           contextLengthOverride: parsedContextLengthOverride,
           ...credential,
         };
         break;
     }
+    const editedId = selectedId;
     void run("save", (signal) =>
-      saveConfiguration(projectId, requested, signal),
-    ).then((response) => {
-      if (!response) return;
-      if (response.config) {
-        applyResponse(response);
-      } else {
+      editedId == null
+        ? createConnection(projectId, requested, signal)
+        : updateConnection(projectId, editedId, requested, signal),
+    ).then((connection) => {
+      if (!connection) return;
+      if (connection.config == null) {
         setBusy(null);
         setNotice(genericErrorNotice());
+        return;
       }
+      // A write returns only the written connection, so splice it into the
+      // listing instead of paying for another round trip.
+      applyConnections(
+        editedId == null
+          ? [...(connections ?? []), connection]
+          : (connections ?? []).map((entry) =>
+              entry.id === connection.id ? connection : entry,
+            ),
+        connection.id,
+      );
     });
   };
 
   const handleTest = () => {
     if (!canTest) return;
-    void run("test", (signal) => testConnection(projectId, signal)).then(
-      (response) => {
-        if (!response) return;
-        setBusy(null);
-        setNotice({
-          type: "success",
-          kind: "connectionSuccessful",
-        });
-      },
-    );
+    void run("test", (signal) =>
+      testConnection(projectId, selectedId, signal),
+    ).then((response) => {
+      if (!response) return;
+      setBusy(null);
+      setNotice({
+        type: "success",
+        kind: "connectionSuccessful",
+      });
+    });
+  };
+
+  const handleAdd = () => {
+    if (busy) cancel();
+    setSelectedId(null);
+    setDraft({ ...emptyConfiguration });
+    setBusy(null);
+    setNotice(null);
+  };
+
+  const handleSelect = (connection: AiProviderConnection) => {
+    if (connection.id === selectedId) return;
+    if (busy) cancel();
+    setSelectedId(connection.id);
+    setDraft(draftFromConnection(connection));
+    setBusy(null);
+    setNotice(null);
+  };
+
+  const handleDelete = (connection: AiProviderConnection) => {
+    if (busy !== null) return;
+    void run("connections", (signal) =>
+      deleteConnection(projectId, connection.id, signal),
+    ).then((response) => {
+      if (!response) return;
+      // Deleting the edited connection falls back to whichever connection is
+      // left, so the form never points at something that no longer exists.
+      const nextId =
+        connection.id === selectedId
+          ? (response.connections[0]?.id ?? null)
+          : selectedId;
+      applyConnections(response.connections, nextId);
+    });
   };
 
   const handleHide = () => {
@@ -476,6 +539,50 @@ export function AiIntegrationDetailsView({
         className="ai-reviewer-provider-settings-form"
       >
         <OLModalBody className="ai-reviewer-provider-settings-body">
+          {connections != null && connections.length > 0 && (
+            <div className="ai-reviewer-connections mb-3">
+              <ul
+                className="ai-reviewer-connection-list"
+                aria-label={t("ai_reviewer_connections")}
+              >
+                {connections.map((connection) => (
+                  <li
+                    key={connection.id}
+                    className="ai-reviewer-connection-row"
+                    data-testid="ai-reviewer-connection-row"
+                  >
+                    <OLButton
+                      type="button"
+                      variant="link"
+                      className="btn-inline-link ai-reviewer-connection-name"
+                      aria-pressed={connection.id === selectedId}
+                      onClick={() => handleSelect(connection)}
+                    >
+                      {connection.label}
+                    </OLButton>
+                    <OLButton
+                      type="button"
+                      variant="link"
+                      className="btn-inline-link ai-reviewer-connection-action"
+                      disabled={busy !== null}
+                      onClick={() => handleDelete(connection)}
+                    >
+                      {t("ai_reviewer_connection_delete")}
+                    </OLButton>
+                  </li>
+                ))}
+              </ul>
+              <OLButton
+                type="button"
+                variant="secondary"
+                className="ai-reviewer-connection-add mt-2"
+                disabled={busy !== null || selectedId == null}
+                onClick={handleAdd}
+              >
+                {t("ai_reviewer_connection_add")}
+              </OLButton>
+            </div>
+          )}
           <OLFormGroup
             controlId="ai-reviewer-provider"
             className="ai-reviewer-provider-settings-field"
@@ -556,16 +663,8 @@ export function AiIntegrationDetailsView({
           </details>
           {saved && (
             <div className="ai-reviewer-provider-settings-details mt-3">
-              <p className="ai-reviewer-provider-context-length mb-0">
-                {t("ai_reviewer_provider_context_length_in_use", {
-                  contextLength: saved.contextLength,
-                })}
-              </p>
-              <p className="ai-reviewer-provider-context-length-source mt-1 mb-0">
-                {contextLengthSourceLabel(saved.contextLengthSource, t)}
-              </p>
               {classification && (
-                <p className="ai-reviewer-provider-endpoint mt-1 mb-0">
+                <p className="ai-reviewer-provider-endpoint mb-0">
                   {classification === "local"
                     ? t("ai_reviewer_provider_local")
                     : t("ai_reviewer_provider_remote")}
@@ -597,6 +696,17 @@ export function AiIntegrationDetailsView({
           )}
         </OLModalBody>
         <OLModalFooter className="ai-reviewer-provider-settings-footer">
+          {busy === null && !canTest && (saved == null || dirty) && (
+            <span
+              className="ai-reviewer-provider-settings-hint"
+              data-testid="ai-reviewer-unsaved-hint"
+            >
+              {t(
+                "ai_reviewer_provider_save_before_checking",
+                "Save your changes before checking the connection.",
+              )}
+            </span>
+          )}
           <OLButton
             type="button"
             variant="secondary"
@@ -624,8 +734,10 @@ export default function AiIntegrationDetails({
     <AiIntegrationDetailsView
       projectId={projectId}
       onHide={onHide}
-      getConfiguration={getAiProviderConfiguration}
-      saveConfiguration={saveAiProviderConfiguration}
+      listConnections={getAiProviderConnections}
+      createConnection={createAiProviderConnection}
+      updateConnection={updateAiProviderConnection}
+      deleteConnection={deleteAiProviderConnection}
       testConnection={testAiProviderConnection}
     />
   );

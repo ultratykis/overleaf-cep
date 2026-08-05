@@ -150,6 +150,39 @@ export async function getResolvedThreadIds(projectId) {
   return resolvedThreadIds
 }
 
+export async function getThreadState(projectId, threadId) {
+  const expectedProjectId = new ObjectId(projectId.toString())
+  const rooms = await db.rooms
+    .find(
+      {
+        thread_id: new ObjectId(threadId.toString()),
+      },
+      {
+        projection: {
+          _id: 0,
+          project_id: 1,
+          resolved: 1,
+        },
+      }
+    )
+    .hint('thread_id_1_project_id_1')
+    .limit(2)
+    .toArray()
+
+  if (rooms.length === 0) {
+    return 'absent'
+  }
+  if (rooms.length > 1) {
+    return 'ambiguous'
+  }
+  if (!rooms[0].project_id.equals(expectedProjectId)) {
+    return 'ambiguous'
+  }
+  return Object.prototype.hasOwnProperty.call(rooms[0], 'resolved')
+    ? 'resolved'
+    : 'current'
+}
+
 export async function duplicateThread(projectId, threadId) {
   const room = await db.rooms.findOne({
     project_id: new ObjectId(projectId),

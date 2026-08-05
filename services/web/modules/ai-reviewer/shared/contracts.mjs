@@ -127,6 +127,11 @@ export const AgentRequestSchema = z
     ]),
     instruction: z.string().min(1).max(20_000),
     skill: IdentifierSchema.nullable(),
+    // The client sends both together: choosing a model in the unified list
+    // also chooses the connection it came from. Both stay optional so a user
+    // with a single connection offering a single model need not choose.
+    connectionId: IdentifierSchema.optional(),
+    model: IdentifierSchema.optional(),
     scope: z.discriminatedUnion("kind", [
       SelectionScopeSchema,
       DocumentScopeSchema,
@@ -293,12 +298,26 @@ export const WorkspaceSuggestionSchema = z
 
 const WorkspaceOrderSchema = z.number().int().nonnegative();
 export const WorkspaceRevisionSchema = z.number().int().nonnegative();
+const WorkspaceRunGroupSchema = z
+  .object({
+    id: IdentifierSchema,
+    position: z.number().int().positive(),
+    total: z.number().int().positive(),
+  })
+  .strict()
+  .refine((group) => group.position <= group.total, {
+    message: "Run group position must not exceed its total",
+    path: ["position"],
+  });
 
 export const WorkspaceRunSchema = z
   .object({
     generation: WorkspaceOrderSchema,
     createdOrder: WorkspaceOrderSchema,
     request: AgentRequestSchema,
+    provider: IdentifierSchema.optional(),
+    model: IdentifierSchema.optional(),
+    group: WorkspaceRunGroupSchema.optional(),
     text: ContentSchema,
     findings: z.array(WorkspaceFindingSchema).max(100),
     suggestions: z.array(WorkspaceSuggestionSchema).max(100),
@@ -658,6 +677,7 @@ const CompletedEventSchema = z
     type: z.literal("completed"),
     ...EventBase,
     finishReason: z.enum(["stop", "cancelled", "length", "tool-calls"]),
+    contextTruncated: z.literal(true).optional(),
     usage: z
       .object({
         inputTokens: z.number().int().nonnegative(),

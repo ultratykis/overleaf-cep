@@ -22,6 +22,11 @@ describe("AI reviewer cleanup hooks", function () {
     vi.doMock("../../../app/src/AiReviewerCommentProvenanceStore.mjs", () => ({
       createAiReviewerCommentProvenanceStore,
     }));
+    vi.doMock("../../../app/src/AiReviewerProviderConfigStore.mjs", () => ({
+      createAiReviewerProviderConfigStore: vi.fn(() => ({
+        deleteUser: vi.fn(),
+      })),
+    }));
 
     const { default: hooks } =
       await import("../../../app/src/AiReviewerCleanupHooks.mjs");

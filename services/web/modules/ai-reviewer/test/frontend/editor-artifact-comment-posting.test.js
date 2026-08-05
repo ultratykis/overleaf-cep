@@ -226,4 +226,25 @@ describe("AI reviewer: artifact comment posting", function () {
     expect(fixture.navigateEvidence).to.have.been.calledOnce;
     expect(fixture.postComment).not.to.have.been.called;
   });
+
+  it("preserves an unconfirmed posting code in the call result", async function () {
+    const fixture = postingFixture();
+    fixture.postComment.rejects(
+      Object.assign(new TypeError("response unavailable"), {
+        code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+      }),
+    );
+
+    const result = await postAiReviewerArtifactComment({
+      request: request(),
+      artifact: suggestion(),
+      content: "Please replace this phrase.",
+      ...fixture,
+    });
+
+    expect(result).to.deep.equal({
+      status: "error",
+      code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    });
+  });
 });

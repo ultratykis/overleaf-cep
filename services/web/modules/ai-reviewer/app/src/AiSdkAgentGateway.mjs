@@ -22,6 +22,7 @@ import {
   assertDiscussionEventForRequest,
   assertDiscussionSubjectForRequest,
 } from "./AgentGateway.mjs";
+import { recordAiReviewerProviderDiagnostic } from "./AiReviewerFailureLogger.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
 /**
@@ -158,6 +159,7 @@ const SYSTEM_INSTRUCTION = [
   "Use only the declared tools.",
   "Use read_project_file before making claims about project file content.",
   "Every finding must include at least one project-file evidence reference with an exact path and range; otherwise return no finding.",
+  "Evidence ranges are character offsets, not line numbers. For a selection scope, count offsets from the start of the selected text.",
   "For project-scope reviews, return an empty suggestions array.",
   "Use search_zotero only to investigate a reported citation issue.",
   "Return only the requested structured review object.",
@@ -1752,6 +1754,58 @@ export function classifySdkError(error, signal) {
 }
 
 /**
+ * A selection review only shows the model the selected substring, so the model
+ * reports positions from the start of that substring. The document positions
+ * this module stores are absolute, so shift a reference that only fits the
+ * selection length into the selection's own span. A reference that already
+ * fits the selection span is left alone, and anything that fits neither is
+ * left for the bounds check to reject.
+ *
+ * @param {AgentRequest} request
+ * @param {EvidenceReference[]} evidence
+ */
+function shiftSelectionRange(scope, range) {
+  if (range == null) {
+    return;
+  }
+  const span = scope.range.to - scope.range.from;
+  const alreadyAbsolute =
+    range.from >= scope.range.from && range.to <= scope.range.to;
+  if (alreadyAbsolute || range.from < 0 || range.to > span) {
+    return;
+  }
+  range.from += scope.range.from;
+  range.to += scope.range.from;
+}
+
+function normalizeSelectionEvidence(request, evidence) {
+  const scope = request.scope;
+  if (scope.kind !== "selection") {
+    return;
+  }
+  for (const reference of evidence) {
+    if (reference.path === scope.path) {
+      shiftSelectionRange(scope, reference.range);
+    }
+  }
+}
+
+/**
+ * The replaced span of a suggestion is reported in the same frame as the
+ * evidence, so it needs the same shift before the document-state check.
+ *
+ * @param {AgentRequest} request
+ * @param {{ path: string, range: { from: number, to: number } }} draft
+ */
+function normalizeSelectionSuggestion(request, draft) {
+  const scope = request.scope;
+  if (scope.kind !== "selection" || draft.path !== scope.path) {
+    return;
+  }
+  shiftSelectionRange(scope, draft.range);
+}
+
+/**
  * @param {AgentRequest} request
  * @param {EvidenceReference[]} evidence
  */
@@ -2301,6 +2355,11 @@ export class AiSdkAgentGateway {
             deferredToolErrors.delete(part.toolCallId);
             streamFailure ??= deferredError;
           } else {
+            recordAiReviewerProviderDiagnostic({
+              provider: this.provider,
+              model: this.modelId,
+              detail: part.error,
+            });
             streamFailure ??= classifySdkError(part.error, signal);
           }
         } else if (part.type === "tool-result") {
@@ -2312,6 +2371,11 @@ export class AiSdkAgentGateway {
         } else if (part.type === "abort") {
           throw abortErrorForSignal(signal);
         } else if (part.type === "error") {
+          recordAiReviewerProviderDiagnostic({
+            provider: this.provider,
+            model: this.modelId,
+            detail: part.error,
+          });
           streamFailure ??= classifySdkError(part.error, signal);
         }
       }
@@ -2374,6 +2438,8 @@ export class AiSdkAgentGateway {
         );
       }
       for (const draft of output.suggestions) {
+        normalizeSelectionSuggestion(request, draft);
+        normalizeSelectionEvidence(request, draft.evidence);
         assertEvidenceWithinRequest(request, draft.evidence);
         await validateProjectEvidence(this.validateEvidence, draft.evidence, {
           request,
@@ -2401,6 +2467,7 @@ export class AiSdkAgentGateway {
       }
 
       for (const draft of output.findings) {
+        normalizeSelectionEvidence(request, draft.evidence);
         assertEvidenceWithinRequest(request, draft.evidence);
         await validateProjectEvidence(this.validateEvidence, draft.evidence, {
           request,
@@ -2454,6 +2521,11 @@ export class AiSdkAgentGateway {
       if (isLocalGatewayError(error)) {
         throw error;
       }
+      recordAiReviewerProviderDiagnostic({
+        provider: this.provider,
+        model: this.modelId,
+        detail: error,
+      });
       throw classifySdkError(error, signal);
     }
   }
@@ -2773,6 +2845,11 @@ export class AiSdkAgentGateway {
             deferredToolErrors.delete(part.toolCallId);
             streamFailure ??= deferredError;
           } else {
+            recordAiReviewerProviderDiagnostic({
+              provider: this.provider,
+              model: this.modelId,
+              detail: part.error,
+            });
             streamFailure ??= classifySdkError(part.error, signal);
           }
         } else if (part.type === "tool-result") {
@@ -2784,6 +2861,11 @@ export class AiSdkAgentGateway {
         } else if (part.type === "abort") {
           throw abortErrorForSignal(signal);
         } else if (part.type === "error") {
+          recordAiReviewerProviderDiagnostic({
+            provider: this.provider,
+            model: this.modelId,
+            detail: part.error,
+          });
           streamFailure ??= classifySdkError(part.error, signal);
         }
       }
@@ -2842,6 +2924,11 @@ export class AiSdkAgentGateway {
       if (isLocalGatewayError(error)) {
         throw error;
       }
+      recordAiReviewerProviderDiagnostic({
+        provider: this.provider,
+        model: this.modelId,
+        detail: error,
+      });
       throw classifySdkError(error, signal);
     }
   }

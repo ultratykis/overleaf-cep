@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { expect } from "chai";
 import fetchMock from "fetch-mock";
@@ -16,12 +17,16 @@ import AiIntegrationDetails, {
   AiIntegrationDetailsView,
 } from "../../frontend/js/components/ai-integration-details";
 import {
+  AiProviderConfigurationClientError,
   type AiProviderConfiguration,
-  type AiProviderConfigurationResponse,
   type AiProviderConfigurationWrite,
-  getAiProviderConfiguration,
-  saveAiProviderConfiguration,
+  type AiProviderConnection,
+  createAiProviderConnection,
+  deleteAiProviderConnection,
+  getAiProviderConnections,
+  getAiProviderModels,
   testAiProviderConnection,
+  updateAiProviderConnection,
 } from "../../frontend/js/services/ai-provider-configuration";
 
 type Deferred<T> = {
@@ -39,83 +44,79 @@ const replacementCredentialUpdatedAt = "2026-07-26T02:03:04.000Z";
 const configuration: AiProviderConfiguration = {
   provider: "openai-compatible",
   baseUrl: "http://127.0.0.1:11434/v1",
-  model: "qwen3.5:4b",
-  contextLength: 8_192,
-  contextLengthSource: "detected",
+  contextLengthOverride: null,
   credentialSet: false,
   credentialUpdatedAt: null,
 };
 const otherConfiguration: AiProviderConfiguration = {
   provider: "openai-compatible",
   baseUrl: "https://api.example.com/v1",
-  model: "hosted-model",
-  contextLength: 4_096,
-  contextLengthSource: "default",
+  contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
 };
-const configurationWrite: AiProviderConfigurationWrite = {
-  provider: configuration.provider,
-  baseUrl: configuration.baseUrl,
-  model: configuration.model,
-  contextLengthOverride: null,
-};
-const otherConfigurationWrite: AiProviderConfigurationWrite = {
-  provider: otherConfiguration.provider,
-  baseUrl: otherConfiguration.baseUrl,
-  model: otherConfiguration.model,
-  contextLengthOverride: null,
-};
 const geminiConfiguration: AiProviderConfiguration = {
   provider: "gemini",
-  model: "gemini-2.5-pro",
-  contextLength: 1_048_576,
-  contextLengthSource: "derived",
+  contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
 };
 const claudeConfiguration: AiProviderConfiguration = {
   provider: "claude",
-  model: "claude-sonnet-4-20250514",
-  contextLength: 200_000,
-  contextLengthSource: "derived",
+  contextLengthOverride: null,
   credentialSet: true,
   credentialUpdatedAt,
 };
+const connectionId = "connection-primary";
+const secondConnectionId = "connection-secondary";
+const unconfigured = null;
+// The server derives a label from the endpoint when the user names none, so a
+// listed connection always carries one.
+const configured: AiProviderConnection = {
+  id: connectionId,
+  label: "127.0.0.1:11434",
+  classification: "local",
+  config: configuration,
+};
+const otherConfigured: AiProviderConnection = {
+  id: connectionId,
+  label: "api.example.com",
+  classification: "remote",
+  config: otherConfiguration,
+};
+const geminiConfigured: AiProviderConnection = {
+  id: connectionId,
+  label: "Google Gemini",
+  classification: "remote",
+  config: geminiConfiguration,
+};
+const claudeConfigured: AiProviderConnection = {
+  id: secondConnectionId,
+  label: "Anthropic Claude",
+  classification: "remote",
+  config: claudeConfiguration,
+};
+const configurationWrite: AiProviderConfigurationWrite = {
+  provider: "openai-compatible",
+  baseUrl: configuration.baseUrl,
+  label: "",
+  contextLengthOverride: null,
+};
+const otherConfigurationWrite: AiProviderConfigurationWrite = {
+  provider: "openai-compatible",
+  baseUrl: otherConfiguration.baseUrl,
+  label: otherConfigured.label,
+  contextLengthOverride: null,
+};
 const geminiConfigurationWrite: AiProviderConfigurationWrite = {
-  provider: geminiConfiguration.provider,
-  model: geminiConfiguration.model,
+  provider: "gemini",
+  label: "",
   contextLengthOverride: null,
 };
 const claudeConfigurationWrite: AiProviderConfigurationWrite = {
-  provider: claudeConfiguration.provider,
-  model: claudeConfiguration.model,
+  provider: "claude",
+  label: "",
   contextLengthOverride: null,
-};
-const unconfigured: AiProviderConfigurationResponse = {
-  configured: false,
-  config: null,
-  classification: null,
-};
-const configured: AiProviderConfigurationResponse = {
-  configured: true,
-  config: configuration,
-  classification: "local",
-};
-const otherConfigured: AiProviderConfigurationResponse = {
-  configured: true,
-  config: otherConfiguration,
-  classification: "remote",
-};
-const geminiConfigured: AiProviderConfigurationResponse = {
-  configured: true,
-  config: geminiConfiguration,
-  classification: "remote",
-};
-const claudeConfigured: AiProviderConfigurationResponse = {
-  configured: true,
-  config: claudeConfiguration,
-  classification: "remote",
 };
 const nativeConfigurations = [
   {
@@ -134,7 +135,7 @@ const nativeConfigurations = [
 const connectionResponse = {
   ok: true as const,
   provider: "openai-compatible" as const,
-  model: configuration.model,
+  modelCount: 2,
   classification: "local" as const,
 };
 
@@ -165,26 +166,81 @@ function providerSelect() {
   }) as HTMLSelectElement;
 }
 
+// The dialog speaks the connections API, but most cases still describe one
+// connection. These adapters keep those cases expressed as a single saved
+// connection instead of restating the listing shape everywhere.
 function renderDetails({
   activeProjectId = projectId,
   getConfiguration = sinon.stub().resolves(unconfigured),
   saveConfiguration = sinon.stub().resolves(configured),
+  deleteConnection = sinon.stub().resolves({ connections: [] }),
   testConnection = sinon.stub().resolves(connectionResponse),
 } = {}) {
-  return {
-    ...render(
-      <AiIntegrationDetailsView
-        projectId={activeProjectId}
-        onHide={sinon.stub()}
-        getConfiguration={getConfiguration}
-        saveConfiguration={saveConfiguration}
-        testConnection={testConnection}
-      />,
-    ),
-    getConfiguration,
-    saveConfiguration,
+  const listConnections = sinon
+    .stub()
+    .callsFake(async (id: string, signal: AbortSignal) => {
+      const connection = await getConfiguration(id, signal);
+      return { connections: connection == null ? [] : [connection] };
+    });
+  const createConnection = sinon
+    .stub()
+    .callsFake(
+      (id: string, config: AiProviderConfigurationWrite, signal: AbortSignal) =>
+        saveConfiguration(id, config, signal),
+    );
+  const updateConnection = sinon
+    .stub()
+    .callsFake(
+      (
+        id: string,
+        _connectionId: string,
+        config: AiProviderConfigurationWrite,
+        signal: AbortSignal,
+      ) => saveConfiguration(id, config, signal),
+    );
+  const props = {
+    onHide: sinon.stub(),
+    listConnections,
+    createConnection,
+    updateConnection,
+    deleteConnection,
     testConnection,
   };
+  return {
+    ...render(
+      <AiIntegrationDetailsView projectId={activeProjectId} {...props} />,
+    ),
+    ...props,
+    props,
+    getConfiguration,
+    saveConfiguration,
+  };
+}
+
+// Cases about the listing itself drive the real props rather than the
+// single-connection adapters above.
+function renderConnections({
+  listConnections = sinon.stub().resolves({ connections: [] }),
+  createConnection = sinon.stub().resolves(configured),
+  updateConnection = sinon.stub().resolves(configured),
+  deleteConnection = sinon.stub().resolves({ connections: [] }),
+  testConnection = sinon.stub().resolves(connectionResponse),
+} = {}) {
+  return render(
+    <AiIntegrationDetailsView
+      projectId={projectId}
+      onHide={sinon.stub()}
+      listConnections={listConnections}
+      createConnection={createConnection}
+      updateConnection={updateConnection}
+      deleteConnection={deleteConnection}
+      testConnection={testConnection}
+    />,
+  );
+}
+
+function connectionRows() {
+  return screen.queryAllByTestId("ai-reviewer-connection-row");
 }
 
 async function waitUntilLoaded() {
@@ -217,15 +273,16 @@ describe("AI reviewer: provider configuration", function () {
     }
   });
 
-  it("loads configuration from the project-scoped GET route", async function () {
+  it("lists connections from the project-scoped GET route", async function () {
+    const listing = { connections: [configured, claudeConfigured] };
     const route = fetchMock.get(
-      `/project/${projectId}/ai-reviewer/config`,
-      unconfigured,
+      `/project/${projectId}/ai-reviewer/connections`,
+      listing,
     );
     const signal = new AbortController().signal;
 
-    expect(await getAiProviderConfiguration(projectId, signal)).to.deep.equal(
-      unconfigured,
+    expect(await getAiProviderConnections(projectId, signal)).to.deep.equal(
+      listing,
     );
 
     const call = route.callHistory.calls()[0];
@@ -238,30 +295,29 @@ describe("AI reviewer: provider configuration", function () {
     expect(headers.get("content-type")).to.equal("application/json");
   });
 
-  it("saves exactly the four provider fields through PUT", async function () {
-    const route = fetchMock.put(
-      `/project/${projectId}/ai-reviewer/config`,
+  it("creates a connection with exactly the four destination fields", async function () {
+    const route = fetchMock.post(
+      `/project/${projectId}/ai-reviewer/connections`,
       configured,
     );
     const signal = new AbortController().signal;
     const candidate = {
       ...configurationWrite,
-      contextLength: configuration.contextLength,
-      contextLengthSource: configuration.contextLengthSource,
+      model: "must-not-be-sent",
       token: "must-not-be-sent",
     } as AiProviderConfigurationWrite;
 
     expect(
-      await saveAiProviderConfiguration(projectId, candidate, signal),
+      await createAiProviderConnection(projectId, candidate, signal),
     ).to.deep.equal(configured);
 
     const call = route.callHistory.calls()[0];
-    expect(call.options.method?.toUpperCase()).to.equal("PUT");
+    expect(call.options.method?.toUpperCase()).to.equal("POST");
     expect(call.options.signal).to.equal(signal);
     expect(Object.keys(JSON.parse(String(call.options.body)))).to.deep.equal([
       "provider",
       "baseUrl",
-      "model",
+      "label",
       "contextLengthOverride",
     ]);
     expect(JSON.parse(String(call.options.body))).to.deep.equal(
@@ -269,9 +325,26 @@ describe("AI reviewer: provider configuration", function () {
     );
   });
 
-  it("sends only an explicitly entered credential as the fifth PUT field", async function () {
+  it("deletes a connection through its own route", async function () {
+    const remaining = { connections: [claudeConfigured] };
+    const deleteRoute = fetchMock.delete(
+      `/project/${projectId}/ai-reviewer/connections/${connectionId}`,
+      remaining,
+    );
+    const signal = new AbortController().signal;
+
+    expect(
+      await deleteAiProviderConnection(projectId, connectionId, signal),
+    ).to.deep.equal(remaining);
+
+    const [removal] = deleteRoute.callHistory.calls();
+    expect(removal.options.method?.toUpperCase()).to.equal("DELETE");
+    expect(removal.options.body).to.equal(undefined);
+  });
+
+  it("sends only an explicitly entered credential as the fifth write field", async function () {
     const route = fetchMock.put(
-      `/project/${projectId}/ai-reviewer/config`,
+      `/project/${projectId}/ai-reviewer/connections/${connectionId}`,
       otherConfigured,
     );
     const signal = new AbortController().signal;
@@ -284,7 +357,12 @@ describe("AI reviewer: provider configuration", function () {
     } as AiProviderConfigurationWrite;
 
     expect(
-      await saveAiProviderConfiguration(projectId, candidate, signal),
+      await updateAiProviderConnection(
+        projectId,
+        connectionId,
+        candidate,
+        signal,
+      ),
     ).to.deep.equal(otherConfigured);
 
     const call = route.callHistory.calls()[0];
@@ -292,7 +370,7 @@ describe("AI reviewer: provider configuration", function () {
     expect(Object.keys(body)).to.deep.equal([
       "provider",
       "baseUrl",
-      "model",
+      "label",
       "contextLengthOverride",
       "credential",
     ]);
@@ -305,8 +383,8 @@ describe("AI reviewer: provider configuration", function () {
 
   for (const native of nativeConfigurations) {
     it(`never serializes a base URL for ${native.label}`, async function () {
-      const route = fetchMock.put(
-        `/project/${projectId}/ai-reviewer/config`,
+      const route = fetchMock.post(
+        `/project/${projectId}/ai-reviewer/connections`,
         native.response,
       );
       const signal = new AbortController().signal;
@@ -320,14 +398,14 @@ describe("AI reviewer: provider configuration", function () {
       } as AiProviderConfigurationWrite;
 
       expect(
-        await saveAiProviderConfiguration(projectId, candidate, signal),
+        await createAiProviderConnection(projectId, candidate, signal),
       ).to.deep.equal(native.response);
 
       const call = route.callHistory.calls()[0];
       const body = JSON.parse(String(call.options.body));
       expect(Object.keys(body)).to.deep.equal([
         "provider",
-        "model",
+        "label",
         "contextLengthOverride",
         "credential",
       ]);
@@ -340,24 +418,59 @@ describe("AI reviewer: provider configuration", function () {
     });
   }
 
-  it("tests persisted configuration through a bodyless POST", async function () {
+  it("tests one saved connection through a POST that names it", async function () {
     const route = fetchMock.post(
       `/project/${projectId}/ai-reviewer/connection-test`,
       connectionResponse,
     );
     const signal = new AbortController().signal;
 
-    expect(await testAiProviderConnection(projectId, signal)).to.deep.equal(
-      connectionResponse,
-    );
+    expect(
+      await testAiProviderConnection(projectId, connectionId, signal),
+    ).to.deep.equal(connectionResponse);
 
     const call = route.callHistory.calls()[0];
     expect(call.options.method?.toUpperCase()).to.equal("POST");
     expect(call.options.signal).to.equal(signal);
-    expect(call.options.body).to.equal(undefined);
+    expect(JSON.parse(String(call.options.body))).to.deep.equal({
+      connectionId,
+    });
   });
 
-  it("loads, edits, saves, and tests a local configuration without a credential", async function () {
+  it("loads one model catalogue that already spans every connection", async function () {
+    const catalog = {
+      models: [
+        {
+          id: "qwen3.5:4b",
+          displayName: "Qwen 3.5 4B",
+          connectionId,
+          connectionLabel: configured.label,
+        },
+        {
+          id: "claude-sonnet-4-20250514",
+          displayName: "Claude Sonnet",
+          connectionId: secondConnectionId,
+          connectionLabel: claudeConfigured.label,
+        },
+      ],
+      failures: [],
+    };
+    const route = fetchMock.get(
+      `/project/${projectId}/ai-reviewer/provider/models`,
+      catalog,
+    );
+    const signal = new AbortController().signal;
+
+    expect(await getAiProviderModels(projectId, signal)).to.deep.equal(catalog);
+    const call = route.callHistory.calls()[0];
+    expect(route.callHistory.calls()).to.have.length(1);
+    expect(call.options.method?.toUpperCase()).to.equal("GET");
+    expect(call.options.signal).to.equal(signal);
+    expect(call.options.body).to.equal(undefined);
+    expect(call.url).not.to.include("connectionId");
+  });
+
+  it("saves a connection without asking for a model and tests it afterwards", async function () {
     const { saveConfiguration, testConnection } = renderDetails();
     await waitUntilLoaded();
 
@@ -377,18 +490,15 @@ describe("AI reviewer: provider configuration", function () {
     for (const label of providerLabels) {
       expect(label).not.to.match(/^Provider\s*:/i);
     }
+    // A connection carries no model, so the dialog must not ask for one.
+    expect(screen.queryByLabelText("Model")).not.to.exist;
     const openAiCompatibleApiKey = input("API key");
     expect(openAiCompatibleApiKey.required).to.equal(false);
     expect(openAiCompatibleApiKey.getAttribute("aria-required")).to.equal(
       "false",
     );
-    expect(document.body.textContent).not.to.include("API key (optional)");
-    expect(document.body.textContent).not.to.include("API key (required)");
     fireEvent.change(input("Base URL"), {
       target: { value: configuration.baseUrl },
-    });
-    fireEvent.change(input("Model"), {
-      target: { value: configuration.model },
     });
     expect(screen.queryByLabelText("Context length (tokens)")).not.to.exist;
     fireEvent.click(button("Save"));
@@ -400,14 +510,48 @@ describe("AI reviewer: provider configuration", function () {
     ]);
     await screen.findByText("Local endpoint");
     await screen.findByText("No API key set");
-    await screen.findByText("Context length in use: 8192 tokens");
-    await screen.findByText("Detected from model metadata");
 
     fireEvent.click(button("Test connection"));
     await waitFor(() => expect(testConnection).to.have.been.calledOnce);
-    expect(testConnection.firstCall.args).to.have.length(2);
+    expect(testConnection.firstCall.args).to.have.length(3);
     expect(testConnection.firstCall.args[0]).to.equal(projectId);
     await screen.findByText("Connection successful");
+  });
+
+  it("names a connection on request and hands the naming back to the server", async function () {
+    const named: AiProviderConnection = {
+      ...otherConfigured,
+      label: "Lab GPU box",
+    };
+    const saveConfiguration = sinon.stub().resolves(named);
+    renderDetails({
+      getConfiguration: sinon.stub().resolves(otherConfigured),
+      saveConfiguration,
+    });
+    await waitUntilLoaded();
+
+    // A derived label is shown so the field always matches the listing.
+    expect(input("Display name").value).to.equal(otherConfigured.label);
+    fireEvent.change(input("Display name"), { target: { value: named.label } });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
+      ...otherConfigurationWrite,
+      label: named.label,
+    });
+
+    await waitFor(() =>
+      expect(input("Display name").value).to.equal("Lab GPU box"),
+    );
+    fireEvent.change(input("Display name"), { target: { value: "  " } });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledTwice);
+    expect(saveConfiguration.secondCall.args[1]).to.deep.equal({
+      ...otherConfigurationWrite,
+      label: "",
+    });
   });
 
   it("communicates API key requiredness through field state without changing the label", async function () {
@@ -443,9 +587,6 @@ describe("AI reviewer: provider configuration", function () {
         target: { value: native.configuration.provider },
       });
       expect(screen.queryByLabelText("Base URL")).not.to.exist;
-      fireEvent.change(input("Model"), {
-        target: { value: native.configuration.model },
-      });
 
       const apiKeyInput = input("API key");
       expect(apiKeyInput.value).to.equal("");
@@ -486,8 +627,8 @@ describe("AI reviewer: provider configuration", function () {
       expect(apiKeyInput.value).to.equal("");
       expect(apiKeyInput.required).to.equal(false);
       expect(apiKeyInput.getAttribute("aria-required")).to.equal("false");
-      fireEvent.change(input("Model"), {
-        target: { value: `${native.configuration.model}-replacement` },
+      fireEvent.change(input("Display name"), {
+        target: { value: "Renamed connection" },
       });
       expect(button("Save").disabled).to.equal(false);
       fireEvent.click(button("Save"));
@@ -495,7 +636,7 @@ describe("AI reviewer: provider configuration", function () {
       await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
       expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
         ...native.write,
-        model: `${native.configuration.model}-replacement`,
+        label: "Renamed connection",
       });
       expect(saveConfiguration.firstCall.args[1]).not.to.have.property(
         "credential",
@@ -509,7 +650,7 @@ describe("AI reviewer: provider configuration", function () {
       const testConnection = sinon.stub().resolves({
         ok: true,
         provider: native.configuration.provider,
-        model: native.configuration.model,
+        modelCount: 3,
         classification: "remote",
       });
       renderDetails({
@@ -522,7 +663,7 @@ describe("AI reviewer: provider configuration", function () {
       fireEvent.click(button("Test connection"));
 
       await waitFor(() => expect(testConnection).to.have.been.calledOnce);
-      expect(testConnection.firstCall.args).to.have.length(2);
+      expect(testConnection.firstCall.args).to.have.length(3);
       expect(testConnection.firstCall.args[0]).to.equal(projectId);
       await screen.findByText("Connection successful");
     });
@@ -536,9 +677,6 @@ describe("AI reviewer: provider configuration", function () {
 
     expect(screen.getByText("API key set")).to.exist;
     fireEvent.change(providerSelect(), { target: { value: "gemini" } });
-    fireEvent.change(input("Model"), {
-      target: { value: geminiConfiguration.model },
-    });
 
     expect(screen.queryByLabelText("Base URL")).not.to.exist;
     const apiKeyInput = input("API key");
@@ -555,7 +693,7 @@ describe("AI reviewer: provider configuration", function () {
         ...otherConfiguration,
         credential,
       },
-    } as AiProviderConfigurationResponse;
+    } as AiProviderConnection;
     renderDetails({
       getConfiguration: sinon.stub().resolves(responseWithSecret),
     });
@@ -581,7 +719,7 @@ describe("AI reviewer: provider configuration", function () {
         baseUrl: "https://must-not-be-rendered.example/v1",
         credential,
       },
-    } as unknown as AiProviderConfigurationResponse;
+    } as unknown as AiProviderConnection;
     renderDetails({
       getConfiguration: sinon.stub().resolves(responseWithSecrets),
     });
@@ -602,65 +740,13 @@ describe("AI reviewer: provider configuration", function () {
     );
   });
 
-  for (const { source, response, value, sourceLabel } of [
-    {
-      source: "derived",
-      response: geminiConfigured,
-      value: geminiConfiguration.contextLength,
-      sourceLabel: "Derived from the model",
-    },
-    {
-      source: "detected",
-      response: configured,
-      value: configuration.contextLength,
-      sourceLabel: "Detected from model metadata",
-    },
-    {
-      source: "default",
-      response: otherConfigured,
-      value: otherConfiguration.contextLength,
-      sourceLabel: "Conservative default",
-    },
-    {
-      source: "override",
-      response: {
-        ...otherConfigured,
-        config: {
-          ...otherConfiguration,
-          contextLength: 65_536,
-          contextLengthSource: "override",
-        },
-      } satisfies AiProviderConfigurationResponse,
-      value: 65_536,
-      sourceLabel: "Advanced override",
-    },
-  ] as const) {
-    it(`reports the effective context length and its ${source} source`, async function () {
-      renderDetails({
-        getConfiguration: sinon.stub().resolves(response),
-      });
-      await waitUntilLoaded();
-
-      expect(screen.getByText(`Context length in use: ${value} tokens`)).to
-        .exist;
-      expect(screen.getByText(sourceLabel)).to.exist;
-      const advanced = screen.getByText("Advanced settings").closest("details");
-      expect(advanced?.open).to.equal(false);
-      fireEvent.click(screen.getByText("Advanced settings"));
-      expect(input("Context length override (tokens)").value).to.equal(
-        source === "override" ? String(value) : "",
-      );
-    });
-  }
-
   it("saves a replacement credential and blanks its draft after the PUT response", async function () {
-    const replacementResponse: AiProviderConfigurationResponse = {
-      configured: true,
+    const replacementResponse: AiProviderConnection = {
+      ...otherConfigured,
       config: {
         ...otherConfiguration,
         credentialUpdatedAt: replacementCredentialUpdatedAt,
       },
-      classification: "remote",
     };
     const saveConfiguration = sinon.stub().resolves(replacementResponse);
     renderDetails({
@@ -696,9 +782,6 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Base URL"), {
       target: { value: configuration.baseUrl },
     });
-    fireEvent.change(input("Model"), {
-      target: { value: configuration.model },
-    });
 
     const advanced = screen.getByText("Advanced settings").closest("details");
     expect(advanced).not.to.equal(null);
@@ -727,14 +810,12 @@ describe("AI reviewer: provider configuration", function () {
   });
 
   it("clears a saved advanced override with an explicit null write", async function () {
-    const overridden: AiProviderConfigurationResponse = {
-      configured: true,
+    const overridden: AiProviderConnection = {
+      ...otherConfigured,
       config: {
         ...otherConfiguration,
-        contextLength: 65_536,
-        contextLengthSource: "override",
+        contextLengthOverride: 65_536,
       },
-      classification: "remote",
     };
     const saveConfiguration = sinon.stub().resolves(otherConfigured);
     renderDetails({
@@ -759,38 +840,8 @@ describe("AI reviewer: provider configuration", function () {
     });
   });
 
-  it("does not carry a saved override to a different model", async function () {
-    const overridden: AiProviderConfigurationResponse = {
-      configured: true,
-      config: {
-        ...otherConfiguration,
-        contextLength: 65_536,
-        contextLengthSource: "override",
-      },
-      classification: "remote",
-    };
-    const saveConfiguration = sinon.stub().resolves(otherConfigured);
-    renderDetails({
-      getConfiguration: sinon.stub().resolves(overridden),
-      saveConfiguration,
-    });
-    await waitUntilLoaded();
-
-    fireEvent.change(input("Model"), {
-      target: { value: `${otherConfiguration.model}-replacement` },
-    });
-    fireEvent.click(button("Save"));
-
-    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
-    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
-      ...otherConfigurationWrite,
-      model: `${otherConfiguration.model}-replacement`,
-      contextLengthOverride: null,
-    });
-  });
-
   it("keeps Test disabled until the current draft is persisted", async function () {
-    const pendingSave = deferred<AiProviderConfigurationResponse>();
+    const pendingSave = deferred<AiProviderConnection>();
     const saveConfiguration = sinon.stub().returns(pendingSave.promise);
     renderDetails({
       getConfiguration: sinon.stub().resolves(configured),
@@ -799,8 +850,8 @@ describe("AI reviewer: provider configuration", function () {
     await waitUntilLoaded();
     expect(button("Test connection").disabled).to.equal(false);
 
-    fireEvent.change(input("Model"), {
-      target: { value: otherConfiguration.model },
+    fireEvent.change(input("Base URL"), {
+      target: { value: otherConfiguration.baseUrl },
     });
     expect(button("Test connection").disabled).to.equal(true);
     fireEvent.click(button("Save"));
@@ -810,13 +861,12 @@ describe("AI reviewer: provider configuration", function () {
     await waitFor(() =>
       expect(button("Test connection").disabled).to.equal(false),
     );
-    expect(input("Model").value).to.equal(otherConfiguration.model);
-    expect(screen.getByText("Context length in use: 4096 tokens")).to.exist;
-    expect(screen.getByText("Conservative default")).to.exist;
+    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+    expect(screen.getByText("Remote endpoint")).to.exist;
   });
 
   it("aborts and ignores a stale load after the project changes", async function () {
-    const firstLoad = deferred<AiProviderConfigurationResponse>();
+    const firstLoad = deferred<AiProviderConnection>();
     const getConfiguration = sinon.stub();
     getConfiguration.onFirstCall().returns(firstLoad.promise);
     getConfiguration.onSecondCall().resolves(otherConfigured);
@@ -827,25 +877,21 @@ describe("AI reviewer: provider configuration", function () {
     rendered.rerender(
       <AiIntegrationDetailsView
         projectId={otherProjectId}
-        onHide={sinon.stub()}
-        getConfiguration={getConfiguration}
-        saveConfiguration={rendered.saveConfiguration}
-        testConnection={rendered.testConnection}
+        {...rendered.props}
       />,
     );
 
     await waitFor(() => expect(oldSignal.aborted).to.equal(true));
     await waitFor(() =>
-      expect(input("Model").value).to.equal(otherConfiguration.model),
+      expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl),
     );
     await act(async () => firstLoad.resolve(configured));
-    expect(input("Model").value).to.equal(otherConfiguration.model);
-    expect(screen.getByText("Context length in use: 4096 tokens")).to.exist;
-    expect(screen.getByText("Conservative default")).to.exist;
+    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+    expect(screen.getByText("Remote endpoint")).to.exist;
   });
 
   it("aborts the active request when the view unmounts", async function () {
-    const pendingLoad = deferred<AiProviderConfigurationResponse>();
+    const pendingLoad = deferred<AiProviderConnection>();
     const getConfiguration = sinon.stub().returns(pendingLoad.promise);
     const rendered = renderDetails({ getConfiguration });
 
@@ -856,8 +902,142 @@ describe("AI reviewer: provider configuration", function () {
     expect(signal.aborted).to.equal(true);
   });
 
+  it("lists every registered connection by name and edits the one it is asked for", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured, claudeConfigured] });
+    renderConnections({ listConnections });
+    await waitUntilLoaded();
+
+    expect(connectionRows()).to.have.length(2);
+    expect(
+      connectionRows().map(
+        (row) => within(row).getAllByRole("button")[0].textContent,
+      ),
+    ).to.deep.equal([otherConfigured.label, claudeConfigured.label]);
+    // The first connection opens, because none is more default than another.
+    expect(providerSelect().value).to.equal("openai-compatible");
+    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+
+    fireEvent.click(
+      within(connectionRows()[1]).getByRole("button", {
+        name: claudeConfigured.label,
+      }),
+    );
+
+    expect(providerSelect().value).to.equal("claude");
+    expect(input("Display name").value).to.equal(claudeConfigured.label);
+    expect(document.body.textContent).not.to.include(credential);
+  });
+
+  it("adds a second connection without disturbing the first", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured] });
+    const createConnection = sinon.stub().resolves(claudeConfigured);
+    const updateConnection = sinon.stub().resolves(otherConfigured);
+    renderConnections({ listConnections, createConnection, updateConnection });
+    await waitUntilLoaded();
+    expect(connectionRows()).to.have.length(1);
+
+    fireEvent.click(button("Add connection"));
+    expect(input("Display name").value).to.equal("");
+    fireEvent.change(providerSelect(), { target: { value: "claude" } });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(createConnection).to.have.been.calledOnce);
+    expect(updateConnection).not.to.have.been.called;
+    expect(createConnection.firstCall.args.slice(0, 2)).to.deep.equal([
+      projectId,
+      { ...claudeConfigurationWrite, credential },
+    ]);
+    await waitFor(() => expect(connectionRows()).to.have.length(2));
+    expect(document.body.textContent).not.to.include(credential);
+  });
+
+  it("updates the selected connection through its own identifier", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [claudeConfigured, otherConfigured] });
+    const updateConnection = sinon.stub().resolves(claudeConfigured);
+    renderConnections({ listConnections, updateConnection });
+    await waitUntilLoaded();
+
+    fireEvent.change(input("Display name"), {
+      target: { value: "Renamed connection" },
+    });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(updateConnection).to.have.been.calledOnce);
+    expect(updateConnection.firstCall.args.slice(0, 3)).to.deep.equal([
+      projectId,
+      secondConnectionId,
+      {
+        ...claudeConfigurationWrite,
+        label: "Renamed connection",
+      },
+    ]);
+  });
+
+  it("deletes a connection and falls back to the one that is left", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [claudeConfigured, otherConfigured] });
+    const deleteConnection = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured] });
+    renderConnections({ listConnections, deleteConnection });
+    await waitUntilLoaded();
+    expect(providerSelect().value).to.equal("claude");
+
+    fireEvent.click(
+      within(connectionRows()[0]).getByRole("button", {
+        name: "Delete connection",
+      }),
+    );
+
+    await waitFor(() => expect(deleteConnection).to.have.been.calledOnce);
+    expect(deleteConnection.firstCall.args.slice(0, 2)).to.deep.equal([
+      projectId,
+      secondConnectionId,
+    ]);
+    await waitFor(() => expect(connectionRows()).to.have.length(1));
+    expect(providerSelect().value).to.equal("openai-compatible");
+    expect(input("Base URL").value).to.equal(otherConfiguration.baseUrl);
+  });
+
+  it("reports a rejected eleventh connection without losing the draft", async function () {
+    const listConnections = sinon
+      .stub()
+      .resolves({ connections: [otherConfigured] });
+    const createConnection = sinon
+      .stub()
+      .rejects(
+        new AiProviderConfigurationClientError(
+          "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
+        ),
+      );
+    renderConnections({ listConnections, createConnection });
+    await waitUntilLoaded();
+
+    fireEvent.click(button("Add connection"));
+    fireEvent.change(providerSelect(), { target: { value: "claude" } });
+    fireEvent.change(input("Display name"), { target: { value: "Eleventh" } });
+    fireEvent.change(input("API key"), { target: { value: credential } });
+    fireEvent.click(button("Save"));
+
+    await screen.findByText(
+      "No more connections can be added. Delete one first.",
+    );
+    expect(input("Display name").value).to.equal("Eleventh");
+    expect(connectionRows()).to.have.length(1);
+  });
+
   it("shows a bounded non-2xx error without exposing the raw payload", async function () {
-    fetchMock.get(`/project/${projectId}/ai-reviewer/config`, configured);
+    fetchMock.get(`/project/${projectId}/ai-reviewer/connections`, {
+      connections: [configured],
+    });
     fetchMock.post(`/project/${projectId}/ai-reviewer/connection-test`, {
       status: 502,
       headers: { "Content-Type": "application/json" },
@@ -884,8 +1064,10 @@ describe("AI reviewer: provider configuration", function () {
   it("routes a configuration persistence failure to server-storage guidance", async function () {
     const storageSentinel =
       "EACCES_/var/lib/overleaf/data/.token-cipher.json_PRIVATE_CREDENTIAL";
-    fetchMock.get(`/project/${projectId}/ai-reviewer/config`, unconfigured);
-    fetchMock.put(`/project/${projectId}/ai-reviewer/config`, {
+    fetchMock.get(`/project/${projectId}/ai-reviewer/connections`, {
+      connections: [],
+    });
+    fetchMock.post(`/project/${projectId}/ai-reviewer/connections`, {
       status: 500,
       headers: { "Content-Type": "application/json" },
       body: {
@@ -908,9 +1090,6 @@ describe("AI reviewer: provider configuration", function () {
     fireEvent.change(input("Base URL"), {
       target: { value: configuration.baseUrl },
     });
-    fireEvent.change(input("Model"), {
-      target: { value: configuration.model },
-    });
     fireEvent.click(button("Save"));
 
     await screen.findByText(
@@ -923,7 +1102,9 @@ describe("AI reviewer: provider configuration", function () {
   });
 
   it("preserves a bounded authentication category without exposing provider text", async function () {
-    fetchMock.get(`/project/${projectId}/ai-reviewer/config`, otherConfigured);
+    fetchMock.get(`/project/${projectId}/ai-reviewer/connections`, {
+      connections: [otherConfigured],
+    });
     fetchMock.post(`/project/${projectId}/ai-reviewer/connection-test`, {
       status: 502,
       headers: { "Content-Type": "application/json" },

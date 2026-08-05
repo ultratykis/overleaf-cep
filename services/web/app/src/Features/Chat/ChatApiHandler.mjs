@@ -16,6 +16,40 @@ async function getThread(projectId, threadId) {
 /**
  * @param {any} projectId
  * @param {any} threadId
+ * @param {AbortSignal} signal
+ */
+async function getThreadState(projectId, threadId, signal) {
+  if (!(signal instanceof AbortSignal)) {
+    throw new TypeError('AbortSignal is required for thread state request')
+  }
+  const body = await fetchJson(
+    chatApiUrl(`/project/${projectId}/thread/${threadId}/state`),
+    { signal }
+  )
+  if (
+    body == null ||
+    typeof body !== 'object' ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(body, 'state')
+  ) {
+    throw new Error('Invalid thread state response')
+  }
+  const { state } = body
+  if (
+    state !== 'absent' &&
+    state !== 'current' &&
+    state !== 'resolved' &&
+    state !== 'ambiguous'
+  ) {
+    throw new Error('Invalid thread state response')
+  }
+  return { state }
+}
+
+/**
+ * @param {any} projectId
+ * @param {any} threadId
  * @param {any} messageId
  */
 async function getThreadMessage(projectId, threadId, messageId) {
@@ -293,6 +327,7 @@ export default {
   generateThreadData: callbackify(generateThreadData),
   promises: {
     getThread,
+    getThreadState,
     getThreadMessage,
     getThreads,
     destroyProject,

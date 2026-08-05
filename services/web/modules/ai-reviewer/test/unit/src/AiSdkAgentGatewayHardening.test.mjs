@@ -907,6 +907,70 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     },
   );
 
+  it("accepts a selection suggestion reported from the start of the selection", async function () {
+    // The model only sees the selected substring, so it counts from 0 while
+    // the stored positions are absolute. Selection spans 10..14 here.
+    const { model } = strictStreamModel([
+      outputStep(
+        validOutput({
+          suggestions: [
+            validSuggestion({
+              range: { from: 0, to: 4 },
+              evidence: [
+                {
+                  path: "main.tex",
+                  range: { from: 0, to: 4 },
+                  revision: 7,
+                  textHash: contentHash,
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+    ]);
+    const gateway = createGateway(model);
+
+    const events = await collect(gateway.stream(selectionRequest()));
+    const suggestion = events.find(
+      (event) => event.type === "suggestion",
+    )?.suggestion;
+
+    expect(suggestion?.range).toEqual({ from: 10, to: 14 });
+    expect(suggestion?.evidence?.[0]?.range).toEqual({ from: 10, to: 14 });
+  });
+
+  it("leaves an already absolute selection suggestion untouched", async function () {
+    const { model } = strictStreamModel([
+      outputStep(
+        validOutput({
+          suggestions: [
+            validSuggestion({
+              range: { from: 10, to: 14 },
+              evidence: [
+                {
+                  path: "main.tex",
+                  range: { from: 10, to: 14 },
+                  revision: 7,
+                  textHash: contentHash,
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+    ]);
+    const gateway = createGateway(model);
+
+    const events = await collect(gateway.stream(selectionRequest()));
+    const suggestion = events.find(
+      (event) => event.type === "suggestion",
+    )?.suggestion;
+
+    expect(suggestion?.range).toEqual({ from: 10, to: 14 });
+    expect(suggestion?.evidence?.[0]?.range).toEqual({ from: 10, to: 14 });
+  });
+
   it("preserves a project callback allowlist rejection", async function () {
     const { model } = strictStreamModel([
       toolStep({ path: "private.tex", range: { from: 0, to: 4 } }),

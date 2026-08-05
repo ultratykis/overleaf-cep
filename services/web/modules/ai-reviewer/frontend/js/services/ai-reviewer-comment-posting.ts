@@ -1,4 +1,5 @@
 import type { EditorSelectionSessionContext } from "./editor-selection-session";
+import { FetchError } from "@/infrastructure/fetch-json";
 
 const mongoIdentifierPattern = /^[0-9a-f]{24}$/;
 
@@ -17,6 +18,7 @@ export type PostAiReviewerCommentResult = {
 
 export type AiReviewerCommentPostingErrorCode =
   | "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE"
+  | "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
   | "AI_REVIEWER_COMMENT_POST_FAILED"
   | "AI_REVIEWER_COMMENT_PROVENANCE_FAILED"
   | "AI_REVIEWER_COMMENT_RANGE_STALE"
@@ -80,6 +82,15 @@ function isRangeStaleError(error: unknown) {
   } catch {
     return false;
   }
+}
+
+function isClearHostRejection(error: unknown) {
+  return (
+    error instanceof FetchError &&
+    error.response != null &&
+    error.response.status >= 400 &&
+    error.response.status < 500
+  );
 }
 
 function validateInput(input: PostAiReviewerCommentInput) {
@@ -237,16 +248,23 @@ export function createAiReviewerCommentPoster({
         validateRange,
       );
     } catch (error) {
-      await rollbackReservation();
       if (isRangeStaleError(error)) {
+        await rollbackReservation();
         throw postingError(
           "AI_REVIEWER_COMMENT_RANGE_STALE",
           "The document changed before the comment range was attached.",
         );
       }
+      if (isClearHostRejection(error)) {
+        await rollbackReservation();
+        throw postingError(
+          "AI_REVIEWER_COMMENT_POST_FAILED",
+          "The comment request was rejected.",
+        );
+      }
       throw postingError(
-        "AI_REVIEWER_COMMENT_POST_FAILED",
-        "The comment could not be posted.",
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        "The comment response could not be confirmed.",
       );
     }
     if (postedCommentId !== commentId) {

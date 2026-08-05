@@ -14,11 +14,35 @@ import {
   AgentStreamError,
   streamAgentEvents,
 } from "../../frontend/js/services/agent-stream";
+import type { AiProviderConnection } from "../../frontend/js/services/ai-provider-configuration";
 
 type StreamCall = Parameters<typeof streamAgentEvents>[0];
 
 const projectId = "panel-layout-project";
 const createdAt = "2026-07-26T00:00:00.000Z";
+const localConnection: AiProviderConnection = {
+  id: "connection-local",
+  label: "127.0.0.1:11434",
+  classification: "local",
+  config: {
+    provider: "openai-compatible",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    contextLengthOverride: null,
+    credentialSet: false,
+    credentialUpdatedAt: null,
+  },
+};
+const claudeConnection: AiProviderConnection = {
+  id: "connection-claude",
+  label: "Anthropic Claude",
+  classification: "remote",
+  config: {
+    provider: "claude",
+    contextLengthOverride: null,
+    credentialSet: true,
+    credentialUpdatedAt: "2026-07-26T01:02:03.000Z",
+  },
+};
 const emptyState =
   "Review a selection, document, or project, then discuss the results here.";
 const categoryFailureGuidance = {
@@ -42,13 +66,15 @@ const categoryFailureGuidance = {
     "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
 } as const;
 const projectContentFailureGuidance =
-  "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.";
+  "AI Reviewer could not read all required manuscript content because the model context was insufficient. The review may be incomplete; use a model with a larger context length or narrow the scope.";
 const streamFailureGuidance =
   "AI Reviewer could not complete the request or read its response. Check your network connection and AI Reviewer settings, then try again.";
 const requestFailureGuidance =
   "AI Reviewer could not start because the request was invalid or no longer matched the active project. Refresh the project, then try again.";
 const afterTerminalFailureGuidance =
   "AI Reviewer received data after completion. Try the review again; if it keeps happening, switch models or check the AI Reviewer settings.";
+const concurrencyFailureGuidance =
+  "An AI review is already running. Wait for it to finish, then try again.";
 const codeFailureGuidance: Partial<Record<string, string>> = {
   AI_PROJECT_CONTENT_NOT_AVAILABLE: projectContentFailureGuidance,
   AI_STREAM_NETWORK_ERROR: streamFailureGuidance,
@@ -60,6 +86,7 @@ const codeFailureGuidance: Partial<Record<string, string>> = {
   AI_STREAM_REQUEST_INVALID: requestFailureGuidance,
   AI_DISCUSSION_REQUEST_INVALID: requestFailureGuidance,
   AI_STREAM_AFTER_TERMINAL: afterTerminalFailureGuidance,
+  AI_REVIEWER_CONCURRENCY_LIMITED: concurrencyFailureGuidance,
 };
 const emittedFailureGuidanceCases = [
   { code: "AI_REQUEST_ABORTED", category: "aborted", retryable: false },
@@ -90,6 +117,11 @@ const emittedFailureGuidanceCases = [
   { code: "AI_PROVIDER_ERROR", category: "provider", retryable: true },
   {
     code: "AI_PROVIDER_RATE_LIMITED",
+    category: "rate-limit",
+    retryable: true,
+  },
+  {
+    code: "AI_REVIEWER_CONCURRENCY_LIMITED",
     category: "rate-limit",
     retryable: true,
   },
@@ -155,8 +187,95 @@ function renderPanel(
   return render(<AiReviewerPanelView projectId={projectId} {...props} />);
 }
 
+function modelOptions() {
+  const select = screen.queryByRole("combobox", { name: "Model" });
+  return select == null
+    ? []
+    : [...(select as HTMLSelectElement).options].map((option) => option.text);
+}
+
+// A model option is identified by its connection and its id together, because
+// the same id can be reachable through more than one connection.
+function modelValue(connectionId: string, id: string) {
+  return JSON.stringify([connectionId, id]);
+}
+
+function catalogModel(
+  connection: AiProviderConnection,
+  id: string,
+  displayName: string,
+) {
+  return {
+    id,
+    displayName,
+    connectionId: connection.id,
+    connectionLabel: connection.label,
+  };
+}
+
 function primaryControls(container: HTMLElement) {
   return [...container.querySelectorAll<HTMLButtonElement>(".btn-primary")];
+}
+
+function documentCapture(text: string) {
+  return sinon
+    .stub()
+    .callsFake(
+      async ({
+        requestId,
+        action,
+        instruction,
+      }: {
+        requestId: string;
+        action: "review";
+        instruction: string;
+      }) => ({
+        status: "ready" as const,
+        session: Object.freeze({
+          request: Object.freeze({
+            requestId,
+            projectId,
+            action,
+            instruction,
+            skill: "referee-review",
+            scope: Object.freeze({
+              kind: "document" as const,
+              documentId: "document-1",
+              path: "main.tex",
+              baseRevision: 7,
+              baseTextHash: "a".repeat(64),
+              text,
+            }),
+          }),
+          binding: Object.freeze({
+            currentDocument: {},
+            shareDocument: {},
+            trackChanges: false,
+            connectionEpoch: 1,
+          }),
+        }),
+      }),
+    );
+}
+
+// The override is the only context length a client can see, so it is what
+// decides whether a document review has to be split.
+function splitConnections(contextLengthOverride: number) {
+  return {
+    connections: [
+      {
+        ...localConnection,
+        config: { ...localConnection.config, contextLengthOverride },
+      },
+    ],
+  };
+}
+
+function splitCatalog() {
+  return {
+    models: [catalogModel(localConnection, "split-model", "Split model")],
+    failures: [],
+  };
 }
 
 describe("AI reviewer: panel layout", function () {
@@ -244,6 +363,184 @@ describe("AI reviewer: panel layout", function () {
       .exist;
     expect(screen.getByRole("button", { name: "Run review" })).to.exist;
     expect(primaryControls(container)).to.have.length(1);
+  });
+
+  it("selects a model per run and displays the persisted run origin", async function () {
+    const selectedModel = "reviewer-unavailable-v2";
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "started",
+        eventId: "panel-model-started",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        provider: "openai-compatible",
+        model: selectedModel,
+        skill: call.request.skill,
+      });
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-model-completed",
+        requestId: call.request.requestId,
+        sequence: 1,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    renderPanel({
+      streamRequest,
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection] }),
+      loadProviderModels: sinon.stub().resolves({
+        models: [
+          catalogModel(
+            localConnection,
+            "reviewer-default-v1",
+            "Default reviewer",
+          ),
+          catalogModel(localConnection, selectedModel, "Alternate reviewer"),
+        ],
+        failures: [],
+      }),
+    });
+
+    const modelSelect = await screen.findByRole("combobox", { name: "Model" });
+    // Choosing a model is what chooses a connection: no separate picker.
+    expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
+    fireEvent.change(modelSelect, {
+      target: { value: modelValue(localConnection.id, selectedModel) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    await screen.findByText("Completed");
+
+    expect(streamRequest.firstCall.args[0].request.model).to.equal(
+      selectedModel,
+    );
+    expect(streamRequest.firstCall.args[0].request.connectionId).to.equal(
+      localConnection.id,
+    );
+    expect(screen.getByText(`openai-compatible · ${selectedModel}`)).to.exist;
+  });
+
+  it("offers the models of every connection in one dropdown", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-connection-completed",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    const loadProviderModels = sinon.stub().resolves({
+      models: [
+        catalogModel(localConnection, "shared-model", "Shared model"),
+        catalogModel(claudeConnection, "shared-model", "Shared model"),
+        catalogModel(
+          claudeConnection,
+          "claude-sonnet-4-20250514",
+          "Claude Sonnet",
+        ),
+      ],
+      failures: [],
+    });
+    renderPanel({
+      streamRequest,
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection, claudeConnection] }),
+      loadProviderModels,
+    });
+
+    const modelSelect = await screen.findByRole("combobox", { name: "Model" });
+    expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
+    // The same model id from two connections stays two distinguishable options.
+    expect(modelOptions()).to.deep.equal([
+      `Shared model (${localConnection.label})`,
+      `Shared model (${claudeConnection.label})`,
+      `Claude Sonnet (${claudeConnection.label})`,
+    ]);
+    expect(loadProviderModels.firstCall.args[0]).to.equal(projectId);
+
+    fireEvent.change(modelSelect, {
+      target: { value: modelValue(claudeConnection.id, "shared-model") },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run review" }));
+    await screen.findByText("Completed");
+
+    expect(streamRequest.firstCall.args[0].request).to.include({
+      connectionId: claudeConnection.id,
+      model: "shared-model",
+    });
+  });
+
+  it("keeps a reachable connection's models when another one fails", async function () {
+    renderPanel({
+      loadProviderConnections: sinon
+        .stub()
+        .resolves({ connections: [localConnection, claudeConnection] }),
+      loadProviderModels: sinon.stub().resolves({
+        models: [
+          catalogModel(
+            claudeConnection,
+            "claude-sonnet-4-20250514",
+            "Claude Sonnet",
+          ),
+        ],
+        failures: [
+          {
+            connectionId: localConnection.id,
+            connectionLabel: localConnection.label,
+            code: "AI_PROVIDER_NETWORK_FAILED",
+            category: "network",
+          },
+        ],
+      }),
+    });
+
+    await screen.findByRole("combobox", { name: "Model" });
+    expect(modelOptions()).to.deep.equal([
+      `Claude Sonnet (${claudeConnection.label})`,
+    ]);
+    const failures = screen.getByTestId("ai-reviewer-model-failures");
+    expect(failures.textContent).to.equal(
+      `Models could not be loaded from: ${localConnection.label}`,
+    );
+    // A classification never carries the provider's own words to the screen.
+    expect(failures.textContent).not.to.include("AI_PROVIDER_NETWORK_FAILED");
+  });
+
+  it("omits the connection when none is registered", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-no-connection-completed",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    renderPanel({
+      streamRequest,
+      loadProviderConnections: sinon.stub().resolves({ connections: [] }),
+      loadProviderModels: sinon.stub().resolves({ models: [], failures: [] }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Run review" }));
+    await screen.findByText("Completed");
+
+    expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
+    expect(screen.queryByRole("combobox", { name: "Model" })).not.to.exist;
+    expect(screen.queryByTestId("ai-reviewer-model-failures")).not.to.exist;
+    expect(streamRequest.firstCall.args[0].request).not.to.have.property(
+      "connectionId",
+    );
+    expect(streamRequest.firstCall.args[0].request).not.to.have.property(
+      "model",
+    );
   });
 
   it("suppresses the bottom controls during a run and keeps cancel in its header", async function () {
@@ -368,5 +665,147 @@ describe("AI reviewer: panel layout", function () {
 
     expect(alert.textContent).to.equal(categoryFailureGuidance.unknown);
     expect(alert.textContent).not.to.include(boundedMessage);
+  });
+
+  it("keeps a fitting document as one document run", async function () {
+    const text = "\\section{Only}\nShort.";
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      emitCompletedReview(call);
+    });
+    renderPanel({
+      captureDocumentSession: documentCapture(text),
+      streamRequest,
+      loadProviderConnections: sinon.stub().resolves(splitConnections(4_096)),
+      loadProviderModels: sinon.stub().resolves(splitCatalog()),
+    });
+
+    await screen.findByRole("combobox", { name: "Model" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
+      target: { value: "document" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review current document" }),
+    );
+    await screen.findByText("Completed");
+
+    expect(streamRequest).to.have.been.calledOnce;
+    expect(streamRequest.firstCall.args[0].request.scope.kind).to.equal(
+      "document",
+    );
+  });
+
+  it("runs oversized sections as grouped selection reviews with the selected model", async function () {
+    const text = ["One", "Two", "Three"]
+      .map((title) => `\\section{${title}}\n${title.repeat(70)}\n`)
+      .join("");
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      emitCompletedReview(call);
+    });
+    renderPanel({
+      createRequestId: (() => {
+        let next = 0;
+        return () => `split-request-${++next}`;
+      })(),
+      captureDocumentSession: documentCapture(text),
+      streamRequest,
+      loadProviderConnections: sinon.stub().resolves(splitConnections(1_600)),
+      loadProviderModels: sinon.stub().resolves(splitCatalog()),
+    });
+
+    await screen.findByRole("combobox", { name: "Model" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
+      target: { value: "document" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review current document" }),
+    );
+    await waitFor(() => expect(streamRequest.callCount).to.equal(3));
+
+    for (const [index, call] of streamRequest.getCalls().entries()) {
+      const scope = call.args[0].request.scope;
+      expect(scope.kind).to.equal("selection");
+      if (scope.kind !== "selection") {
+        throw new Error("Expected a selection review.");
+      }
+      expect(scope.text).to.equal(text.slice(scope.range.from, scope.range.to));
+      expect(call.args[0].request.model).to.equal("split-model");
+      expect(screen.getByText(`Selection ${index + 1}/3`)).to.exist;
+    }
+  });
+
+  it("reports an oversized subsection while continuing with usable sections", async function () {
+    const text = [
+      "\\section{Large}",
+      "\\subsection{Too large}",
+      "x".repeat(500),
+      "\\section{Usable}",
+      "ok",
+    ].join("\n");
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      emitCompletedReview(call);
+    });
+    renderPanel({
+      captureDocumentSession: documentCapture(text),
+      streamRequest,
+      loadProviderConnections: sinon.stub().resolves(splitConnections(1_600)),
+      loadProviderModels: sinon.stub().resolves(splitCatalog()),
+    });
+
+    await screen.findByRole("combobox", { name: "Model" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
+      target: { value: "document" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review current document" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "1 oversized subsection(s) could not be split and were skipped.",
+      ),
+    ).to.exist;
+    expect(streamRequest).to.have.been.calledOnce;
+    expect(streamRequest.firstCall.args[0].request.scope.text).to.equal(
+      "\\section{Usable}\nok",
+    );
+  });
+
+  it("stops remaining split reviews after a concurrency rejection", async function () {
+    const text = ["One", "Two", "Three"]
+      .map((title) => `\\section{${title}}\n${title.repeat(70)}\n`)
+      .join("");
+    const streamRequest = sinon
+      .stub()
+      .onFirstCall()
+      .callsFake(async (call: StreamCall) => emitCompletedReview(call));
+    streamRequest.onSecondCall().rejects(
+      new AgentStreamError({
+        code: "AI_REVIEWER_CONCURRENCY_LIMITED",
+        category: "rate-limit",
+        message: "bounded",
+        retryable: true,
+      }),
+    );
+    renderPanel({
+      captureDocumentSession: documentCapture(text),
+      streamRequest,
+      loadProviderConnections: sinon.stub().resolves(splitConnections(1_700)),
+      loadProviderModels: sinon.stub().resolves(splitCatalog()),
+    });
+
+    await screen.findByRole("combobox", { name: "Model" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Review scope" }), {
+      target: { value: "document" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Review current document" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "1 remaining section(s) were not started because the concurrent review limit was reached.",
+      ),
+    ).to.exist;
+    expect(streamRequest.callCount).to.equal(2);
   });
 });

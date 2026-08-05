@@ -136,6 +136,87 @@ describe('ChatApiHandler', function () {
     })
   })
 
+  describe('getThreadState', function () {
+    beforeEach(function (ctx) {
+      ctx.thread_id = 'comment-thread-id'
+      ctx.abortController = new AbortController()
+    })
+
+    for (const state of ['absent', 'current', 'resolved', 'ambiguous']) {
+      it(`returns the closed ${state} state`, async function (ctx) {
+        ctx.FetchUtils.fetchJson.resolves({ state })
+
+        const result = await ctx.ChatApiHandler.promises.getThreadState(
+          ctx.project_id,
+          ctx.thread_id,
+          ctx.abortController.signal
+        )
+
+        expect(result).to.deep.equal({ state })
+        expect(ctx.FetchUtils.fetchJson).to.have.been.calledWith(
+          sinon.match(
+            url =>
+              url.toString() ===
+              `${ctx.settings.apis.chat.internal_url}/project/${ctx.project_id}/thread/${ctx.thread_id}/state`
+          ),
+          { signal: ctx.abortController.signal }
+        )
+      })
+    }
+
+    it('requires an AbortSignal before making a request', async function (ctx) {
+      await expect(
+        ctx.ChatApiHandler.promises.getThreadState(
+          ctx.project_id,
+          ctx.thread_id
+        )
+      ).to.be.rejectedWith(
+        'AbortSignal is required for thread state request'
+      )
+      expect(ctx.FetchUtils.fetchJson).not.to.have.been.called
+    })
+
+    it('does not convert fetch failures to absent', async function (ctx) {
+      ctx.error = new RequestFailedError('some-url', {}, { status: 500 })
+      ctx.FetchUtils.fetchJson.rejects(ctx.error)
+
+      await expect(
+        ctx.ChatApiHandler.promises.getThreadState(
+          ctx.project_id,
+          ctx.thread_id,
+          ctx.abortController.signal
+        )
+      ).to.be.rejectedWith(ctx.error)
+    })
+
+    it('rejects unknown states without echoing them', async function (ctx) {
+      ctx.FetchUtils.fetchJson.resolves({ state: 'foreign-project' })
+
+      await expect(
+        ctx.ChatApiHandler.promises.getThreadState(
+          ctx.project_id,
+          ctx.thread_id,
+          ctx.abortController.signal
+        )
+      ).to.be.rejectedWith('Invalid thread state response')
+    })
+
+    it('rejects content-bearing responses', async function (ctx) {
+      ctx.FetchUtils.fetchJson.resolves({
+        state: 'current',
+        messages: [{ content: 'must not cross this boundary' }],
+      })
+
+      await expect(
+        ctx.ChatApiHandler.promises.getThreadState(
+          ctx.project_id,
+          ctx.thread_id,
+          ctx.abortController.signal
+        )
+      ).to.be.rejectedWith('Invalid thread state response')
+    })
+  })
+
   describe('duplicateCommentThreads', function () {
     beforeEach(async function (ctx) {
       ctx.FetchUtils.fetchJson.resolves(

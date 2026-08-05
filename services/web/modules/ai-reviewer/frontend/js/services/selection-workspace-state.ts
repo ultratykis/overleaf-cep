@@ -46,6 +46,9 @@ export type SelectionWorkspaceState = {
   requestId: string | null;
   scopeKind: AgentRequest["scope"]["kind"] | null;
   request: AgentRequest | null;
+  provider: string | null;
+  model: string | null;
+  group: WorkspaceRun["group"] | null;
   session: EditorSelectionSession | null;
   text: string;
   findings: Finding[];
@@ -72,10 +75,15 @@ export type SelectionWorkspaceAction =
       status: "capturing" | "streaming";
       scopeKind?: AgentRequest["scope"]["kind"];
       createdOrder?: number;
+      group?: WorkspaceRun["group"];
     })
   | (BoundAction & {
       type: "request";
       request: AgentRequest;
+    })
+  | (BoundAction & {
+      type: "group";
+      group: NonNullable<WorkspaceRun["group"]>;
     })
   | (BoundAction & {
       type: "session";
@@ -143,6 +151,9 @@ export const initialSelectionWorkspaceState: SelectionWorkspaceState = {
   requestId: null,
   scopeKind: null,
   request: null,
+  provider: null,
+  model: null,
+  group: null,
   session: null,
   text: "",
   findings: [],
@@ -173,6 +184,9 @@ export function reduceSelectionWorkspaceState(
       requestId: action.requestId,
       scopeKind: action.scopeKind ?? null,
       request: null,
+      provider: null,
+      model: null,
+      group: action.group ?? null,
       session: null,
       text: "",
       findings: [],
@@ -187,6 +201,13 @@ export function reduceSelectionWorkspaceState(
 
   if (!isBoundToState(state, action)) {
     return state;
+  }
+
+  if (action.type === "group") {
+    return {
+      ...state,
+      group: action.group,
+    };
   }
 
   if (action.type === "session") {
@@ -238,6 +259,13 @@ export function reduceSelectionWorkspaceState(
       return state;
     }
 
+    if (action.event.type === "started") {
+      return {
+        ...state,
+        provider: action.event.provider,
+        model: action.event.model,
+      };
+    }
     if (action.event.type === "text.delta") {
       return {
         ...state,
@@ -458,6 +486,9 @@ function hydrateWorkspaceRun(run: WorkspaceRun): SelectionWorkspaceState {
     requestId: run.request.requestId,
     scopeKind: run.request.scope.kind,
     request: run.request,
+    provider: run.provider ?? null,
+    model: run.model ?? null,
+    group: run.group ?? null,
     session: null,
     text: run.text,
     findings: run.findings.map((entry) => entry.artifact),

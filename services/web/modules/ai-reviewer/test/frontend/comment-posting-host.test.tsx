@@ -8,6 +8,7 @@ import sinon from "sinon";
 
 import { ProjectProvider } from "@/shared/context/project-context";
 import { postCommentMessageAfterRangeValidation } from "@/features/review-panel/context/threads-context";
+import { FetchError } from "@/infrastructure/fetch-json";
 import AiAssistedCommentLabel from "../../frontend/js/components/ai-assisted-comment-label";
 import {
   loadAiReviewerCommentProvenance,
@@ -241,6 +242,119 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect(releaseProvenance).to.have.been.calledOnceWithExactly(
       projectId,
       commentId,
+    );
+  });
+
+  it("rolls back a clear HTTP rejection but retains an unconfirmed reservation", async function () {
+    for (const [error, expectedCode, expectedRollbacks] of [
+      [
+        new FetchError(
+          "rejected",
+          "/synthetic-comment",
+          {},
+          new Response(null, { status: 400 }),
+        ),
+        "AI_REVIEWER_COMMENT_POST_FAILED",
+        1,
+      ],
+      [
+        new TypeError("network response unavailable"),
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        0,
+      ],
+    ] as const) {
+      const releaseProvenance = sinon.stub().resolves();
+      const context = liveContext();
+      const post = createAiReviewerCommentPoster({
+        projectId,
+        getContext: () => context,
+        generateCommentId: () => commentId,
+        reserveProvenance: sinon.stub().resolves({ commentId, created: true }),
+        releaseProvenance,
+        addComment: sinon.stub().rejects(error),
+        recordProvenance: sinon.stub(),
+      });
+
+      const postingError = await rejectedError(post(input));
+      expect((postingError as AiReviewerCommentPostingError).code).to.equal(
+        expectedCode,
+      );
+      expect(releaseProvenance.callCount).to.equal(expectedRollbacks);
+    }
+  });
+
+  it("keeps concurrent uncertain and failed posting results isolated", async function () {
+    const failedCommentId = "e".repeat(24);
+    const context = liveContext();
+    const rejections = new Map<string, (error: unknown) => void>();
+    const releaseProvenance = sinon.stub().resolves();
+    const generatedCommentIds = [commentId, failedCommentId];
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId: () => generatedCommentIds.shift()!,
+      reserveProvenance: async (_projectId, reservedCommentId) => ({
+        commentId: reservedCommentId,
+        created: true,
+      }),
+      releaseProvenance,
+      addComment: async (_from, _text, _content, reservedCommentId) =>
+        await new Promise<string>((_resolve, reject) => {
+          rejections.set(reservedCommentId, reject);
+        }),
+      recordProvenance: sinon.stub(),
+    });
+
+    const uncertainPosting = rejectedError(post(input));
+    const failedPosting = rejectedError(
+      post({ ...input, content: "Second synthetic comment." }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    rejections.get(failedCommentId)!(
+      new FetchError(
+        "rejected",
+        "/synthetic-comment",
+        {},
+        new Response(null, { status: 400 }),
+      ),
+    );
+    rejections.get(commentId)!(new TypeError("network response unavailable"));
+
+    const [uncertainError, failedError] = await Promise.all([
+      uncertainPosting,
+      failedPosting,
+    ]);
+    expect((uncertainError as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    );
+    expect((failedError as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_FAILED",
+    );
+    expect(releaseProvenance).to.have.been.calledOnceWithExactly(
+      projectId,
+      failedCommentId,
+    );
+  });
+
+  it("preserves the posting error when rollback itself fails", async function () {
+    let context = liveContext();
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId: () => commentId,
+      reserveProvenance: sinon.stub().callsFake(async () => {
+        context = liveContext("alpha changed omega");
+        return { commentId, created: true };
+      }),
+      releaseProvenance: sinon.stub().rejects(new Error("rollback failed")),
+      addComment: sinon.stub(),
+      recordProvenance: sinon.stub(),
+    });
+
+    const error = await rejectedError(post(input));
+    expect((error as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_RANGE_STALE",
     );
   });
 

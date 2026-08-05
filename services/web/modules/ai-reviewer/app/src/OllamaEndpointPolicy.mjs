@@ -73,14 +73,25 @@ function assertCanonicalDnsHost(host) {
 }
 
 /**
- * The lexical endpoint grammar excludes dotted IPv4 tails, so expanding a
- * validated IPv6 address only needs to handle hexadecimal hextets.
- *
  * @param {string} address
  * @returns {number[]}
  */
 function ipv6Words(address) {
-  const halves = address.split("::");
+  let hexadecimalAddress = address.split("%", 1)[0];
+  const dottedTail = /(?:^|:)([0-9]+(?:\.[0-9]+){3})$/u.exec(
+    hexadecimalAddress,
+  );
+  if (dottedTail !== null) {
+    const octets = dottedTail[1].split(".").map(Number);
+    hexadecimalAddress = `${hexadecimalAddress.slice(
+      0,
+      -dottedTail[1].length,
+    )}${((octets[0] << 8) | octets[1]).toString(16)}:${(
+      (octets[2] << 8) |
+      octets[3]
+    ).toString(16)}`;
+  }
+  const halves = hexadecimalAddress.split("::");
   const left = halves[0] === "" ? [] : halves[0].split(":");
   const right =
     halves.length === 1 || halves[1] === "" ? [] : halves[1].split(":");
@@ -94,6 +105,21 @@ function ipv6Words(address) {
 
 /**
  * @param {number[]} words
+ * @returns {number[]}
+ */
+function mappedIpv4Octets(words) {
+  return [words[6] >> 8, words[6] & 0xff, words[7] >> 8, words[7] & 0xff];
+}
+
+/**
+ * @param {number[]} octets
+ */
+function isForbiddenIpv4(octets) {
+  return octets[0] === 169 && octets[1] === 254;
+}
+
+/**
+ * @param {number[]} words
  */
 function isIpv4MappedOrCompatible(words) {
   const firstFiveZero = words.slice(0, 5).every((word) => word === 0);
@@ -102,6 +128,38 @@ function isIpv4MappedOrCompatible(words) {
   const compatible =
     firstSixZero && !(words[6] === 0 && (words[7] === 0 || words[7] === 1));
   return mapped || compatible;
+}
+
+/**
+ * Reject only the resolved address classes owned by this endpoint policy.
+ * Unknown and ordinary private addresses deliberately remain allowed.
+ *
+ * @param {unknown} address
+ */
+export function assertAllowedResolvedIpAddress(address) {
+  if (typeof address !== "string") {
+    return;
+  }
+  const family = isIP(address);
+  if (family === 4) {
+    if (isForbiddenIpv4(address.split(".").map(Number))) {
+      throw new OpenAiCompatibleEndpointPolicyError();
+    }
+    return;
+  }
+  if (family !== 6) {
+    return;
+  }
+  const words = ipv6Words(address);
+  const mapped =
+    words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  if (
+    (words[0] & 0xffc0) === 0xfe80 ||
+    (words[0] & 0xfe00) === 0xfc00 ||
+    (mapped && isForbiddenIpv4(mappedIpv4Octets(words)))
+  ) {
+    throw new OpenAiCompatibleEndpointPolicyError();
+  }
 }
 
 /**

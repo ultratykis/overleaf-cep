@@ -5,9 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
 import {
+  parseAiReviewerConnection,
+  parseAiReviewerConnectionUpdate,
   parseAiReviewerProviderConfig,
-  parseAiReviewerProviderConfigUpdate,
-  publicAiReviewerProviderConfig,
+  publicAiReviewerProviderConnection,
 } from "../../../app/src/AiReviewerProviderConfig.mjs";
 import { createAiReviewerProviderConfigStore } from "../../../app/src/AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
@@ -20,7 +21,9 @@ import {
 import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mjs";
 import {
   AgentEventSchema,
+  AgentRequestSchema,
   DiscussionEventSchema,
+  WorkspaceRunSchema,
 } from "../../../shared/contracts.mjs";
 
 const userId = "user-provider-0001";
@@ -51,6 +54,8 @@ const extractedMessages = JSON.parse(
   ),
 );
 
+// A run configuration is a connection plus the model the request selected and
+// the context length that pair resolved to. Only this shape reaches transports.
 const configuration = Object.freeze({
   provider: "openai-compatible",
   baseUrl,
@@ -71,25 +76,12 @@ const credentialConfiguration = Object.freeze({
   credential,
   credentialUpdatedAt,
 });
-const credentialUpdate = Object.freeze({
-  provider: credentialConfiguration.provider,
-  baseUrl: credentialConfiguration.baseUrl,
-  model: credentialConfiguration.model,
-  contextLength: credentialConfiguration.contextLength,
-  credential,
-});
 const geminiConfiguration = Object.freeze({
   provider: "gemini",
   model: geminiModel,
   contextLength,
   credential,
   credentialUpdatedAt,
-});
-const geminiUpdate = Object.freeze({
-  provider: "gemini",
-  model: geminiModel,
-  contextLength,
-  credential,
 });
 const claudeConfiguration = Object.freeze({
   provider: "claude",
@@ -98,49 +90,57 @@ const claudeConfiguration = Object.freeze({
   credential,
   credentialUpdatedAt,
 });
-const claudeUpdate = Object.freeze({
-  provider: "claude",
-  model: claudeModel,
-  contextLength,
+
+// A connection is only a destination. The context length override is the
+// escape hatch a run applies to whichever model it selected.
+const connectionWrite = Object.freeze({
+  provider: "openai-compatible",
+  baseUrl,
+  contextLengthOverride: contextLength,
+});
+const otherConnectionWrite = Object.freeze({
+  provider: "openai-compatible",
+  baseUrl: otherBaseUrl,
+  contextLengthOverride: otherContextLength,
+});
+const credentialConnectionWrite = Object.freeze({
+  provider: "openai-compatible",
+  baseUrl: remoteBaseUrl,
+  contextLengthOverride: contextLength,
   credential,
 });
-const publicConfiguration = Object.freeze({
-  ...configuration,
-  contextLengthSource: "override",
-  credentialSet: false,
-  credentialUpdatedAt: null,
-});
-const publicCredentialConfiguration = Object.freeze({
-  provider: credentialConfiguration.provider,
-  baseUrl: credentialConfiguration.baseUrl,
-  model: credentialConfiguration.model,
-  contextLength: credentialConfiguration.contextLength,
-  contextLengthSource: "override",
-  credentialSet: true,
-  credentialUpdatedAt,
-});
-const publicGeminiConfiguration = Object.freeze({
+const geminiConnectionWrite = Object.freeze({
   provider: "gemini",
-  model: geminiModel,
-  contextLength,
-  contextLengthSource: "override",
-  credentialSet: true,
-  credentialUpdatedAt,
+  credential,
 });
-const publicClaudeConfiguration = Object.freeze({
+const claudeConnectionWrite = Object.freeze({
   provider: "claude",
-  model: claudeModel,
-  contextLength,
-  contextLengthSource: "override",
-  credentialSet: true,
+  credential,
+});
+const storedConnectionId = "connection-provider-0001";
+const otherConnection = Object.freeze({
+  id: storedConnectionId,
+  provider: "openai-compatible",
+  baseUrl: otherBaseUrl,
+  label: "localhost:11434",
+  contextLengthOverride: otherContextLength,
+});
+const credentialConnection = Object.freeze({
+  id: storedConnectionId,
+  provider: "openai-compatible",
+  baseUrl: remoteBaseUrl,
+  label: "api.example.com",
+  contextLengthOverride: contextLength,
+  credential,
   credentialUpdatedAt,
 });
-const compatibilityResult = Object.freeze({
-  type: "completed",
-  text: "COMPAT_OK",
-  toolCalls: Object.freeze([]),
-  finishReason: "stop",
-  usage: Object.freeze({ inputTokens: 12, outputTokens: 3 }),
+const geminiConnection = Object.freeze({
+  id: storedConnectionId,
+  provider: "gemini",
+  label: "Google Gemini",
+  contextLengthOverride: contextLength,
+  credential,
+  credentialUpdatedAt,
 });
 
 function selectionRequest() {
@@ -365,6 +365,10 @@ function inMemoryModel() {
   return { hooks, modelDependency, records };
 }
 
+function storedConnection(records, id = userId) {
+  return records.get(id).connections[0];
+}
+
 function credentialManagerFixture() {
   const encryptedValues = new Map();
   let sequence = 0;
@@ -407,6 +411,75 @@ function parseDiscussionNdjson(response) {
     .map((line) => DiscussionEventSchema.parse(JSON.parse(line)));
 }
 
+/**
+ * The stubs a run needs before it reaches a transport: which models the
+ * connection offers, and what context length the selected one resolves to.
+ */
+function runModelStubs(models = [{ id: otherModel, displayName: otherModel }]) {
+  return {
+    listModels: vi.fn(async () => models),
+    resolveContextLength: vi.fn(async () => ({
+      contextLength: otherContextLength,
+      contextLengthSource: "override",
+    })),
+  };
+}
+
+/**
+ * Give a real provider service a fixed model listing, so a run resolves its
+ * model without any provider being reachable.
+ */
+function withModelListing(
+  providerService,
+  models = [{ id: otherModel, displayName: otherModel }],
+) {
+  return { ...providerService, listModels: vi.fn(async () => models) };
+}
+
+async function projectCoverageStream({
+  text,
+  configuredContextLength = contextLength,
+  performReads = async () => {},
+}) {
+  const transport = {
+    createAgentGateway: vi.fn(({ readProjectFile }) => ({
+      async *stream(agentRequest, { signal }) {
+        await performReads(readProjectFile, agentRequest, signal);
+        yield* streamEvents();
+      },
+    })),
+  };
+  const providerService = withModelListing(
+    createOllamaProviderService({
+      transportFactory: () => transport,
+    }),
+  );
+  const requestScopeReader = createRequestScopeReader({
+    loadProjectDocuments: vi.fn(async () => ({
+      "/main.tex": {
+        _id: "document-provider-main",
+        version: 1,
+        lines: [text],
+      },
+    })),
+  });
+  const controller = createConfiguredAiReviewerController({
+    configStore: {
+      get: vi.fn(async () => ({
+        ...otherConnection,
+        contextLengthOverride: configuredContextLength,
+      })),
+    },
+    providerService,
+    requestScopeReader,
+    now: () => createdAt,
+    eventId: () => "event-provider-error",
+  });
+  const response = new FakeResponse();
+  await controller.stream(httpRequest({ body: projectRequest() }), response);
+  return parseNdjson(response);
+}
+
 async function captureError(work) {
   try {
     await work;
@@ -425,33 +498,53 @@ function deferred() {
 }
 
 function providerControllerFixture({
-  storedConfiguration = configuration,
+  storedConnections = [{ ...otherConnection, baseUrl }],
   timeoutSignalFactory,
+  modelTimeoutSignalFactory,
+  failureRecorder = vi.fn(),
 } = {}) {
   const store = {
-    get: vi.fn(async () => storedConfiguration),
-    save: vi.fn(async (_id, value) => value),
+    get: vi.fn(async () => storedConnections[0] ?? null),
+    getAll: vi.fn(async () => storedConnections),
   };
   const providerService = {
+    listModels: vi.fn(async () => [
+      { id: model, displayName: "Configured model" },
+    ]),
     testConnection: vi.fn(async () => ({
       ok: true,
       provider: "openai-compatible",
-      model,
+      modelCount: 1,
       classification: "local",
     })),
   };
   return {
     store,
     providerService,
+    failureRecorder,
     controller: createAiReviewerProviderController({
       configStore: store,
       providerService,
       timeoutSignalFactory,
+      modelTimeoutSignalFactory,
+      failureRecorder,
     }),
   };
 }
 
 describe("AI reviewer provider configuration", function () {
+  it("stores a Gemini model without its listing prefix", function () {
+    // Discovery reports the bare id, so keeping `models/` here would make a
+    // saved configuration fail the per-run model check against that list.
+    expect(
+      parseAiReviewerProviderConfig({
+        provider: "gemini",
+        model: "models/gemini-3.5-flash",
+        contextLength: 8_192,
+      }).model,
+    ).toBe("gemini-3.5-flash");
+  });
+
   it("keeps the AI reviewer locale and extracted message key sets aligned", function () {
     const aiReviewerKeys = (messages) =>
       Object.keys(messages)
@@ -515,29 +608,16 @@ describe("AI reviewer provider configuration", function () {
     );
   });
 
-  it("accepts strict OpenAI-compatible configuration and returns an explicit bounded public DTO", function () {
+  it("accepts a strict run configuration and rejects anything outside it", function () {
     const parsed = parseAiReviewerProviderConfig(configuration);
     expect(parsed).toEqual(configuration);
     expect(Object.isFrozen(parsed)).toBe(true);
-    expect(publicAiReviewerProviderConfig(parsed)).toEqual({
-      configured: true,
-      config: publicConfiguration,
-      classification: "local",
-    });
     expect(
       parseAiReviewerProviderConfig({
         ...configuration,
         provider: "ollama",
       }),
     ).toEqual(configuration);
-    expect(publicAiReviewerProviderConfig(credentialConfiguration)).toEqual({
-      configured: true,
-      config: publicCredentialConfiguration,
-      classification: "remote",
-    });
-    expect(
-      JSON.stringify(publicAiReviewerProviderConfig(credentialConfiguration)),
-    ).not.toContain(credential);
 
     for (const invalid of [
       null,
@@ -553,91 +633,93 @@ describe("AI reviewer provider configuration", function () {
       { ...configuration, enabled: true },
       { ...configuration, apiKey: "PRIVATE_SECRET" },
       { ...configuration, arbitraryUnknownField: true },
+      // A connection field is not part of what a run sends to a transport.
+      { ...configuration, contextLengthOverride: contextLength },
+      { ...configuration, label: "Lab GPU box" },
     ]) {
       expect(() => parseAiReviewerProviderConfig(invalid)).toThrow();
     }
-    expect(() =>
-      parseAiReviewerProviderConfigUpdate({
-        ...configuration,
-        credentialUpdatedAt,
-      }),
-    ).toThrow();
   });
 
-  it("accepts an optional advanced override without requiring a context length in the write schema", function () {
-    const automatic = {
+  it("accepts a connection that names no model", function () {
+    expect(parseAiReviewerConnectionUpdate(connectionWrite)).toEqual({
       provider: "openai-compatible",
       baseUrl,
-      model,
-      contextLengthOverride: null,
-    };
-    expect(parseAiReviewerProviderConfigUpdate(automatic)).toEqual(automatic);
-    expect(
-      parseAiReviewerProviderConfigUpdate({
-        provider: "gemini",
-        model: geminiModel,
-        credential,
-      }),
-    ).toEqual({
+      label: null,
+      contextLengthOverride: contextLength,
+    });
+    expect(parseAiReviewerConnectionUpdate(geminiConnectionWrite)).toEqual({
       provider: "gemini",
-      model: geminiModel,
+      label: null,
       credential,
     });
     expect(
-      parseAiReviewerProviderConfigUpdate({
-        ...automatic,
-        contextLengthOverride: otherContextLength,
+      parseAiReviewerConnectionUpdate({
+        provider: "openai-compatible",
+        baseUrl,
+        contextLengthOverride: null,
+        label: "Lab GPU box",
       }),
     ).toEqual({
-      ...automatic,
-      contextLengthOverride: otherContextLength,
+      provider: "openai-compatible",
+      baseUrl,
+      label: "Lab GPU box",
+      contextLengthOverride: null,
     });
 
     for (const invalidOverride of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
       expect(() =>
-        parseAiReviewerProviderConfigUpdate({
-          ...automatic,
+        parseAiReviewerConnectionUpdate({
+          provider: "openai-compatible",
+          baseUrl,
           contextLengthOverride: invalidOverride,
         }),
       ).toThrow();
     }
-    expect(() =>
-      parseAiReviewerProviderConfigUpdate({
-        ...automatic,
-        contextLength,
-      }),
-    ).toThrow();
+    for (const invalid of [
+      // A model, a resolved context length and credential metadata are all
+      // server-owned or per-run, so none of them may be written here.
+      { provider: "openai-compatible", baseUrl, model },
+      { provider: "openai-compatible", baseUrl, contextLength },
+      { provider: "openai-compatible", baseUrl, credentialUpdatedAt },
+      { provider: "openai-compatible", baseUrl, label: "x".repeat(101) },
+    ]) {
+      expect(() => parseAiReviewerConnectionUpdate(invalid)).toThrow();
+    }
   });
 
   it.each([
-    {
-      privateConfiguration: geminiConfiguration,
-      publicConfiguration: publicGeminiConfiguration,
-      update: geminiUpdate,
-    },
-    {
-      privateConfiguration: claudeConfiguration,
-      publicConfiguration: publicClaudeConfiguration,
-      update: claudeUpdate,
-    },
+    { provider: "gemini", label: "Google Gemini" },
+    { provider: "claude", label: "Anthropic Claude" },
   ])(
-    "round-trips the strict $privateConfiguration.provider shape without a base URL",
-    function ({ privateConfiguration, publicConfiguration, update }) {
-      expect(parseAiReviewerProviderConfig(privateConfiguration)).toEqual(
-        privateConfiguration,
-      );
-      expect(parseAiReviewerProviderConfigUpdate(update)).toEqual(update);
-      const response = publicAiReviewerProviderConfig(privateConfiguration);
+    "round-trips the strict $provider connection without a base URL",
+    function ({ provider, label }) {
+      const stored = { provider, credential, credentialUpdatedAt };
+      expect(parseAiReviewerConnection(stored)).toEqual({
+        provider,
+        label,
+        credential,
+        credentialUpdatedAt,
+      });
+      const response = publicAiReviewerProviderConnection({
+        id: storedConnectionId,
+        credentialSet: true,
+        ...stored,
+      });
       expect(response).toEqual({
-        configured: true,
-        config: publicConfiguration,
+        id: storedConnectionId,
+        label,
         classification: "remote",
+        config: {
+          provider,
+          contextLengthOverride: null,
+          credentialSet: true,
+          credentialUpdatedAt,
+        },
       });
       expect(Object.keys(response.config)).toEqual([
         "provider",
-        "model",
-        "contextLength",
-        "contextLengthSource",
+        "contextLengthOverride",
         "credentialSet",
         "credentialUpdatedAt",
       ]);
@@ -646,31 +728,35 @@ describe("AI reviewer provider configuration", function () {
     },
   );
 
-  it.each([geminiUpdate, claudeUpdate])(
+  it.each([geminiConnectionWrite, claudeConnectionWrite])(
     "rejects a base URL for $provider",
-    function (configurationWithCredential) {
+    function (connectionWithCredential) {
       const invalid = {
-        ...configurationWithCredential,
+        ...connectionWithCredential,
         baseUrl: "https://arbitrary.example.test/v1",
       };
-      expect(() => parseAiReviewerProviderConfig(invalid)).toThrow();
-      expect(() => parseAiReviewerProviderConfigUpdate(invalid)).toThrow();
+      expect(() => parseAiReviewerConnection(invalid)).toThrow();
+      expect(() => parseAiReviewerConnectionUpdate(invalid)).toThrow();
     },
   );
 
-  it("gets and saves each user's configuration only through its _id", async function () {
+  it("reads and writes each user's connections only through its _id", async function () {
     const { modelDependency, records } = inMemoryModel();
-    records.set(userId, configuration);
-    records.set(otherUserId, otherConfiguration);
+    records.set(userId, connectionWrite);
+    records.set(otherUserId, otherConnectionWrite);
     const store = createAiReviewerProviderConfigStore({
       model: modelDependency,
     });
 
-    expect(await store.get(userId)).toEqual(configuration);
-    expect(await store.get(otherUserId)).toEqual(otherConfiguration);
-    expect(await store.save(userId, configuration)).toEqual(configuration);
-    expect(await store.save(otherUserId, otherConfiguration)).toEqual(
-      otherConfiguration,
+    expect(await store.get(userId)).toMatchObject({ baseUrl });
+    expect(await store.get(otherUserId)).toMatchObject({
+      baseUrl: otherBaseUrl,
+    });
+    expect(await store.create(userId, connectionWrite)).toMatchObject({
+      baseUrl,
+    });
+    expect(await store.create(otherUserId, otherConnectionWrite)).toMatchObject(
+      { baseUrl: otherBaseUrl },
     );
     expect(
       modelDependency.findOne.mock.calls.map(([filter]) => filter),
@@ -692,69 +778,49 @@ describe("AI reviewer provider configuration", function () {
     ).toBe(true);
   });
 
-  it("stores and publicly reports the effective detected context length", async function () {
+  it("stores a connection without resolving any context length", async function () {
     const { modelDependency, records } = inMemoryModel();
-    const resolveContextLength = vi.fn(async () => ({
-      contextLength: 32_768,
-      contextLengthSource: "detected",
-    }));
     const store = createAiReviewerProviderConfigStore({
       model: modelDependency,
-      resolveContextLength,
     });
-    const update = {
+
+    const saved = await store.create(userId, {
       provider: "openai-compatible",
       baseUrl,
-      model,
       contextLengthOverride: null,
-    };
+    });
 
-    const saved = await store.save(userId, update);
-
-    expect(resolveContextLength).toHaveBeenCalledExactlyOnceWith(update);
     expect(saved).toEqual({
+      id: expect.any(String),
+      credentialSet: false,
       provider: "openai-compatible",
       baseUrl,
-      model,
-      contextLength: 32_768,
-      contextLengthSource: "detected",
+      label: "127.0.0.1:11434",
     });
-    expect(records.get(userId)).toEqual({
-      provider: "openai-compatible",
-      baseUrl,
-      model,
-      contextLength: 32_768,
-      contextLengthSource: "detected",
-      revision: 1,
-    });
-    expect(publicAiReviewerProviderConfig(saved)).toEqual({
-      configured: true,
-      config: {
-        provider: "openai-compatible",
-        baseUrl,
-        model,
-        contextLength: 32_768,
-        contextLengthSource: "detected",
-        credentialSet: false,
-        credentialUpdatedAt: null,
-      },
-      classification: "local",
-    });
+    // Nothing was asked of the provider: a connection is written from what the
+    // user typed, and the effective context length belongs to each run.
+    expect(storedConnection(records)).not.toHaveProperty("contextLength");
+    expect(storedConnection(records)).not.toHaveProperty(
+      "contextLengthOverride",
+    );
+    expect(records.get(userId).revision).toBe(1);
   });
 
-  it("treats a legacy configuration without context length as unconfigured", async function () {
+  it("keeps a legacy record that never stored a context length", async function () {
     const legacyRecord = { _id: userId, provider: "ollama", baseUrl, model };
-    const replacementRecord = { _id: userId, ...configuration };
     const modelDependency = {
       findOne: vi.fn().mockReturnValue(fakeQuery(legacyRecord)),
-      findOneAndUpdate: vi.fn().mockReturnValue(fakeQuery(replacementRecord)),
     };
     const store = createAiReviewerProviderConfigStore({
       model: modelDependency,
     });
 
-    expect(await store.get(userId)).toBeNull();
-    expect(await store.save(userId, configuration)).toEqual(configuration);
+    expect(await store.get(userId)).toEqual({
+      id: userId,
+      provider: "openai-compatible",
+      baseUrl,
+      label: "127.0.0.1:11434",
+    });
   });
 
   it("loads an existing credentialless Ollama record as the canonical local provider", async function () {
@@ -771,11 +837,27 @@ describe("AI reviewer provider configuration", function () {
       model: modelDependency,
     });
 
-    expect(await store.get(userId)).toEqual(configuration);
-    expect(publicAiReviewerProviderConfig(await store.get(userId))).toEqual({
-      configured: true,
-      config: publicConfiguration,
+    expect(await store.get(userId)).toEqual({
+      id: userId,
+      provider: "openai-compatible",
+      baseUrl,
+      label: "127.0.0.1:11434",
+    });
+    expect(
+      publicAiReviewerProviderConnection(
+        await store.list(userId).then((c) => c[0]),
+      ),
+    ).toEqual({
+      id: userId,
+      label: "127.0.0.1:11434",
       classification: "local",
+      config: {
+        provider: "openai-compatible",
+        baseUrl,
+        contextLengthOverride: null,
+        credentialSet: false,
+        credentialUpdatedAt: null,
+      },
     });
   });
 
@@ -788,43 +870,46 @@ describe("AI reviewer provider configuration", function () {
       now: () => credentialUpdatedAt,
     });
 
-    expect(await store.save(userId, credentialUpdate)).toEqual(
-      credentialConfiguration,
-    );
-    expect(await store.get(userId)).toEqual(credentialConfiguration);
+    const created = await store.create(userId, credentialConnectionWrite);
+    expect(await store.get(userId)).toEqual({
+      id: created.id,
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      label: "api.example.com",
+      contextLengthOverride: contextLength,
+      credential,
+      credentialUpdatedAt,
+    });
     expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
       provider: "openai-compatible",
       baseUrl: remoteBaseUrl,
       credential,
     });
-    expect(records.get(userId)).toMatchObject({
+    expect(storedConnection(records)).toMatchObject({
       provider: "openai-compatible",
       baseUrl: remoteBaseUrl,
-      model: remoteModel,
-      contextLength,
+      contextLengthOverride: contextLength,
       credentialEncrypted: "ciphertext-1",
       credentialUpdatedAt: new Date(credentialUpdatedAt),
     });
     expect(JSON.stringify(records.get(userId))).not.toContain(credential);
-    expect(publicAiReviewerProviderConfig(await store.get(userId))).toEqual({
-      configured: true,
-      config: publicCredentialConfiguration,
+    expect(publicAiReviewerProviderConnection(created)).toEqual({
+      id: created.id,
+      label: "api.example.com",
       classification: "remote",
+      config: {
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        contextLengthOverride: contextLength,
+        credentialSet: true,
+        credentialUpdatedAt,
+      },
     });
   });
 
-  it.each([
-    {
-      configuration: geminiConfiguration,
-      update: geminiUpdate,
-    },
-    {
-      configuration: claudeConfiguration,
-      update: claudeUpdate,
-    },
-  ])(
-    "round-trips a $configuration.provider credential bound only to that provider",
-    async function ({ configuration: nativeConfiguration, update }) {
+  it.each([geminiConnectionWrite, claudeConnectionWrite])(
+    "round-trips a $provider credential bound only to that provider",
+    async function (nativeWrite) {
       const { manager, encryptor } = credentialManagerFixture();
       const { modelDependency, records } = inMemoryModel();
       const store = createAiReviewerProviderConfigStore({
@@ -833,32 +918,35 @@ describe("AI reviewer provider configuration", function () {
         now: () => credentialUpdatedAt,
       });
 
-      expect(await store.save(userId, update)).toEqual(nativeConfiguration);
-      expect(await store.get(userId)).toEqual(nativeConfiguration);
-      expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
-        provider: nativeConfiguration.provider,
-        credential,
-      });
-      expect(records.get(userId)).toMatchObject({
-        provider: nativeConfiguration.provider,
-        model: nativeConfiguration.model,
-        contextLength,
-        credentialEncrypted: "ciphertext-1",
-        credentialUpdatedAt: new Date(credentialUpdatedAt),
-      });
-      expect(records.get(userId)).not.toHaveProperty("baseUrl");
-
-      const changedModel = {
-        provider: nativeConfiguration.provider,
-        model: `${nativeConfiguration.model}-updated`,
-        contextLength: otherContextLength,
-      };
-      expect(await store.save(userId, changedModel)).toEqual({
-        ...changedModel,
+      const created = await store.create(userId, nativeWrite);
+      expect(await store.get(userId)).toMatchObject({
+        provider: nativeWrite.provider,
         credential,
         credentialUpdatedAt,
       });
-      expect(records.get(userId).credentialEncrypted).toBe("ciphertext-1");
+      expect(encryptor.encryptJson).toHaveBeenCalledExactlyOnceWith({
+        provider: nativeWrite.provider,
+        credential,
+      });
+      expect(storedConnection(records)).toMatchObject({
+        provider: nativeWrite.provider,
+        credentialEncrypted: "ciphertext-1",
+        credentialUpdatedAt: new Date(credentialUpdatedAt),
+      });
+      expect(storedConnection(records)).not.toHaveProperty("baseUrl");
+
+      // Editing anything else about the connection keeps the credential.
+      await store.update(userId, created.id, {
+        provider: nativeWrite.provider,
+        contextLengthOverride: otherContextLength,
+      });
+      expect(await store.get(userId)).toMatchObject({
+        contextLengthOverride: otherContextLength,
+        credential,
+      });
+      expect(storedConnection(records).credentialEncrypted).toBe(
+        "ciphertext-1",
+      );
     },
   );
 
@@ -870,22 +958,15 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
     });
 
-    expect(await store.save(userId, configuration)).toEqual(configuration);
-    for (const nativeConfiguration of [
-      {
-        provider: "gemini",
-        model: geminiModel,
-        contextLength,
-      },
-      {
-        provider: "claude",
-        model: claudeModel,
-        contextLength,
-      },
+    expect(await store.create(userId, connectionWrite)).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl,
+    });
+    for (const nativeWrite of [
+      { provider: "gemini" },
+      { provider: "claude" },
     ]) {
-      const error = await captureError(
-        store.save(otherUserId, nativeConfiguration),
-      );
+      const error = await captureError(store.create(otherUserId, nativeWrite));
       expect(error).toBeInstanceOf(TypeError);
       expect(error.message).toBe("The AI provider credential is required.");
     }
@@ -900,11 +981,10 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
       now: () => credentialUpdatedAt,
     });
-    await store.save(userId, geminiUpdate);
+    await store.create(userId, geminiConnectionWrite);
     records.set(userId, {
       ...records.get(userId),
-      provider: "claude",
-      model: claudeModel,
+      connections: [{ ...storedConnection(records), provider: "claude" }],
     });
 
     const error = await captureError(store.get(userId));
@@ -923,22 +1003,23 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
       now: () => times.shift(),
     });
-    await store.save(userId, credentialUpdate);
-    const encrypted = records.get(userId).credentialEncrypted;
+    const created = await store.create(userId, credentialConnectionWrite);
+    const encrypted = storedConnection(records).credentialEncrypted;
 
     const sameDestination = {
       provider: "openai-compatible",
       baseUrl: remoteBaseUrl,
-      model: "hosted/reviewer-v2",
-      contextLength: otherContextLength,
+      label: "Hosted reviewer",
     };
-    expect(await store.save(userId, sameDestination)).toEqual({
+    await store.update(userId, created.id, sameDestination);
+    expect(await store.get(userId)).toEqual({
+      id: created.id,
       ...sameDestination,
       credential,
       credentialUpdatedAt,
     });
-    expect(records.get(userId).credentialEncrypted).toBe(encrypted);
-    expect(records.get(userId).credentialUpdatedAt).toEqual(
+    expect(storedConnection(records).credentialEncrypted).toBe(encrypted);
+    expect(storedConnection(records).credentialUpdatedAt).toEqual(
       new Date(credentialUpdatedAt),
     );
 
@@ -946,18 +1027,20 @@ describe("AI reviewer provider configuration", function () {
       ...sameDestination,
       baseUrl: "https://other.example.com/v1",
     };
-    expect(await store.save(userId, changedDestination)).toEqual({
+    await store.update(userId, created.id, changedDestination);
+    expect(await store.get(userId)).toEqual({
+      id: created.id,
       ...changedDestination,
       credentialUpdatedAt: later,
     });
-    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+    expect(storedConnection(records)).not.toHaveProperty("credentialEncrypted");
     expect(JSON.stringify(records.get(userId))).not.toContain(credential);
   });
 
-  it("retries a stale credential-preserving save without breaking the destination binding", async function () {
+  it("retries a stale credential-preserving write without breaking the destination binding", async function () {
     const replacementCredential = "PRIVATE_REPLACEMENT_CREDENTIAL";
     const replacementBaseUrl = "https://replacement.example.com/v1";
-    const staleModel = "hosted/stale-writer-v1";
+    const staleLabel = "Stale writer";
     const { manager } = credentialManagerFixture();
     const { hooks, modelDependency, records } = inMemoryModel();
     const store = createAiReviewerProviderConfigStore({
@@ -965,7 +1048,7 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
       now: () => credentialUpdatedAt,
     });
-    await store.save(userId, credentialUpdate);
+    const created = await store.create(userId, credentialConnectionWrite);
 
     const staleWriterEntered = deferred();
     const releaseStaleWriter = deferred();
@@ -973,8 +1056,7 @@ describe("AI reviewer provider configuration", function () {
     hooks.beforeFindOneAndUpdate = async ({ update }) => {
       if (
         !staleWriterBlocked &&
-        update.$set.baseUrl === remoteBaseUrl &&
-        update.$set.model === staleModel
+        update.$set.connections[0].label === staleLabel
       ) {
         staleWriterBlocked = true;
         staleWriterEntered.resolve();
@@ -982,56 +1064,57 @@ describe("AI reviewer provider configuration", function () {
       }
     };
 
-    const staleConfiguration = {
+    const staleWrite = {
       provider: "openai-compatible",
       baseUrl: remoteBaseUrl,
-      model: staleModel,
-      contextLength,
+      label: staleLabel,
     };
-    const staleSave = store.save(userId, staleConfiguration);
+    const staleSave = store.update(userId, created.id, staleWrite);
     await staleWriterEntered.promise;
 
     const replacement = {
       provider: "openai-compatible",
       baseUrl: replacementBaseUrl,
-      model: remoteModel,
-      contextLength,
+      label: "Replacement",
       credential: replacementCredential,
     };
-    expect(await store.save(userId, replacement)).toEqual({
-      ...replacement,
-      credentialUpdatedAt,
-    });
+    await store.update(userId, created.id, replacement);
     expect(await store.get(userId)).toEqual({
-      ...replacement,
+      id: created.id,
+      provider: replacement.provider,
+      baseUrl: replacementBaseUrl,
+      label: "Replacement",
+      credential: replacementCredential,
       credentialUpdatedAt,
     });
 
     releaseStaleWriter.resolve();
-    const finalConfiguration = {
-      ...staleConfiguration,
+    await staleSave;
+    // The retry re-reads the replacement destination, so the stale write moves
+    // the connection back and drops a credential bound somewhere else.
+    expect(await store.get(userId)).toEqual({
+      id: created.id,
+      ...staleWrite,
       credentialUpdatedAt,
-    };
-    expect(await staleSave).toEqual(finalConfiguration);
-    expect(await store.get(userId)).toEqual(finalConfiguration);
-    expect(records.get(userId)).toMatchObject({
-      ...staleConfiguration,
-      revision: 3,
-      credentialUpdatedAt: new Date(credentialUpdatedAt),
     });
-    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+    expect(records.get(userId).revision).toBe(3);
+    expect(storedConnection(records)).not.toHaveProperty("credentialEncrypted");
 
     const staleWrites = modelDependency.findOneAndUpdate.mock.calls.filter(
-      ([, update]) => update.$set.model === staleModel,
+      ([, update]) => update.$set.connections[0].label === staleLabel,
     );
     expect(staleWrites).toHaveLength(2);
     expect(staleWrites[0][0]).toEqual({ _id: userId, revision: 1 });
-    expect(staleWrites[0][1]).not.toHaveProperty("$unset");
+    expect(staleWrites[0][1].$set.connections[0]).toMatchObject({
+      credentialEncrypted: "ciphertext-1",
+    });
     expect(staleWrites[1][0]).toEqual({ _id: userId, revision: 2 });
-    expect(staleWrites[1][1].$unset).toEqual({ credentialEncrypted: "" });
+    expect(staleWrites[1][1].$set.connections[0]).not.toHaveProperty(
+      "credentialEncrypted",
+    );
   });
 
-  it("retries a duplicate-key race when two saves observe no existing record", async function () {
+  it("retries a duplicate-key race when two writers observe no existing record", async function () {
     const firstWriterEntered = deferred();
     const releaseFirstWriter = deferred();
     const { hooks, modelDependency, records } = inMemoryModel();
@@ -1040,28 +1123,33 @@ describe("AI reviewer provider configuration", function () {
     });
     let firstWriterBlocked = false;
     hooks.beforeFindOneAndUpdate = async ({ update }) => {
-      if (!firstWriterBlocked && update.$set.model === model) {
+      if (
+        !firstWriterBlocked &&
+        update.$set.connections[0].baseUrl === baseUrl
+      ) {
         firstWriterBlocked = true;
         firstWriterEntered.resolve();
         await releaseFirstWriter.promise;
       }
     };
 
-    const firstSave = store.save(userId, configuration);
+    const firstSave = store.create(userId, connectionWrite);
     await firstWriterEntered.promise;
-    expect(await store.save(userId, otherConfiguration)).toEqual(
-      otherConfiguration,
-    );
+    expect(await store.create(userId, otherConnectionWrite)).toMatchObject({
+      baseUrl: otherBaseUrl,
+    });
     releaseFirstWriter.resolve();
 
-    expect(await firstSave).toEqual(configuration);
-    expect(await store.get(userId)).toEqual(configuration);
-    expect(records.get(userId)).toMatchObject({
-      ...configuration,
-      revision: 2,
-    });
+    expect(await firstSave).toMatchObject({ baseUrl });
+    expect(
+      (await store.list(userId)).map((connection) => connection.baseUrl),
+    ).toEqual([otherBaseUrl, baseUrl]);
+    expect(records.get(userId).revision).toBe(2);
     const firstWrites = modelDependency.findOneAndUpdate.mock.calls.filter(
-      ([, update]) => update.$set.model === model,
+      ([, update]) =>
+        update.$set.connections.some(
+          (connection) => connection.baseUrl === baseUrl,
+        ),
     );
     expect(firstWrites).toHaveLength(2);
     expect(firstWrites[0][0].$or).toEqual([
@@ -1083,23 +1171,22 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
       now: () => times.shift(),
     });
-    await store.save(userId, credentialUpdate);
+    const created = await store.create(userId, credentialConnectionWrite);
 
-    const cleared = await store.save(userId, {
-      provider: credentialUpdate.provider,
-      baseUrl: credentialUpdate.baseUrl,
-      model: credentialUpdate.model,
-      contextLength: credentialUpdate.contextLength,
+    await store.update(userId, created.id, {
+      provider: credentialConnectionWrite.provider,
+      baseUrl: credentialConnectionWrite.baseUrl,
       credential: null,
     });
+    const cleared = await store.get(userId);
     expect(cleared).toEqual({
-      provider: credentialUpdate.provider,
-      baseUrl: credentialUpdate.baseUrl,
-      model: credentialUpdate.model,
-      contextLength: credentialUpdate.contextLength,
+      id: created.id,
+      provider: credentialConnectionWrite.provider,
+      baseUrl: credentialConnectionWrite.baseUrl,
+      label: "api.example.com",
       credentialUpdatedAt: clearedAt,
     });
-    expect(records.get(userId)).not.toHaveProperty("credentialEncrypted");
+    expect(storedConnection(records)).not.toHaveProperty("credentialEncrypted");
     expect(JSON.stringify(cleared)).not.toContain(credential);
   });
 
@@ -1111,10 +1198,15 @@ describe("AI reviewer provider configuration", function () {
       credentialManager: manager,
       now: () => credentialUpdatedAt,
     });
-    await store.save(userId, credentialUpdate);
+    await store.create(userId, credentialConnectionWrite);
     records.set(userId, {
       ...records.get(userId),
-      baseUrl: "https://other.example.com/v1",
+      connections: [
+        {
+          ...storedConnection(records),
+          baseUrl: "https://other.example.com/v1",
+        },
+      ],
     });
 
     const error = await captureError(store.get(userId));
@@ -1177,51 +1269,46 @@ describe("AI reviewer provider configuration", function () {
     }
   });
 
-  it("runs the exact COMPAT_OK check once, without accepting or retrying a near match", async function () {
-    const generateChat = vi.fn(async () => compatibilityResult);
-    const transportFactory = vi.fn(() => ({ generateChat }));
-    const service = createOllamaProviderService({ transportFactory });
+  it("checks a connection by listing what it can run", async function () {
+    const modelFetchImpl = vi.fn(async (input) => {
+      if (String(input).endsWith("/api/tags")) {
+        return new Response("", { status: 404 });
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: model }, { id: otherModel }] }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+    const service = createAiReviewerProviderService({ modelFetchImpl });
 
+    // A connection carries no model, so reachability and the credential are
+    // the only things a check can honestly report.
     expect(
-      await service.testConnection(configuration, {
-        signal: new AbortController().signal,
-      }),
+      await service.testConnection(
+        { provider: "openai-compatible", baseUrl },
+        { signal: new AbortController().signal },
+      ),
     ).toEqual({
       ok: true,
       provider: "openai-compatible",
-      model,
+      modelCount: 2,
       classification: "local",
     });
-    expect(transportFactory).toHaveBeenCalledExactlyOnceWith({
-      baseUrl,
-      credential: undefined,
-      modelTag: model,
-    });
-    expect(generateChat).toHaveBeenCalledExactlyOnceWith(
-      {
-        prompt: "Return exactly COMPAT_OK and nothing else.",
-      },
-      { signal: expect.any(AbortSignal) },
-    );
 
-    const nearMatch = vi
-      .fn()
-      .mockResolvedValueOnce({ ...compatibilityResult, text: "COMPAT_OK\n" })
-      .mockResolvedValueOnce(compatibilityResult);
-    const incompatibleService = createOllamaProviderService({
-      transportFactory: () => ({ generateChat: nearMatch }),
+    const unreachable = createAiReviewerProviderService({
+      modelFetchImpl: vi.fn(async () => new Response("", { status: 401 })),
     });
     expect(
       await captureError(
-        incompatibleService.testConnection(configuration, {
-          signal: new AbortController().signal,
-        }),
+        unreachable.testConnection({ provider: "gemini", credential }),
       ),
-    ).toBeInstanceOf(AgentGatewayError);
-    expect(nearMatch).toHaveBeenCalledOnce();
+    ).toMatchObject({
+      code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+      category: "authentication",
+    });
   });
 
-  it("resolves OpenAI-compatible context metadata through the bounded provider service seam", async function () {
+  it("resolves a context length from the connection and the selected model", async function () {
     const signal = new AbortController().signal;
     const contextLengthDetector = vi.fn(async () => 32_768);
     const service = createAiReviewerProviderService({
@@ -1230,13 +1317,14 @@ describe("AI reviewer provider configuration", function () {
     });
 
     expect(
-      await service.resolveContextLength({
-        provider: "openai-compatible",
-        baseUrl: remoteBaseUrl,
-        model: remoteModel,
-        credential,
-        contextLengthOverride: null,
-      }),
+      await service.resolveContextLength(
+        {
+          provider: "openai-compatible",
+          baseUrl: remoteBaseUrl,
+          credential,
+        },
+        remoteModel,
+      ),
     ).toEqual({
       contextLength: 32_768,
       contextLengthSource: "detected",
@@ -1247,23 +1335,33 @@ describe("AI reviewer provider configuration", function () {
       credential,
       signal,
     });
+
+    // The connection's escape hatch wins over anything the endpoint says.
+    expect(
+      await service.resolveContextLength(
+        {
+          provider: "openai-compatible",
+          baseUrl: remoteBaseUrl,
+          credential,
+          contextLengthOverride: contextLength,
+        },
+        remoteModel,
+      ),
+    ).toEqual({
+      contextLength,
+      contextLengthSource: "override",
+    });
+    expect(contextLengthDetector).toHaveBeenCalledOnce();
   });
 
-  it("passes the credential only into connection, discussion, and review transport construction", async function () {
+  it("passes the credential only into discussion and review transport construction", async function () {
     const transport = {
-      generateChat: vi.fn(async () => compatibilityResult),
       createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
       createAgentGateway: vi.fn(() => ({ kind: "review" })),
     };
     const transportFactory = vi.fn(() => transport);
     const service = createOllamaProviderService({ transportFactory });
 
-    expect(await service.testConnection(credentialConfiguration)).toEqual({
-      ok: true,
-      provider: "openai-compatible",
-      model: remoteModel,
-      classification: "remote",
-    });
     expect(service.createDiscussionGateway(credentialConfiguration)).toEqual({
       kind: "discussion",
     });
@@ -1272,7 +1370,7 @@ describe("AI reviewer provider configuration", function () {
         readProjectFile: vi.fn(),
       }),
     ).toEqual({ kind: "review" });
-    expect(transportFactory).toHaveBeenCalledTimes(3);
+    expect(transportFactory).toHaveBeenCalledTimes(2);
     for (const [options] of transportFactory.mock.calls) {
       expect(options).toEqual({
         baseUrl: remoteBaseUrl,
@@ -1300,7 +1398,6 @@ describe("AI reviewer provider configuration", function () {
     "dispatches $configuration.provider through its native provider transport without a base URL",
     async function ({ configuration: nativeConfiguration, factoryName }) {
       const transport = {
-        generateChat: vi.fn(async () => compatibilityResult),
         createDiscussionGateway: vi.fn(() => ({ kind: "discussion" })),
         createAgentGateway: vi.fn(() => ({ kind: "review" })),
       };
@@ -1312,12 +1409,6 @@ describe("AI reviewer provider configuration", function () {
         }),
       });
 
-      expect(await service.testConnection(nativeConfiguration)).toEqual({
-        ok: true,
-        provider: nativeConfiguration.provider,
-        model: nativeConfiguration.model,
-        classification: "remote",
-      });
       expect(service.createDiscussionGateway(nativeConfiguration)).toEqual({
         kind: "discussion",
       });
@@ -1326,7 +1417,7 @@ describe("AI reviewer provider configuration", function () {
           readProjectFile: vi.fn(),
         }),
       ).toEqual({ kind: "review" });
-      expect(nativeFactory).toHaveBeenCalledTimes(3);
+      expect(nativeFactory).toHaveBeenCalledTimes(2);
       for (const [options] of nativeFactory.mock.calls) {
         expect(options).toEqual({
           credential,
@@ -1338,19 +1429,11 @@ describe("AI reviewer provider configuration", function () {
   );
 
   it.each([
-    {
-      provider: "gemini",
-      model: geminiModel,
-      contextLength,
-    },
-    {
-      provider: "claude",
-      model: claudeModel,
-      contextLength,
-    },
+    { provider: "gemini", model: geminiModel, contextLength },
+    { provider: "claude", model: claudeModel, contextLength },
   ])(
     "rejects a missing $provider credential before constructing its transport",
-    async function (nativeConfiguration) {
+    function (nativeConfiguration) {
       const geminiTransportFactory = vi.fn();
       const claudeTransportFactory = vi.fn();
       const service = createAiReviewerProviderService({
@@ -1358,87 +1441,339 @@ describe("AI reviewer provider configuration", function () {
         claudeTransportFactory,
       });
 
-      const error = await captureError(
-        service.testConnection(nativeConfiguration),
-      );
-      expect(error).toBeInstanceOf(AgentGatewayError);
-      expect(error).toMatchObject({
-        code: "AI_PROVIDER_NOT_CONFIGURED",
-        category: "configuration",
-        retryable: false,
-      });
+      expect(() =>
+        service.createDiscussionGateway(nativeConfiguration),
+      ).toThrow(AgentGatewayError);
       expect(geminiTransportFactory).not.toHaveBeenCalled();
       expect(claudeTransportFactory).not.toHaveBeenCalled();
     },
   );
 
-  it("serves bounded GET and strict PUT configuration responses", async function () {
-    const { controller, store } = providerControllerFixture({
-      storedConfiguration: null,
-    });
-    store.get.mockResolvedValueOnce(null).mockResolvedValueOnce(configuration);
+  it.each([
+    {
+      config: {
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        credential,
+      },
+      expectedUrl: `${remoteBaseUrl}/models`,
+      expectedHeader: ["authorization", `Bearer ${credential}`],
+      payload: {
+        data: [{ id: remoteModel }, { id: "text-embedding-3-small" }],
+      },
+      expected: [{ id: remoteModel, displayName: remoteModel }],
+    },
+    {
+      config: { provider: "gemini", credential },
+      expectedUrl: "https://generativelanguage.googleapis.com/v1beta/models",
+      expectedHeader: ["x-goog-api-key", credential],
+      payload: {
+        models: [
+          {
+            name: `models/${geminiModel}`,
+            displayName: "Gemini 2.5 Pro",
+            supportedGenerationMethods: ["generateContent"],
+          },
+          {
+            name: "models/text-embedding-004",
+            supportedGenerationMethods: ["embedContent"],
+          },
+        ],
+      },
+      expected: [{ id: geminiModel, displayName: "Gemini 2.5 Pro" }],
+    },
+    {
+      config: { provider: "claude", credential },
+      expectedUrl: "https://api.anthropic.com/v1/models",
+      expectedHeader: ["x-api-key", credential],
+      payload: {
+        data: [
+          {
+            type: "model",
+            id: claudeModel,
+            display_name: "Claude Sonnet 4",
+          },
+          { type: "model", id: "claude-embedding-v1" },
+        ],
+      },
+      expected: [{ id: claudeModel, displayName: "Claude Sonnet 4" }],
+    },
+  ])(
+    "discovers, filters, and caches $config.provider models through guarded fetch",
+    async function ({
+      config,
+      expectedUrl,
+      expectedHeader,
+      payload,
+      expected,
+    }) {
+      let capabilityProbes = 0;
+      const modelFetchImpl = vi.fn(async (input, init) => {
+        // A non-Ollama endpoint answers 404 here, which must leave the
+        // pattern-based filter in charge rather than failing the listing.
+        if (String(input).endsWith("/api/tags")) {
+          capabilityProbes += 1;
+          return new Response("", { status: 404 });
+        }
+        expect(String(input)).toBe(expectedUrl);
+        expect(init.method).toBe("GET");
+        expect(init.redirect).toBe("error");
+        expect(new Headers(init.headers).get(expectedHeader[0])).toBe(
+          expectedHeader[1],
+        );
+        return new Response(JSON.stringify(payload), {
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const service = createAiReviewerProviderService({
+        modelFetchImpl,
+        modelNow: () => 1_000,
+      });
 
-    const emptyResponse = new FakeResponse();
-    await controller.getConfiguration(httpRequest(), emptyResponse);
-    expect(emptyResponse.body).toEqual({
-      configured: false,
-      config: null,
-      classification: null,
+      expect(await service.listModels(config, { cacheKey: userId })).toEqual(
+        expected,
+      );
+      expect(await service.listModels(config, { cacheKey: userId })).toEqual(
+        expected,
+      );
+      expect(capabilityProbes).toBe(
+        config.provider === "openai-compatible" ? 1 : 0,
+      );
+      expect(JSON.stringify(await service.listModels(config))).not.toContain(
+        credential,
+      );
+    },
+  );
+
+  it("keeps only tool-capable models when the endpoint declares capabilities", async function () {
+    const modelFetchImpl = vi.fn(async (input) => {
+      if (String(input).endsWith("/api/tags")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { name: "qwen3.5:4b", capabilities: ["completion", "tools"] },
+              { name: "bge-m3:latest", capabilities: ["embedding"] },
+              { name: "plain:latest", capabilities: ["completion"] },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: [
+            { id: "qwen3.5:4b" },
+            { id: "bge-m3:latest" },
+            { id: "plain:latest" },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      modelNow: () => 1_000,
     });
 
-    const configuredResponse = new FakeResponse();
-    await controller.getConfiguration(httpRequest(), configuredResponse);
-    expect(configuredResponse.body).toEqual({
-      configured: true,
-      config: publicConfiguration,
-      classification: "local",
-    });
-    expect(JSON.stringify(configuredResponse.body)).not.toContain(userId);
+    // `bge-m3` carries no "embed" token, so only the declared capabilities can
+    // rule it out; `plain` completes text but cannot run the review tool.
+    expect(
+      await service.listModels({
+        provider: "openai-compatible",
+        baseUrl: "http://127.0.0.1:11434/v1",
+      }),
+    ).toEqual([{ id: "qwen3.5:4b", displayName: "qwen3.5:4b" }]);
+  });
 
-    const saveResponse = new FakeResponse();
-    await controller.saveConfiguration(
-      httpRequest({ body: configuration }),
-      saveResponse,
+  it("falls back to the name filter when the endpoint declares nothing", async function () {
+    const modelFetchImpl = vi.fn(async (input) => {
+      if (String(input).endsWith("/api/tags")) {
+        return new Response("", { status: 404 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: [{ id: "gpt-4o-mini" }, { id: "text-embedding-3-small" }],
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      modelNow: () => 1_000,
+    });
+
+    expect(
+      await service.listModels({
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+      }),
+    ).toEqual([{ id: "gpt-4o-mini", displayName: "gpt-4o-mini" }]);
+  });
+
+  it("rejects unsupported and oversized model-list responses without returning provider bodies", async function () {
+    const unsupportedBody = "RAW_UNSUPPORTED_PROVIDER_BODY";
+    const unsupported = createAiReviewerProviderService({
+      modelFetchImpl: vi.fn(async () => {
+        return new Response(unsupportedBody, { status: 404 });
+      }),
+    });
+    const unsupportedError = await captureError(
+      unsupported.listModels({ provider: "openai-compatible", baseUrl }),
     );
-    expect(store.save).toHaveBeenCalledExactlyOnceWith(userId, configuration);
-    expect(saveResponse.body).toEqual({
-      configured: true,
-      config: publicConfiguration,
-      classification: "local",
+    expect(unsupportedError).toMatchObject({
+      code: "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(JSON.stringify(unsupportedError)).not.toContain(unsupportedBody);
+
+    const oversized = createAiReviewerProviderService({
+      modelFetchImpl: vi.fn(async () => {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(1_048_577));
+            },
+          }),
+        );
+      }),
+    });
+    const oversizedError = await captureError(
+      oversized.listModels({ provider: "openai-compatible", baseUrl }),
+    );
+    expect(oversizedError).toMatchObject({
+      code: "AI_PROVIDER_SCHEMA_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+  });
+
+  it("serves every connection's models through one bounded response", async function () {
+    const available = providerControllerFixture();
+    const response = new FakeResponse();
+
+    await available.controller.listModels(httpRequest(), response);
+
+    expect(available.store.getAll).toHaveBeenCalledExactlyOnceWith(userId);
+    expect(
+      available.providerService.listModels,
+    ).toHaveBeenCalledExactlyOnceWith(
+      { ...otherConnection, baseUrl },
+      {
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${storedConnectionId}`,
+      },
+    );
+    expect(response.body).toEqual({
+      models: [
+        {
+          id: model,
+          displayName: "Configured model",
+          connectionId: storedConnectionId,
+          connectionLabel: "localhost:11434",
+        },
+      ],
+      failures: [],
     });
 
-    store.save.mockResolvedValueOnce(credentialConfiguration);
-    const credentialResponse = new FakeResponse();
-    await controller.saveConfiguration(
-      httpRequest({ body: credentialUpdate }),
-      credentialResponse,
-    );
-    expect(credentialResponse.body).toEqual({
-      configured: true,
-      config: publicCredentialConfiguration,
-      classification: "remote",
+    const missing = providerControllerFixture({ storedConnections: [] });
+    const missingResponse = new FakeResponse();
+    await missing.controller.listModels(httpRequest(), missingResponse);
+    expect(missingResponse.statusCode).toBe(409);
+    expect(missingResponse.body.error).toMatchObject({
+      code: "AI_PROVIDER_NOT_CONFIGURED",
+      category: "configuration",
     });
-    expect(Object.keys(credentialResponse.body.config)).toEqual([
-      "provider",
-      "baseUrl",
-      "model",
-      "contextLength",
-      "contextLengthSource",
-      "credentialSet",
-      "credentialUpdatedAt",
-    ]);
-    expect(JSON.stringify(credentialResponse.body)).not.toContain(credential);
+    expect(missing.providerService.listModels).not.toHaveBeenCalled();
+  });
 
-    const invalidResponse = new FakeResponse();
-    await controller.saveConfiguration(
-      httpRequest({ body: { ...configuration, apiKey: "PRIVATE_SECRET" } }),
-      invalidResponse,
-    );
-    expect(invalidResponse.statusCode).toBe(400);
-    expect(JSON.stringify(invalidResponse.body)).not.toContain(
-      "PRIVATE_SECRET",
-    );
-    expect(store.save).toHaveBeenCalledTimes(2);
+  it("redacts model-discovery authentication failures from responses and failure logs", async function () {
+    const rawBody = "RAW_PROVIDER_AUTHENTICATION_RESPONSE";
+    const modelFetchImpl = vi.fn(async () => {
+      return new Response(rawBody, { status: 401 });
+    });
+    const providerService = createAiReviewerProviderService({ modelFetchImpl });
+    const configStore = {
+      getAll: vi.fn(async () => [geminiConnection]),
+    };
+    const failureRecorder = vi.fn();
+    const controller = createAiReviewerProviderController({
+      configStore,
+      providerService,
+      failureRecorder,
+      elapsedNow: vi.fn().mockReturnValueOnce(100).mockReturnValue(106),
+    });
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    // The reachable connections still answer, so an unusable one is reported
+    // beside them as a classification rather than as a failed request.
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toEqual({
+      models: [],
+      failures: [
+        {
+          connectionId: storedConnectionId,
+          connectionLabel: "Google Gemini",
+          code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+          category: "authentication",
+        },
+      ],
+    });
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: null,
+      provider: "gemini",
+      model: null,
+      scopeKind: "none",
+      failureCategory: "authentication",
+      failureCode: "AI_PROVIDER_AUTHENTICATION_ERROR",
+      providerStatusCode: 401,
+      providerErrorType: null,
+      elapsedMs: 6,
+    });
+    for (const output of [
+      JSON.stringify(response.body),
+      JSON.stringify(failureRecorder.mock.calls),
+    ]) {
+      expect(output).not.toContain(rawBody);
+      expect(output).not.toContain(credential);
+    }
+  });
+
+  it("cuts off slow model discovery at the route timeout", async function () {
+    const timeoutController = new AbortController();
+    const modelFetchImpl = vi.fn(async () => {
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            return new Promise(() => {});
+          },
+        }),
+        {
+          headers: { "content-type": "application/json" },
+        },
+      );
+    });
+    const providerService = createAiReviewerProviderService({ modelFetchImpl });
+    const controller = createAiReviewerProviderController({
+      configStore: {
+        getAll: vi.fn(async () => [{ ...otherConnection, baseUrl }]),
+      },
+      providerService,
+      modelTimeoutSignalFactory: () => timeoutController.signal,
+    });
+    const response = new FakeResponse();
+    const request = controller.listModels(httpRequest(), response);
+    await vi.waitFor(() => expect(modelFetchImpl).toHaveBeenCalledOnce());
+    timeoutController.abort(new DOMException("late provider", "TimeoutError"));
+    await request;
+
+    expect(response.statusCode).toBe(504);
+    expect(response.body.error).toMatchObject({
+      code: "AI_REQUEST_TIMEOUT",
+      category: "timeout",
+    });
   });
 
   it("classifies a credential-storage failure as a server persistence problem and records it", async function () {
@@ -1460,14 +1795,14 @@ describe("AI reviewer provider configuration", function () {
     const failureRecorder = vi.fn();
     const controller = createAiReviewerProviderController({
       configStore,
-      providerService: { testConnection: vi.fn() },
+      providerService: {},
       elapsedNow: vi.fn().mockReturnValueOnce(200).mockReturnValue(211.6),
       failureRecorder,
     });
     const response = new FakeResponse();
 
-    await controller.saveConfiguration(
-      httpRequest({ body: geminiUpdate }),
+    await controller.createConnection(
+      httpRequest({ body: geminiConnectionWrite }),
       response,
     );
 
@@ -1490,7 +1825,7 @@ describe("AI reviewer provider configuration", function () {
     expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
       requestId: null,
       provider: "gemini",
-      model: geminiModel,
+      model: null,
       scopeKind: "none",
       failureCategory: "configuration",
       failureCode: "AI_PROVIDER_CONFIGURATION_PERSISTENCE_FAILED",
@@ -1509,25 +1844,37 @@ describe("AI reviewer provider configuration", function () {
     );
   });
 
-  it("tests the saved provider and returns bounded configuration errors", async function () {
+  it("rejects a connection write that carries an unknown field", async function () {
+    const { controller, store } = providerControllerFixture();
+    const response = new FakeResponse();
+
+    await controller.createConnection(
+      httpRequest({ body: { ...connectionWrite, apiKey: "PRIVATE_SECRET" } }),
+      response,
+    );
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.stringify(response.body)).not.toContain("PRIVATE_SECRET");
+    expect(store.getAll).not.toHaveBeenCalled();
+  });
+
+  it("checks the selected connection and returns bounded configuration errors", async function () {
     const { controller, providerService, store } = providerControllerFixture();
     const response = new FakeResponse();
     await controller.testConnection(httpRequest(), response);
-    expect(store.get).toHaveBeenCalledExactlyOnceWith(userId);
+    expect(store.get).toHaveBeenCalledExactlyOnceWith(userId, null);
     expect(providerService.testConnection).toHaveBeenCalledExactlyOnceWith(
-      configuration,
+      { ...otherConnection, baseUrl },
       { signal: expect.any(AbortSignal) },
     );
     expect(response.body).toEqual({
       ok: true,
       provider: "openai-compatible",
-      model,
+      modelCount: 1,
       classification: "local",
     });
 
-    const missing = providerControllerFixture({
-      storedConfiguration: null,
-    });
+    const missing = providerControllerFixture({ storedConnections: [] });
     const missingResponse = new FakeResponse();
     await missing.controller.testConnection(httpRequest(), missingResponse);
     expect(missingResponse.statusCode).toBe(409);
@@ -1540,30 +1887,6 @@ describe("AI reviewer provider configuration", function () {
       },
     });
     expect(missing.providerService.testConnection).not.toHaveBeenCalled();
-  });
-
-  it("redacts provider failures from the public connection-test response", async function () {
-    const secret = "PRIVATE_PROVIDER_SECRET";
-    const failed = providerControllerFixture();
-    failed.providerService.testConnection.mockRejectedValue(
-      new AgentGatewayError(secret, {
-        code: secret,
-        category: "provider",
-        retryable: false,
-      }),
-    );
-    const failedResponse = new FakeResponse();
-    await failed.controller.testConnection(httpRequest(), failedResponse);
-    expect(failedResponse.statusCode).toBe(502);
-    expect(failedResponse.body).toEqual({
-      error: {
-        code: "AI_PROVIDER_ERROR",
-        category: "provider",
-        message: "The AI provider request failed.",
-        retryable: true,
-      },
-    });
-    expect(JSON.stringify(failedResponse.body)).not.toContain(secret);
   });
 
   it.each([
@@ -1635,7 +1958,9 @@ describe("AI reviewer provider configuration", function () {
       })),
     };
     const transportFactory = vi.fn(() => transport);
-    const providerService = createOllamaProviderService({ transportFactory });
+    const providerService = withModelListing(
+      createOllamaProviderService({ transportFactory }),
+    );
     const requestScopeReader = createRequestScopeReader();
     const boundedContext = await requestScopeReader.read(
       httpRequest({ body: selectionRequest() }),
@@ -1665,14 +1990,12 @@ describe("AI reviewer provider configuration", function () {
       eventId: () => "event-provider-error",
     });
 
-    await providerController.saveConfiguration(
-      httpRequest({ body: otherConfiguration }),
+    await providerController.createConnection(
+      httpRequest({ body: otherConnectionWrite }),
       new FakeResponse(),
     );
-    expect(records.get(userId)).toEqual({
-      ...otherConfiguration,
-      revision: 1,
-    });
+    expect(records.get(userId).revision).toBe(1);
+    expect(storedConnection(records)).toMatchObject(otherConnectionWrite);
 
     const response = new FakeResponse();
     await configuredController.stream(
@@ -1708,14 +2031,17 @@ describe("AI reviewer provider configuration", function () {
       createDiscussionGateway: vi.fn(() => gateway),
     };
     const transportFactory = vi.fn(() => transport);
-    const providerService = createOllamaProviderService({ transportFactory });
+    const providerService = withModelListing(
+      createOllamaProviderService({ transportFactory }),
+      [{ id: remoteModel, displayName: remoteModel }],
+    );
     const requestScopeReader = {
       read: vi.fn(async () => {
         throw new Error("Discussion must not create a review scope reader.");
       }),
     };
     const controller = createConfiguredAiReviewerController({
-      configStore: { get: vi.fn(async () => credentialConfiguration) },
+      configStore: { get: vi.fn(async () => credentialConnection) },
       providerService,
       requestScopeReader,
       now: () => createdAt,
@@ -1788,9 +2114,11 @@ Cite \cite{missing}`;
         }),
       ),
     };
-    const providerService = createOllamaProviderService({
-      transportFactory: () => transport,
-    });
+    const providerService = withModelListing(
+      createOllamaProviderService({
+        transportFactory: () => transport,
+      }),
+    );
     const loadProjectDocuments = vi.fn(async () => ({
       "/main.tex": {
         _id: "document-provider-main",
@@ -1820,7 +2148,7 @@ Cite \cite{missing}`;
       searchZoteroItems,
     });
     const controller = createConfiguredAiReviewerController({
-      configStore: { get: vi.fn(async () => otherConfiguration) },
+      configStore: { get: vi.fn(async () => otherConnection) },
       providerService,
       requestScopeReader,
       now: () => createdAt,
@@ -1874,9 +2202,136 @@ Cite \cite{missing}`;
     expect(parseNdjson(response)).toEqual(streamEvents());
   });
 
+  it("errors when a project review read no manuscript content", async function () {
+    const events = await projectCoverageStream({ text: "Synthetic" });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "error",
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      error: {
+        code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+        category: "configuration",
+        retryable: false,
+      },
+    });
+  });
+
+  it("reports relationship truncation after preserving supported findings", async function () {
+    const text = Array.from(
+      { length: 101 },
+      (_, index) => String.raw`\input{file-${index}}`,
+    ).join("\n");
+    const events = await projectCoverageStream({
+      text,
+      configuredContextLength: 32_768,
+      async performReads(readProjectFile, request, signal) {
+        await readProjectFile(
+          { path: "main.tex", range: { from: 0, to: 1 } },
+          { request, signal },
+        );
+      },
+    });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      contextTruncated: true,
+    });
+  });
+
+  it("reports a model-input budget read failure without leaking numbers", async function () {
+    let readFailure;
+    const events = await projectCoverageStream({
+      text: "x".repeat(5_000),
+      configuredContextLength: 4_096,
+      async performReads(readProjectFile, request, signal) {
+        await readProjectFile(
+          { path: "main.tex", range: { from: 0, to: 1 } },
+          { request, signal },
+        );
+        readFailure = await captureError(
+          readProjectFile(
+            { path: "main.tex", range: { from: 0, to: 5_000 } },
+            { request, signal },
+          ),
+        );
+      },
+    });
+
+    expect(readFailure).toBeInstanceOf(AgentGatewayError);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      contextTruncated: true,
+    });
+    expect(
+      englishMessages.ai_reviewer_error_guidance_project_content,
+    ).not.toMatch(/\d/u);
+  });
+
+  it("streams project events before the completion coverage check", async function () {
+    const waitingForCompletion = deferred();
+    const releaseCompletion = deferred();
+    const readProjectFile = vi.fn();
+    readProjectFile.reviewCoverage = () => ({
+      successfulReadCount: 1,
+      modelInputBudgetFailureCount: 0,
+      relationshipsTruncated: false,
+    });
+    const providerService = {
+      ...runModelStubs(),
+      createAgentGateway: vi.fn(() => ({
+        async *stream() {
+          yield streamEvents()[0];
+          waitingForCompletion.resolve();
+          await releaseCompletion.promise;
+          yield streamEvents()[1];
+          yield streamEvents()[2];
+        },
+      })),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConnection) },
+      providerService,
+      requestScopeReader: {
+        read: vi.fn(async () => ({
+          kind: "project",
+          readProjectFile,
+        })),
+      },
+      now: () => createdAt,
+      eventId: () => "event-provider-error",
+    });
+    const response = new FakeResponse();
+    const stream = controller.stream(
+      httpRequest({ body: projectRequest() }),
+      response,
+    );
+
+    await waitingForCompletion.promise;
+    expect(parseNdjson(response).map((event) => event.type)).toEqual([
+      "started",
+    ]);
+    releaseCompletion.resolve();
+    await stream;
+    expect(parseNdjson(response).map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "completed",
+    ]);
+  });
+
   it("records the native provider discriminator in the shape-only failure record", async function () {
     const failureRecorder = vi.fn();
     const providerService = {
+      ...runModelStubs([{ id: geminiModel, displayName: geminiModel }]),
       createAgentGateway: vi.fn(() => {
         throw new AgentGatewayError("PRIVATE_NATIVE_PROVIDER_FAILURE", {
           code: "AI_PROVIDER_FAILED",
@@ -1886,7 +2341,7 @@ Cite \cite{missing}`;
       }),
     };
     const controller = createConfiguredAiReviewerController({
-      configStore: { get: vi.fn(async () => geminiConfiguration) },
+      configStore: { get: vi.fn(async () => geminiConnection) },
       providerService,
       requestScopeReader: {
         read: vi.fn(async () => ({
@@ -1952,8 +2407,9 @@ Cite \cite{missing}`;
         ),
     });
     const controller = createConfiguredAiReviewerController({
-      configStore: { get: vi.fn(async () => otherConfiguration) },
+      configStore: { get: vi.fn(async () => otherConnection) },
       providerService: {
+        ...runModelStubs(),
         createAgentGateway: vi.fn(() => {
           throw new Error("The provider must not be reached.");
         }),
@@ -1988,7 +2444,7 @@ Cite \cite{missing}`;
     expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
       requestId: projectRequest().requestId,
       provider: otherConfiguration.provider,
-      model: otherConfiguration.model,
+      model: otherModel,
       scopeKind: "project",
       failureCategory: "configuration",
       failureCode: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
@@ -1999,5 +2455,132 @@ Cite \cite{missing}`;
     expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
       privateTitle,
     );
+  });
+
+  it("selects, validates, and re-budgets an explicit run model", async function () {
+    const selectedModel = "reviewer/selected-v2";
+    const selectedContextLength = 16_384;
+    const requestScopeReader = {
+      read: vi.fn(async () => ({
+        kind: "selection",
+        readProjectFile: vi.fn(),
+      })),
+    };
+    const providerService = {
+      listModels: vi.fn(async () => [
+        { id: otherModel, displayName: otherModel },
+        { id: selectedModel, displayName: selectedModel },
+      ]),
+      resolveContextLength: vi.fn(async () => ({
+        contextLength: selectedContextLength,
+        contextLengthSource: "default",
+      })),
+      createAgentGateway: vi.fn(() => ({
+        async *stream() {
+          yield* streamEvents();
+        },
+      })),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConnection) },
+      providerService,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "event-model-selection",
+    });
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: { ...selectionRequest(), model: selectedModel },
+      }),
+      response,
+    );
+
+    expect(providerService.listModels).toHaveBeenCalledWith(
+      otherConnection,
+      expect.objectContaining({
+        cacheKey: `${userId}\u0000${storedConnectionId}`,
+      }),
+    );
+    expect(providerService.resolveContextLength).toHaveBeenCalledWith(
+      otherConnection,
+      selectedModel,
+    );
+    expect(requestScopeReader.read).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ contextLength: selectedContextLength }),
+    );
+    expect(providerService.createAgentGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai-compatible",
+        model: selectedModel,
+        contextLength: selectedContextLength,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("rejects an unlisted run model without exposing private provider data", async function () {
+    const privateResponse = "PRIVATE_MODEL_LIST_RESPONSE";
+    const providerService = {
+      listModels: vi.fn(async () => [
+        { id: otherModel, displayName: privateResponse },
+      ]),
+      resolveContextLength: vi.fn(),
+      createAgentGateway: vi.fn(),
+    };
+    const requestScopeReader = { read: vi.fn() };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => credentialConnection) },
+      providerService,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "event-invalid-model",
+    });
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: { ...selectionRequest(), model: "other-provider/model" },
+      }),
+      response,
+    );
+
+    expect(parseNdjson(response)[0].error).toEqual({
+      code: "AI_PROVIDER_NOT_CONFIGURED",
+      category: "configuration",
+      message:
+        "AI Reviewer is not configured correctly. Check the provider and model in AI Reviewer settings, then try again.",
+      retryable: false,
+    });
+    expect(response.chunks.join("")).not.toContain(credential);
+    expect(response.chunks.join("")).not.toContain(privateResponse);
+    expect(providerService.resolveContextLength).not.toHaveBeenCalled();
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+    expect(requestScopeReader.read).not.toHaveBeenCalled();
+  });
+
+  it("keeps provider credentials outside requests and accepts legacy runs", function () {
+    expect(
+      AgentRequestSchema.safeParse({
+        ...selectionRequest(),
+        provider: "claude",
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentRequestSchema.safeParse({
+        ...selectionRequest(),
+        credential,
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkspaceRunSchema.safeParse({
+        generation: 1,
+        createdOrder: 1,
+        request: selectionRequest(),
+        text: "",
+        findings: [],
+        suggestions: [],
+      }).success,
+    ).toBe(true);
   });
 });

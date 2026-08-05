@@ -98,6 +98,14 @@ import {
 } from "../services/editor-artifact-comment-posting";
 import { readEditorSuggestionLiveContext } from "../services/editor-suggestion-host-application";
 import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
+import { partitionDocumentReview } from "../services/document-review-partition";
+import {
+  getAiProviderConnections,
+  getAiProviderModels,
+  type AiProviderConnection,
+  type AiProviderModel,
+  type AiProviderModelFailure,
+} from "../services/ai-provider-configuration";
 
 import "../../stylesheets/ai-reviewer.scss";
 
@@ -138,6 +146,7 @@ type ActiveRun = {
   controller: AbortController;
   invalidated: boolean;
   terminal: "completed" | "error" | null;
+  errorCode: string | null;
   session: EditorSelectionSession | null;
   findingIds: Set<string>;
   suggestionIds: Set<string>;
@@ -245,6 +254,14 @@ function cancellationReason(message: string) {
   return new DOMException(message, "AbortError");
 }
 
+/**
+ * The same model id can be reachable through more than one connection, so an
+ * option is identified by the pair rather than by the model id alone.
+ */
+function modelKey(model: { connectionId: string; id: string }) {
+  return JSON.stringify([model.connectionId, model.id]);
+}
+
 function runStatusLabel(
   status: SelectionWorkspaceStatus,
   t: TFunction<"translation">,
@@ -321,6 +338,8 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_provider");
     case "rate-limit:AI_PROVIDER_RATE_LIMITED":
       return t("ai_reviewer_error_guidance_rate_limit");
+    case "rate-limit:AI_REVIEWER_CONCURRENCY_LIMITED":
+      return t("ai_reviewer_error_guidance_concurrency");
     case "schema:AI_STREAM_PROTOCOL_ERROR":
       return t("ai_reviewer_error_guidance_schema");
     case "schema:AI_REQUEST_SCHEMA_INVALID":
@@ -365,10 +384,19 @@ function streamErrorGuidance(error: unknown, t: TFunction<"translation">) {
     : t("ai_reviewer_error_request_failed");
 }
 
-function commentPostingErrorMessage(
+export function commentPostingErrorMessage(
   result: ArtifactCommentPostingResult,
   t: TFunction<"translation">,
 ) {
+  if (
+    result.status === "error" &&
+    result.code === "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
+  ) {
+    return t(
+      "ai_reviewer_comment_post_uncertain",
+      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+    );
+  }
   if (result.status === "conflict") {
     switch (result.code) {
       case "AI_COMMENT_RANGE_STALE":
@@ -402,9 +430,11 @@ function evidenceLocation(reference: {
     to: number;
   };
 }) {
+  // The range is a character offset pair, not a line number pair. Writing it
+  // as `path:from-to` reads as `file:line`, so mark the unit explicitly.
   return reference.range == null
     ? reference.path
-    : `${reference.path}:${reference.range.from}-${reference.range.to}`;
+    : `${reference.path} (chars ${reference.range.from}–${reference.range.to})`;
 }
 
 function evidenceNavigationMessage(
@@ -605,6 +635,10 @@ function workspaceRunFromState(
     generation: runState.generation,
     createdOrder: runState.createdOrder,
     request: runState.request,
+    ...(runState.provider != null && runState.model != null
+      ? { provider: runState.provider, model: runState.model }
+      : {}),
+    ...(runState.group == null ? {} : { group: runState.group }),
     text: runState.text,
     findings: runState.findings.map((finding) => ({
       artifact: finding,
@@ -985,6 +1019,8 @@ export function AiReviewerPanelView({
   copyText = copyTextToClipboard,
   postEditorComment,
   workspacePersistence,
+  loadProviderConnections,
+  loadProviderModels,
 }: {
   projectId: string;
   createRequestId?: () => string;
@@ -1004,12 +1040,17 @@ export function AiReviewerPanelView({
   copyText?: CopyText;
   postEditorComment?: PostEditorComment;
   workspacePersistence?: AiReviewerWorkspacePersistence;
+  loadProviderConnections?: typeof getAiProviderConnections;
+  loadProviderModels?: typeof getAiProviderModels;
 }) {
   const { t } = useTranslation();
   const [workspace, dispatch] = useReducer(
     reduceReviewWorkspaceState,
     initialReviewWorkspaceState,
   );
+  const [contextTruncatedRuns, setContextTruncatedRuns] = useState<
+    ReadonlySet<number>
+  >(() => new Set());
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const reviewScopes = useMemo<ReviewScopeKind[]>(() => {
@@ -1026,6 +1067,12 @@ export function AiReviewerPanelView({
   const [reviewScope, setReviewScope] = useState<ReviewScopeKind>(
     reviewScopes[0] ?? "project",
   );
+  const [connections, setConnections] = useState<AiProviderConnection[]>([]);
+  const [models, setModels] = useState<AiProviderModel[]>([]);
+  const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
+    [],
+  );
+  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
     null,
@@ -1084,6 +1131,61 @@ export function AiReviewerPanelView({
       setReviewScope(reviewScopes[0] ?? "project");
     }
   }, [reviewScope, reviewScopes]);
+
+  useEffect(() => {
+    if (loadProviderConnections == null) {
+      return;
+    }
+    const controller = new AbortController();
+    // The connections are not offered as a choice: they are read only for the
+    // context length override, the one context-length signal a client can see.
+    loadProviderConnections(projectId, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) {
+          setConnections(response.connections);
+        }
+      })
+      .catch(() => {
+        // Without an override a document review is simply not split.
+      });
+    return () => controller.abort();
+  }, [loadProviderConnections, projectId]);
+
+  useEffect(() => {
+    if (loadProviderModels == null) {
+      return;
+    }
+    const controller = new AbortController();
+    loadProviderModels(projectId, controller.signal)
+      .then((catalog) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setModels(catalog.models);
+        setModelFailures(catalog.failures);
+        // A model carries its connection, so selecting the first entry is a
+        // complete choice rather than half of one.
+        setSelectedModelKey(
+          catalog.models[0] == null ? null : modelKey(catalog.models[0]),
+        );
+      })
+      .catch(() => {
+        // An omitted model leaves the choice to the server, which still works
+        // when the user has exactly one connection.
+      });
+    return () => controller.abort();
+  }, [loadProviderModels, projectId]);
+
+  const runModel = useMemo(
+    () => models.find((model) => modelKey(model) === selectedModelKey) ?? null,
+    [models, selectedModelKey],
+  );
+  const runContextLength = useMemo(
+    () =>
+      connections.find((entry) => entry.id === runModel?.connectionId)?.config
+        .contextLengthOverride ?? null,
+    [connections, runModel],
+  );
 
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
@@ -1416,6 +1518,7 @@ export function AiReviewerPanelView({
     (
       status: "capturing" | "streaming",
       scopeKind: AgentRequest["scope"]["kind"],
+      group?: WorkspaceRun["group"],
     ) => {
       clearCitationCopy();
       disposeActiveEvidenceNavigation(
@@ -1438,6 +1541,7 @@ export function AiReviewerPanelView({
         controller: new AbortController(),
         invalidated: false,
         terminal: null,
+        errorCode: null,
         session: null,
         findingIds: new Set(),
         suggestionIds: new Set(),
@@ -1453,6 +1557,7 @@ export function AiReviewerPanelView({
         requestId: run.requestId,
         scopeKind,
         createdOrder: nextWorkspaceOrder.current,
+        group,
       });
       return run;
     },
@@ -1471,6 +1576,7 @@ export function AiReviewerPanelView({
         return;
       }
       run.terminal = "error";
+      run.errorCode = code;
       const error = new AgentStreamError({
         code,
         category: "schema",
@@ -1601,9 +1707,15 @@ export function AiReviewerPanelView({
           run.suggestionIds.add(event.suggestion.id);
         }
         if (event.type === "completed") {
+          if (event.contextTruncated === true) {
+            setContextTruncatedRuns((current) =>
+              new Set(current).add(run.generation),
+            );
+          }
           run.terminal = "completed";
         } else if (event.type === "error") {
           run.terminal = "error";
+          run.errorCode = event.error.code;
         }
         const displayEvent =
           event.type === "error"
@@ -1661,18 +1773,17 @@ export function AiReviewerPanelView({
         if (!isActiveRun(run) || run.controller.signal.aborted) {
           return;
         }
-        failRun(
-          run,
+        const code =
           error instanceof AgentStreamError
             ? error.details.code
-            : "AI_WORKSPACE_STREAM_FAILED",
-          streamErrorGuidance(error, t),
-        );
+            : "AI_WORKSPACE_STREAM_FAILED";
+        failRun(run, code, streamErrorGuidance(error, t));
       } finally {
         if (activeRun.current === run) {
           activeRun.current = null;
         }
       }
+      return run.errorCode;
     },
     [failRun, isActiveRun, streamRequest, t],
   );
@@ -1688,6 +1799,9 @@ export function AiReviewerPanelView({
       action: "review",
       instruction: projectReviewInstruction,
       skill: "referee-review",
+      ...(runModel == null
+        ? {}
+        : { connectionId: runModel.connectionId, model: runModel.id }),
       scope: Object.freeze({
         kind: "project",
       }),
@@ -1700,7 +1814,7 @@ export function AiReviewerPanelView({
       request,
     });
     void executeStream(run, request);
-  }, [beginRun, executeStream, projectId]);
+  }, [beginRun, executeStream, projectId, runModel]);
 
   const runDocumentBoundReview = useCallback(
     async ({
@@ -1754,7 +1868,18 @@ export function AiReviewerPanelView({
         return;
       }
 
-      const session = result.session;
+      const capturedSession = result.session;
+      const session =
+        runModel == null
+          ? capturedSession
+          : Object.freeze({
+              ...capturedSession,
+              request: Object.freeze({
+                ...capturedSession.request,
+                connectionId: runModel.connectionId,
+                model: runModel.id,
+              }),
+            });
       const request = session.request;
       if (
         request.requestId !== run.requestId ||
@@ -1769,6 +1894,111 @@ export function AiReviewerPanelView({
           t("ai_reviewer_error_capture_scope_invalid"),
         );
         return;
+      }
+
+      if (
+        scopeKind === "document" &&
+        request.scope.kind === "document" &&
+        runContextLength != null
+      ) {
+        const inputBudget = Math.floor(runContextLength * 0.5);
+        if (JSON.stringify(request).length > inputBudget) {
+          const selectionOverhead = JSON.stringify({
+            ...request,
+            scope: {
+              ...request.scope,
+              kind: "selection",
+              range: {
+                from: request.scope.text.length,
+                to: request.scope.text.length,
+              },
+              text: "",
+            },
+          }).length;
+          const partition = partitionDocumentReview(
+            request.scope.text,
+            inputBudget - selectionOverhead,
+          );
+          if (partition != null) {
+            if (partition.omitted > 0) {
+              setActionNotice(
+                t(
+                  "ai_reviewer_split_omitted",
+                  { count: partition.omitted },
+                ),
+              );
+            }
+            if (partition.parts.length === 0) {
+              failRun(
+                run,
+                "AI_DOCUMENT_SECTION_TOO_LARGE",
+                t(
+                  "ai_reviewer_split_none",
+                  "The document sections are too large to review, even by subsection.",
+                ),
+              );
+              return;
+            }
+            const groupId = run.requestId;
+            for (const [index, part] of partition.parts.entries()) {
+              const partRun =
+                index === 0
+                  ? run
+                  : beginRun("capturing", "selection", {
+                      id: groupId,
+                      position: index + 1,
+                      total: partition.parts.length,
+                    });
+              const partRequest = Object.freeze({
+                ...request,
+                requestId: partRun.requestId,
+                scope: Object.freeze({
+                  ...request.scope,
+                  kind: "selection" as const,
+                  range: Object.freeze(part.range),
+                  text: part.text,
+                }),
+              });
+              const partSession = Object.freeze({
+                ...session,
+                request: partRequest,
+              });
+              if (index === 0) {
+                dispatch({
+                  type: "group",
+                  generation: partRun.generation,
+                  requestId: partRun.requestId,
+                  group: {
+                    id: groupId,
+                    position: 1,
+                    total: partition.parts.length,
+                  },
+                });
+              }
+              partRun.session = partSession;
+              dispatch({
+                type: "session",
+                generation: partRun.generation,
+                requestId: partRun.requestId,
+                session: partSession,
+              });
+              const errorCode = await executeStream(partRun, partRequest);
+              if (errorCode === "AI_REVIEWER_CONCURRENCY_LIMITED") {
+                const remaining = partition.parts.length - index - 1;
+                if (remaining > 0) {
+                  setActionNotice(
+                    t(
+                      "ai_reviewer_split_concurrency_rejected",
+                      { count: remaining },
+                    ),
+                  );
+                }
+                break;
+              }
+            }
+            return;
+          }
+        }
       }
 
       run.session = session;
@@ -1787,6 +2017,8 @@ export function AiReviewerPanelView({
       invalidateRun,
       isActiveRun,
       projectId,
+      runContextLength,
+      runModel,
       t,
     ],
   );
@@ -3491,9 +3723,11 @@ export function AiReviewerPanelView({
                         openFindingEvidence(runState, finding, index)
                       }
                     >
-                      {t("ai_reviewer_go_to_location", {
-                        index: index + 1,
-                      })}
+                      {finding.evidence.length > 1
+                        ? t("ai_reviewer_go_to_location", {
+                            index: index + 1,
+                          })
+                        : t("ai_reviewer_go_to_location_single", "Go to text")}
                     </OLButton>
                   )}
                 </li>
@@ -3635,9 +3869,11 @@ export function AiReviewerPanelView({
                         openFindingEvidence(runState, finding, index)
                       }
                     >
-                      {t("ai_reviewer_go_to_location", {
-                        index: index + 1,
-                      })}
+                      {finding.evidence.length > 1
+                        ? t("ai_reviewer_go_to_location", {
+                            index: index + 1,
+                          })
+                        : t("ai_reviewer_go_to_location_single", "Go to text")}
                     </OLButton>
                   )}
                 </li>
@@ -3921,10 +4157,17 @@ export function AiReviewerPanelView({
           <div className="ai-reviewer-run-heading">
             <h3 className="ai-reviewer-run-title">
               {reviewScopeLabel(runState.scopeKind, t)}
+              {runState.group != null &&
+                ` ${runState.group.position}/${runState.group.total}`}
             </h3>
             <span className="ai-reviewer-run-status" aria-live="polite">
               {runStatusLabel(runState.status, t)}
             </span>
+            {runState.provider != null && runState.model != null && (
+              <span className="text-muted">
+                {runState.provider} · {runState.model}
+              </span>
+            )}
           </div>
           <div className="ai-reviewer-panel-actions">
             {canDiscuss && runState.request != null && (
@@ -4015,6 +4258,14 @@ export function AiReviewerPanelView({
             {t("ai_reviewer_selection_conflict", {
               code: runState.conflict,
             })}
+          </div>
+        )}
+        {contextTruncatedRuns.has(runState.generation) && (
+          <div
+            className="alert alert-warning ai-reviewer-panel-notice"
+            role="alert"
+          >
+            {t("ai_reviewer_error_guidance_project_content")}
           </div>
         )}
         {runState.error != null && (
@@ -4306,6 +4557,13 @@ export function AiReviewerPanelView({
           </div>
           {activeDiscussion.status === "streaming" && (
             <div className="ai-reviewer-panel-actions">
+              <span
+                className="ai-reviewer-discussion-responding"
+                role="status"
+                data-testid="discussion-responding"
+              >
+                {t("ai_reviewer_discussion_status_responding")}
+              </span>
               <OLButton
                 type="button"
                 variant="ghost"
@@ -4478,6 +4736,39 @@ export function AiReviewerPanelView({
               ))}
             </OLFormSelect>
           </div>
+          {/* Models from every connection sit in one list: choosing a model is
+              what chooses the connection, so no separate picker is offered. */}
+          {runModel != null && (
+            <div className="ai-reviewer-panel-scope">
+              <OLFormLabel htmlFor="ai-reviewer-run-model">
+                {t("ai_reviewer_provider_model")}
+              </OLFormLabel>
+              <OLFormSelect
+                id="ai-reviewer-run-model"
+                value={selectedModelKey ?? ""}
+                disabled={busy}
+                onChange={(event) => setSelectedModelKey(event.target.value)}
+              >
+                {models.map((candidate) => (
+                  <option key={modelKey(candidate)} value={modelKey(candidate)}>
+                    {`${candidate.displayName} (${candidate.connectionLabel})`}
+                  </option>
+                ))}
+              </OLFormSelect>
+            </div>
+          )}
+          {modelFailures.length > 0 && (
+            <p
+              className="ai-reviewer-panel-model-failures form-text mb-0"
+              data-testid="ai-reviewer-model-failures"
+            >
+              {t("ai_reviewer_provider_models_unavailable_for", {
+                connections: modelFailures
+                  .map((failure) => failure.connectionLabel)
+                  .join(", "),
+              })}
+            </p>
+          )}
           <OLButton
             type="button"
             variant="primary"
@@ -4628,6 +4919,8 @@ export default function AiReviewerPanel() {
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}
       workspacePersistence={aiReviewerWorkspacePersistence}
+      loadProviderConnections={getAiProviderConnections}
+      loadProviderModels={getAiProviderModels}
     />
   );
 }

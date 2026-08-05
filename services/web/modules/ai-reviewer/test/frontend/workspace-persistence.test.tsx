@@ -1161,7 +1161,7 @@ describe("AI reviewer: persisted review workspace", function () {
       }),
     );
     const navigateButton = await screen.findByRole("button", {
-      name: "Go to location 1",
+      name: "Go to text",
     });
     fireEvent.click(navigateButton);
     await waitFor(() => {

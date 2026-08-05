@@ -16,6 +16,7 @@ import {
   assertAgentEventForRequest,
   assertDiscussionEventForRequest,
 } from "./AgentGateway.mjs";
+import { createAiReviewerConcurrencyStore } from "../models/AiReviewerConcurrency.mjs";
 
 /**
  * @import {
@@ -59,11 +60,14 @@ const SAFE_FAILURE_CODE_CATEGORIES = new Map([
   ["AI_PROVIDER_AUTHENTICATION_FAILED", "authentication"],
   ["AI_PROVIDER_NOT_CONFIGURED", "configuration"],
   ["AI_PROVIDER_CONFIGURATION_INVALID", "configuration"],
+  ["AI_PROVIDER_MODEL_NOT_SELECTED", "configuration"],
   ["AI_OPENAI_COMPATIBLE_ENDPOINT_NOT_ALLOWED", "configuration"],
   ["AI_OLLAMA_REQUEST_URL_NOT_ALLOWED", "configuration"],
   ["AI_PROJECT_CONTENT_NOT_AVAILABLE", "configuration"],
   ["AI_SDK_TELEMETRY_UNSAFE", "configuration"],
   ["AI_PROVIDER_RATE_LIMITED", "rate-limit"],
+  ["AI_REVIEWER_USER_CONCURRENCY_LIMITED", "rate-limit"],
+  ["AI_REVIEWER_SYSTEM_CONCURRENCY_LIMITED", "rate-limit"],
   ["AI_REQUEST_TIMEOUT", "timeout"],
   ["AI_REQUEST_ABORTED", "aborted"],
   ["AI_PROVIDER_FAILED", "provider"],
@@ -147,6 +151,38 @@ const PUBLIC_PROJECT_CONTENT_ERROR = Object.freeze({
     "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
   retryable: false,
 });
+
+// A review that named no model can only be answered by the person running it,
+// so this stays distinct from a misconfigured provider.
+const PUBLIC_MODEL_SELECTION_ERROR = Object.freeze({
+  code: "AI_PROVIDER_MODEL_NOT_SELECTED",
+  category: "configuration",
+  message: "Select an AI model for this review, then run it again.",
+  retryable: false,
+});
+
+const PUBLIC_CONCURRENCY_ERROR = Object.freeze({
+  code: "AI_REVIEWER_CONCURRENCY_LIMITED",
+  category: "rate-limit",
+  message:
+    "An AI review is already running. Wait for it to finish, then try again.",
+  retryable: true,
+});
+
+/** @type {{
+ *   acquire: (userId: unknown) => Promise<
+ *     | { acquired: false, limit: 'user' | 'system' }
+ *     | { acquired: true, release: () => Promise<void> }
+ *   >,
+ * }} */
+const defaultConcurrencyStore =
+  process.env.NODE_ENV === "test"
+    ? {
+        async acquire() {
+          return { acquired: true, async release() {} };
+        },
+      }
+    : createAiReviewerConcurrencyStore();
 
 /**
  * Return a bounded public error selected only by a known category. Provider
@@ -335,6 +371,9 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
   if (error instanceof AgentGatewayError) {
     if (error.code === PUBLIC_PROJECT_CONTENT_ERROR.code) {
       return { ...PUBLIC_PROJECT_CONTENT_ERROR };
+    }
+    if (error.code === PUBLIC_MODEL_SELECTION_ERROR.code) {
+      return { ...PUBLIC_MODEL_SELECTION_ERROR };
     }
     return publicErrorForCategory(error.category);
   }
@@ -593,6 +632,12 @@ async function allowAbortPropagation(work) {
  *     providerErrorType: string | null,
  *     elapsedMs: number,
  *   }) => void,
+ *   concurrencyStore?: {
+ *     acquire: (userId: unknown) => Promise<
+ *       | { acquired: false, limit: 'user' | 'system' }
+ *       | { acquired: true, release: () => Promise<void> }
+ *     >,
+ *   },
  * }} dependencies
  */
 export function createAiReviewerController({
@@ -602,6 +647,7 @@ export function createAiReviewerController({
   eventId = randomUUID,
   elapsedNow = () => performance.now(),
   failureRecorder = () => {},
+  concurrencyStore = defaultConcurrencyStore,
 }) {
   if (typeof gatewayFactory !== "function") {
     throw new TypeError("gatewayFactory must be a function.");
@@ -708,12 +754,6 @@ export function createAiReviewerController({
       }
     };
 
-    response.status(200);
-    response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
-    response.setHeader("cache-control", "no-store");
-    response.setHeader("x-accel-buffering", "no");
-    response.flushHeaders?.();
-
     const disconnectController = new AbortController();
     const timeoutSignal = timeoutSignalFactory();
     const signal = AbortSignal.any([
@@ -735,6 +775,26 @@ export function createAiReviewerController({
     response.once("close", handleClose);
     request.once?.("aborted", handleAborted);
 
+    const reservation = await concurrencyStore.acquire(
+      /** @type {any} */ (request.user)?._id,
+    );
+    if (!reservation.acquired) {
+      response.removeListener("close", handleClose);
+      request.removeListener?.("aborted", handleAborted);
+      recordFailure({
+        category: "rate-limit",
+        code:
+          reservation.limit === "system"
+            ? "AI_REVIEWER_SYSTEM_CONCURRENCY_LIMITED"
+            : "AI_REVIEWER_USER_CONCURRENCY_LIMITED",
+        providerStatusCode: null,
+        providerErrorType: null,
+      });
+      return response.status(429).json({
+        error: { ...PUBLIC_CONCURRENCY_ERROR },
+      });
+    }
+
     let nextSequence = 0;
     /** @type {AsyncIterator<StreamEvent> | undefined} */
     let iterator;
@@ -742,6 +802,11 @@ export function createAiReviewerController({
     let pendingStep;
     let iteratorFinished = false;
     try {
+      response.status(200);
+      response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+      response.setHeader("cache-control", "no-store");
+      response.setHeader("x-accel-buffering", "no");
+      response.flushHeaders?.();
       const gateway = await raceWithAbort(
         Promise.resolve().then(() =>
           gatewayFactory({
@@ -862,6 +927,7 @@ export function createAiReviewerController({
       ) {
         response.end();
       }
+      await reservation.release();
     }
   }
 

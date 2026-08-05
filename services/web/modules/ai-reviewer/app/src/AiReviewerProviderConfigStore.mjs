@@ -1,14 +1,30 @@
 // @ts-check
 
-import { AiReviewerProviderConfig } from "../models/AiReviewerProviderConfig.mjs";
 import {
-  parseAiReviewerProviderConfig,
-  parseAiReviewerProviderConfigUpdate,
+  AI_REVIEWER_CONNECTION_LIMIT,
+  AiReviewerProviderConfig,
+  newAiReviewerConnectionId,
+} from "../models/AiReviewerProviderConfig.mjs";
+import {
+  parseAiReviewerConnection,
+  parseAiReviewerConnectionUpdate,
 } from "./AiReviewerProviderConfig.mjs";
 import { createAiReviewerProviderCredentialManager } from "./AiReviewerProviderCredentialManager.mjs";
-import { resolveModelContextLength } from "./ModelContextLength.mjs";
 
 const MAX_PROVIDER_CONFIG_SAVE_RETRIES = 5;
+// The single connection this module stored before connections became a list,
+// together with the model and context length a connection no longer owns.
+const LEGACY_CONNECTION_FIELDS = Object.freeze([
+  "provider",
+  "baseUrl",
+  "model",
+  "credentialEncrypted",
+  "credentialUpdatedAt",
+  "contextLength",
+  "contextLengthSource",
+]);
+
+export { AI_REVIEWER_CONNECTION_LIMIT };
 
 export class AiReviewerProviderConfigInputError extends TypeError {
   /** @param {string} message */
@@ -16,6 +32,43 @@ export class AiReviewerProviderConfigInputError extends TypeError {
     super(message);
     this.name = "AiReviewerProviderConfigInputError";
   }
+}
+
+export class AiReviewerConnectionLimitError extends AiReviewerProviderConfigInputError {
+  constructor() {
+    super("The AI provider connection limit has been reached.");
+    this.name = "AiReviewerConnectionLimitError";
+  }
+}
+
+export class AiReviewerConnectionNotFoundError extends Error {
+  constructor() {
+    super("The AI provider connection does not exist.");
+    this.name = "AiReviewerConnectionNotFoundError";
+  }
+}
+
+/**
+ * Raised when a caller named no connection and the user keeps more than one.
+ * Choosing between them here would be the silent decision this module stopped
+ * making when the default connection was removed.
+ */
+export class AiReviewerConnectionAmbiguousError extends Error {
+  constructor() {
+    super("An AI provider connection must be selected.");
+    this.name = "AiReviewerConnectionAmbiguousError";
+  }
+}
+
+/**
+ * Model listings are cached per destination, so a selected connection must not
+ * be served another connection's cached list.
+ *
+ * @param {string} userId
+ * @param {string | null} connectionId
+ */
+export function aiReviewerModelCacheKey(userId, connectionId) {
+  return connectionId == null ? userId : `${userId}\u0000${connectionId}`;
 }
 
 /** @param {any} query */
@@ -58,36 +111,126 @@ function revisionFilter(userId, revision) {
     : { _id: userId, revision };
 }
 
-/** @param {any} value */
-function coreConfigInput(value) {
+/**
+ * Take only the fields a connection still owns. A record written when a
+ * connection also carried a model and a context length keeps its destination
+ * and drops the rest, because a review now chooses the model itself.
+ *
+ * @param {any} value
+ */
+function coreConnectionInput(value) {
   return {
     provider: value?.provider,
     ...(value?.provider === "openai-compatible" || value?.provider === "ollama"
       ? { baseUrl: value?.baseUrl }
       : {}),
-    model: value?.model,
-    contextLength: value?.contextLength,
-    ...(Object.hasOwn(value ?? {}, "contextLengthSource")
-      ? { contextLengthSource: value?.contextLengthSource }
-      : {}),
+    ...(value?.label == null ? {} : { label: value.label }),
+    ...(value?.contextLengthOverride == null
+      ? {}
+      : { contextLengthOverride: value.contextLengthOverride }),
   };
 }
 
 /**
- * @param {ReturnType<typeof parseAiReviewerProviderConfig>} config
+ * A document written before connections became a list keeps its single
+ * connection in top-level fields. Reusing the document id as that connection's
+ * identifier keeps it stable for readers that arrive before the first write
+ * persists the list, so no migration script is needed.
+ *
+ * @param {any} record
+ * @returns {any[]}
  */
-function credentialDestination(config) {
-  return config.provider === "openai-compatible"
-    ? Object.freeze({
-        provider: config.provider,
-        baseUrl: config.baseUrl,
-      })
-    : Object.freeze({ provider: config.provider });
+function connectionRecords(record) {
+  if (Array.isArray(record?.connections)) {
+    // A connection stored before the model moved to the run still carries
+    // `model` and `contextLength`. Those paths no longer exist, and the schema
+    // is `strict: "throw"`, so writing one back unchanged is rejected.
+    return record.connections.map((connection) => ({
+      _id: connection._id,
+      ...coreConnectionInput(connection),
+      ...(connection.credentialEncrypted == null
+        ? {}
+        : { credentialEncrypted: connection.credentialEncrypted }),
+      ...(connection.credentialUpdatedAt == null
+        ? {}
+        : { credentialUpdatedAt: connection.credentialUpdatedAt }),
+    }));
+  }
+  if (record?.provider == null) {
+    return [];
+  }
+  return [
+    {
+      _id: record._id,
+      ...coreConnectionInput(record),
+      ...(record.credentialEncrypted == null
+        ? {}
+        : { credentialEncrypted: record.credentialEncrypted }),
+      ...(record.credentialUpdatedAt == null
+        ? {}
+        : { credentialUpdatedAt: record.credentialUpdatedAt }),
+    },
+  ];
 }
 
 /**
- * @param {ReturnType<typeof parseAiReviewerProviderConfig> | null} current
- * @param {ReturnType<typeof parseAiReviewerProviderConfigUpdate>} next
+ * @param {any} record
+ * @param {string} connectionId
+ */
+function connectionIndex(record, connectionId) {
+  return connectionRecords(record).findIndex(
+    (connection) => String(connection._id) === connectionId,
+  );
+}
+
+/**
+ * @param {any} record
+ * @param {string} connectionId
+ */
+function connectionRecord(record, connectionId) {
+  const index = connectionIndex(record, connectionId);
+  if (index < 0) {
+    throw new AiReviewerConnectionNotFoundError();
+  }
+  return connectionRecords(record)[index];
+}
+
+/**
+ * Describe every connection without decrypting anything: a listing reports
+ * whether a credential is set, never the credential itself.
+ *
+ * @param {any} record
+ */
+function publicConnections(record) {
+  return connectionRecords(record).map((connection) =>
+    Object.freeze({
+      id: String(connection._id),
+      credentialSet:
+        typeof connection.credentialEncrypted === "string" &&
+        connection.credentialEncrypted.length > 0,
+      ...parseAiReviewerConnection(coreConnectionInput(connection)),
+      ...(connection.credentialUpdatedAt == null
+        ? {}
+        : { credentialUpdatedAt: connection.credentialUpdatedAt }),
+    }),
+  );
+}
+
+/**
+ * @param {ReturnType<typeof parseAiReviewerConnection>} connection
+ */
+function credentialDestination(connection) {
+  return connection.provider === "openai-compatible"
+    ? Object.freeze({
+        provider: connection.provider,
+        baseUrl: connection.baseUrl,
+      })
+    : Object.freeze({ provider: connection.provider });
+}
+
+/**
+ * @param {ReturnType<typeof parseAiReviewerConnection> | null} current
+ * @param {ReturnType<typeof parseAiReviewerConnectionUpdate>} next
  */
 function isSameCredentialDestination(current, next) {
   if (current == null || current.provider !== next.provider) {
@@ -102,7 +245,7 @@ function isSameCredentialDestination(current, next) {
 
 /**
  * @param {any} record
- * @param {ReturnType<typeof parseAiReviewerProviderConfig>} destination
+ * @param {ReturnType<typeof parseAiReviewerConnection>} destination
  * @param {ReturnType<typeof createAiReviewerProviderCredentialManager>} credentialManager
  */
 async function storedCredential(record, destination, credentialManager) {
@@ -121,11 +264,8 @@ async function storedCredential(record, destination, credentialManager) {
  * @param {any} record
  * @param {ReturnType<typeof createAiReviewerProviderCredentialManager>} credentialManager
  */
-async function storedConfig(record, credentialManager) {
-  if (record == null || record.contextLength === undefined) {
-    return null;
-  }
-  const destination = parseAiReviewerProviderConfig(coreConfigInput(record));
+async function storedConnection(record, credentialManager) {
+  const destination = parseAiReviewerConnection(coreConnectionInput(record));
   const credential = await storedCredential(
     record,
     destination,
@@ -137,20 +277,15 @@ async function storedConfig(record, credentialManager) {
   ) {
     throw new TypeError("The AI provider credential is required.");
   }
-  return parseAiReviewerProviderConfig({
-    provider: destination.provider,
-    ...(destination.provider === "openai-compatible"
-      ? { baseUrl: destination.baseUrl }
-      : {}),
-    model: destination.model,
-    contextLength: destination.contextLength,
-    ...(destination.contextLengthSource === undefined
-      ? {}
-      : { contextLengthSource: destination.contextLengthSource }),
-    ...(credential === undefined ? {} : { credential }),
-    ...(record.credentialUpdatedAt == null
-      ? {}
-      : { credentialUpdatedAt: record.credentialUpdatedAt }),
+  return Object.freeze({
+    id: String(record._id),
+    ...parseAiReviewerConnection({
+      ...coreConnectionInput(record),
+      ...(credential === undefined ? {} : { credential }),
+      ...(record.credentialUpdatedAt == null
+        ? {}
+        : { credentialUpdatedAt: record.credentialUpdatedAt }),
+    }),
   });
 }
 
@@ -167,35 +302,149 @@ function timestamp(value) {
  * @param {{
  *   model?: typeof AiReviewerProviderConfig,
  *   credentialManager?: ReturnType<typeof createAiReviewerProviderCredentialManager>,
- *   resolveContextLength?: typeof resolveModelContextLength,
  *   now?: () => Date | string,
+ *   newConnectionId?: () => unknown,
  * }} [dependencies]
  */
 export function createAiReviewerProviderConfigStore({
   model = AiReviewerProviderConfig,
   credentialManager = createAiReviewerProviderCredentialManager(),
-  resolveContextLength = resolveModelContextLength,
   now = () => new Date(),
+  newConnectionId = newAiReviewerConnectionId,
 } = {}) {
-  return {
-    /** @param {string} userId */
-    async get(userId) {
-      return await storedConfig(
-        await lean(model.findOne({ _id: userId })),
-        credentialManager,
+  /**
+   * Build the connection to store from its current state and a write. The
+   * credential stays bound to its destination: a write that moves the
+   * connection to another provider or base URL drops the stored credential
+   * rather than re-binding it to somewhere the user never sent it.
+   *
+   * @param {any} currentConnection
+   * @param {ReturnType<typeof parseAiReviewerConnectionUpdate>} config
+   * @param {string | undefined} encryptedCredential
+   */
+  function nextConnection(currentConnection, config, encryptedCredential) {
+    let current = null;
+    try {
+      current =
+        currentConnection == null
+          ? null
+          : parseAiReviewerConnection(coreConnectionInput(currentConnection));
+    } catch {
+      current = null;
+    }
+    const credentialProvided = Object.hasOwn(config, "credential");
+    const replacingCredential =
+      credentialProvided && typeof config.credential === "string";
+    const hasStoredCredential =
+      typeof currentConnection?.credentialEncrypted === "string" &&
+      currentConnection.credentialEncrypted.length > 0;
+    const keepingCredential =
+      !credentialProvided &&
+      hasStoredCredential &&
+      isSameCredentialDestination(current, config);
+    if (
+      config.provider !== "openai-compatible" &&
+      !replacingCredential &&
+      !keepingCredential
+    ) {
+      throw new AiReviewerProviderConfigInputError(
+        "The AI provider credential is required.",
       );
-    },
+    }
+    return {
+      _id: currentConnection?._id ?? newConnectionId(),
+      provider: config.provider,
+      ...(config.provider === "openai-compatible"
+        ? { baseUrl: config.baseUrl }
+        : {}),
+      // Only a name the user typed is stored, so an unnamed connection keeps
+      // following the endpoint it is derived from when that endpoint changes.
+      ...(config.label == null ? {} : { label: config.label }),
+      ...(config.contextLengthOverride == null
+        ? {}
+        : { contextLengthOverride: config.contextLengthOverride }),
+      ...(replacingCredential
+        ? {
+            credentialEncrypted: encryptedCredential,
+            credentialUpdatedAt: timestamp(now()),
+          }
+        : keepingCredential
+          ? {
+              credentialEncrypted: currentConnection.credentialEncrypted,
+              credentialUpdatedAt: currentConnection.credentialUpdatedAt,
+            }
+          : hasStoredCredential
+            ? { credentialUpdatedAt: timestamp(now()) }
+            : {}),
+    };
+  }
 
-    /**
-     * @param {string} userId
-     * @param {unknown} input
-     */
-    async save(userId, input) {
-      const config = parseAiReviewerProviderConfigUpdate(input);
-      const credentialProvided = Object.hasOwn(config, "credential");
-      const replacingCredential =
-        credentialProvided && typeof config.credential === "string";
-      const encryptedCredential = replacingCredential
+  /**
+   * @param {string} userId
+   * @param {(record: any) => any} mutate
+   */
+  async function commit(userId, mutate) {
+    for (
+      let attempt = 0;
+      attempt < MAX_PROVIDER_CONFIG_SAVE_RETRIES;
+      attempt += 1
+    ) {
+      const currentRecord = await lean(model.findOne({ _id: userId }));
+      const expectedRevision = storedRevision(currentRecord);
+      const next = await mutate(currentRecord);
+      // The first write after the list was introduced also removes the legacy
+      // single-connection fields the list was migrated from.
+      const unset = Object.fromEntries(
+        LEGACY_CONNECTION_FIELDS.filter((field) =>
+          Object.hasOwn(currentRecord ?? {}, field),
+        ).map((field) => [field, ""]),
+      );
+      /** @type {any} */
+      const update = {
+        $set: { connections: next.connections },
+        $inc: { revision: 1 },
+        ...(Object.keys(unset).length === 0 ? {} : { $unset: unset }),
+      };
+
+      try {
+        const record = await lean(
+          model.findOneAndUpdate(
+            revisionFilter(userId, expectedRevision),
+            update,
+            {
+              new: true,
+              runValidators: true,
+              setDefaultsOnInsert: true,
+              upsert: currentRecord == null,
+            },
+          ),
+        );
+        if (record != null) {
+          return next;
+        }
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) {
+          throw error;
+        }
+      }
+    }
+    throw new Error(
+      "The AI provider configuration changed while it was being saved.",
+    );
+  }
+
+  /**
+   * @param {string} userId
+   * @param {string | null} connectionId
+   * @param {unknown} input
+   */
+  async function writeConnection(userId, connectionId, input) {
+    const config = parseAiReviewerConnectionUpdate(input);
+    // Encrypting before the compare-and-set keeps a credential-storage failure
+    // from reaching the stored document at all, and keeps a retry from
+    // re-encrypting the same value.
+    const encryptedCredential =
+      typeof config.credential === "string"
         ? await credentialManager.encrypt({
             provider: config.provider,
             ...(config.provider === "openai-compatible"
@@ -204,140 +453,142 @@ export function createAiReviewerProviderConfigStore({
             credential: config.credential,
           })
         : undefined;
-
-      for (
-        let attempt = 0;
-        attempt < MAX_PROVIDER_CONFIG_SAVE_RETRIES;
-        attempt += 1
+    let writtenId = "";
+    const written = await commit(userId, (currentRecord) => {
+      const connections = connectionRecords(currentRecord);
+      const index =
+        connectionId == null
+          ? -1
+          : connectionIndex(currentRecord, connectionId);
+      if (
+        connectionId == null &&
+        connections.length >= AI_REVIEWER_CONNECTION_LIMIT
       ) {
-        const currentRecord = await lean(model.findOne({ _id: userId }));
-        const expectedRevision = storedRevision(currentRecord);
-        let current = null;
-        try {
-          current =
-            currentRecord == null
-              ? null
-              : parseAiReviewerProviderConfig(coreConfigInput(currentRecord));
-        } catch {
-          current = null;
-        }
-        const sameDestination = isSameCredentialDestination(current, config);
-        const hasStoredCredential =
-          typeof currentRecord?.credentialEncrypted === "string" &&
-          currentRecord.credentialEncrypted.length > 0;
-        const clearingCredential =
-          (credentialProvided && config.credential == null) ||
-          (!credentialProvided && !sameDestination && hasStoredCredential);
-        const hasEffectiveCredential =
-          replacingCredential ||
-          (!credentialProvided && sameDestination && hasStoredCredential);
-        if (
-          config.provider !== "openai-compatible" &&
-          !hasEffectiveCredential
-        ) {
-          throw new AiReviewerProviderConfigInputError(
-            "The AI provider credential is required.",
-          );
-        }
-        const effectiveCredential = replacingCredential
-          ? config.credential
-          : !credentialProvided && sameDestination && hasStoredCredential
-            ? await storedCredential(
-                currentRecord,
-                /** @type {ReturnType<typeof parseAiReviewerProviderConfig>} */ (
-                  current
-                ),
-                credentialManager,
-              )
-            : undefined;
-        const resolution = await resolveContextLength({
-          provider: config.provider,
-          ...(config.provider === "openai-compatible"
-            ? { baseUrl: config.baseUrl }
-            : {}),
-          model: config.model,
-          ...(Object.hasOwn(config, "contextLength")
-            ? { contextLength: config.contextLength }
-            : {}),
-          ...(Object.hasOwn(config, "contextLengthOverride")
-            ? { contextLengthOverride: config.contextLengthOverride }
-            : {}),
-          ...(effectiveCredential === undefined
-            ? {}
-            : { credential: effectiveCredential }),
-        });
-        const resolvedConfig = parseAiReviewerProviderConfig({
-          provider: config.provider,
-          ...(config.provider === "openai-compatible"
-            ? { baseUrl: config.baseUrl }
-            : {}),
-          model: config.model,
-          contextLength: resolution.contextLength,
-          contextLengthSource: resolution.contextLengthSource,
-        });
-        const legacyContextLengthUpdate = Object.hasOwn(
-          config,
-          "contextLength",
-        );
-        const unset = {
-          ...(config.provider === "openai-compatible" ? {} : { baseUrl: "" }),
-          ...(clearingCredential ? { credentialEncrypted: "" } : {}),
-          ...(legacyContextLengthUpdate &&
-          Object.hasOwn(currentRecord ?? {}, "contextLengthSource")
-            ? { contextLengthSource: "" }
-            : {}),
-        };
-        /** @type {any} */
-        const update = {
-          $set: {
-            provider: config.provider,
-            ...(config.provider === "openai-compatible"
-              ? { baseUrl: config.baseUrl }
-              : {}),
-            model: config.model,
-            contextLength: resolvedConfig.contextLength,
-            ...(legacyContextLengthUpdate
-              ? {}
-              : {
-                  contextLengthSource: resolvedConfig.contextLengthSource,
-                }),
-          },
-          $inc: { revision: 1 },
-          ...(Object.keys(unset).length === 0 ? {} : { $unset: unset }),
-        };
-
-        if (replacingCredential) {
-          update.$set.credentialEncrypted = encryptedCredential;
-          update.$set.credentialUpdatedAt = timestamp(now());
-        } else if (clearingCredential && hasStoredCredential) {
-          update.$set.credentialUpdatedAt = timestamp(now());
-        }
-
-        try {
-          const record = await lean(
-            model.findOneAndUpdate(
-              revisionFilter(userId, expectedRevision),
-              update,
-              {
-                new: true,
-                runValidators: true,
-                setDefaultsOnInsert: true,
-                upsert: currentRecord == null,
-              },
-            ),
-          );
-          if (record != null) {
-            return await storedConfig(record, credentialManager);
-          }
-        } catch (error) {
-          if (!isDuplicateKeyError(error)) {
-            throw error;
-          }
-        }
+        throw new AiReviewerConnectionLimitError();
       }
-      throw new Error(
-        "The AI provider configuration changed while it was being saved.",
+      if (connectionId != null && index < 0) {
+        throw new AiReviewerConnectionNotFoundError();
+      }
+      const connection = nextConnection(
+        index < 0 ? null : connections[index],
+        config,
+        encryptedCredential,
       );
+      writtenId = String(connection._id);
+      return {
+        connections:
+          index < 0
+            ? [...connections, connection]
+            : connections.map((entry, position) =>
+                position === index ? connection : entry,
+              ),
+      };
+    });
+    return publicConnections(written).find(
+      (connection) => connection.id === writtenId,
+    );
+  }
+
+  /**
+   * Reading a connection only ever happens inside this user's own document, so
+   * another user's identifier is absent rather than merely rejected.
+   *
+   * @param {string} userId
+   * @param {string | null} [connectionId] the sole connection when omitted
+   */
+  async function readConnection(userId, connectionId = null) {
+    const record = await lean(model.findOne({ _id: userId }));
+    const connections = connectionRecords(record);
+    if (connectionId != null) {
+      return connectionRecord(record, connectionId);
+    }
+    if (connections.length > 1) {
+      throw new AiReviewerConnectionAmbiguousError();
+    }
+    return connections[0] ?? null;
+  }
+
+  return {
+    /**
+     * @param {string} userId
+     * @param {string | null} [connectionId] the sole connection when omitted
+     */
+    async get(userId, connectionId = null) {
+      const connection = await readConnection(userId, connectionId);
+      return connection == null
+        ? null
+        : await storedConnection(connection, credentialManager);
+    },
+
+    /**
+     * Every connection with its credential, for a model listing that spans all
+     * of them. Callers that answer a client use `list` instead.
+     *
+     * @param {string} userId
+     */
+    async getAll(userId) {
+      const record = await lean(model.findOne({ _id: userId }));
+      return await Promise.all(
+        connectionRecords(record).map(
+          async (connection) =>
+            await storedConnection(connection, credentialManager),
+        ),
+      );
+    },
+
+    /** @param {string} userId */
+    async list(userId) {
+      return publicConnections(await lean(model.findOne({ _id: userId })));
+    },
+
+    /**
+     * @param {string} userId
+     * @param {unknown} input
+     */
+    async create(userId, input) {
+      return await writeConnection(userId, null, input);
+    },
+
+    /**
+     * @param {string} userId
+     * @param {string} connectionId
+     * @param {unknown} input
+     */
+    async update(userId, connectionId, input) {
+      return await writeConnection(userId, connectionId, input);
+    },
+
+    /**
+     * Removing a connection removes its encrypted credential with it.
+     *
+     * @param {string} userId
+     * @param {string} connectionId
+     */
+    async remove(userId, connectionId) {
+      return publicConnections(
+        await commit(userId, (currentRecord) => {
+          const index = connectionIndex(currentRecord, connectionId);
+          if (index < 0) {
+            throw new AiReviewerConnectionNotFoundError();
+          }
+          return {
+            connections: connectionRecords(currentRecord).filter(
+              (_, position) => position !== index,
+            ),
+          };
+        }),
+      );
+    },
+
+    /**
+     * Remove the stored configuration and every encrypted credential it holds.
+     * Deletion must not depend on the feature being enabled, so this runs from
+     * the cleanup hooks rather than from a request path.
+     *
+     * @param {string} userId
+     */
+    async deleteUser(userId) {
+      await model.deleteOne({ _id: userId }).exec();
     },
   };
 }

@@ -6651,11 +6651,13 @@ __metadata:
     timekeeper: "npm:^2.2.0"
     to-string-loader: "npm:^1.2.0"
     tough-cookie: "npm:^4.0.0"
+    tr46: "npm:6.0.0"
     ts-loader: "npm:^9.5.7"
     tsscmp: "npm:^1.0.6"
     tty-browserify: "npm:^0.0.1"
     typescript: "npm:^5.9.3"
     uid-safe: "npm:^2.1.5"
+    undici: "npm:^7.22.0"
     unified: "npm:^11.0.5"
     unist-util-visit: "npm:^5.0.0"
     use-stick-to-bottom: "npm:^1.1.1"
@@ -28923,6 +28925,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"tr46@npm:6.0.0, tr46@npm:^6.0.0":
+  version: 6.0.0
+  resolution: "tr46@npm:6.0.0"
+  dependencies:
+    punycode: "npm:^2.3.1"
+  checksum: 10c0/83130df2f649228aa91c17754b66248030a3af34911d713b5ea417066fa338aa4bc8668d06bd98aa21a2210f43fc0a3db8b9099e7747fb5830e40e39a6a1058e
+  languageName: node
+  linkType: hard
+
 "tr46@npm:^1.0.1":
   version: 1.0.1
   resolution: "tr46@npm:1.0.1"
@@ -28938,15 +28949,6 @@ __metadata:
   dependencies:
     punycode: "npm:^2.3.1"
   checksum: 10c0/ae270e194d52ec67ebd695c1a42876e0f19b96e4aca2ab464ab1d9d17dc3acd3e18764f5034c93897db73421563be27c70c98359c4501136a497e46deda5d5ec
-  languageName: node
-  linkType: hard
-
-"tr46@npm:^6.0.0":
-  version: 6.0.0
-  resolution: "tr46@npm:6.0.0"
-  dependencies:
-    punycode: "npm:^2.3.1"
-  checksum: 10c0/83130df2f649228aa91c17754b66248030a3af34911d713b5ea417066fa338aa4bc8668d06bd98aa21a2210f43fc0a3db8b9099e7747fb5830e40e39a6a1058e
   languageName: node
   linkType: hard
 

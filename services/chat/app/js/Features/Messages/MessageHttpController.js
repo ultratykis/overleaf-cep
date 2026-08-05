@@ -63,6 +63,10 @@ export async function getThread(context) {
   return await callMessageHttpController(context, _getThread)
 }
 
+export async function getThreadState(context) {
+  return await callMessageHttpController(context, _getThreadState)
+}
+
 export async function getThreadMessage(context) {
   return await callMessageHttpController(context, _getThreadMessage)
 }
@@ -214,6 +218,16 @@ const _getThread = async (req, res) => {
       return
     }
     throw error
+  }
+}
+
+const _getThreadState = async (req, res) => {
+  const { projectId, threadId } = req.params
+  try {
+    const state = await ThreadManager.getThreadState(projectId, threadId)
+    res.json({ state })
+  } catch {
+    res.status(500).json({ error: 'thread_state_unavailable' })
   }
 }
 

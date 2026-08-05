@@ -380,6 +380,8 @@ export function createProjectSnapshot(
   const citationAudit = buildCitationAudit(documents, relationships);
   const frozenContextFiles = Object.freeze(contextFiles);
   const frozenRelationshipExclusions = Object.freeze(relationshipExclusions);
+  let successfulReadCount = 0;
+  let modelInputBudgetFailureCount = 0;
   let context;
   /** @type {number} */
   let modelInputCharacters;
@@ -411,7 +413,7 @@ export function createProjectSnapshot(
     relationshipsTruncated = true;
   }
 
-  return Object.freeze({
+  const snapshot = {
     manifest: Object.freeze(manifest),
     context,
 
@@ -446,9 +448,11 @@ export function createProjectSnapshot(
       });
       const resultCharacters = JSON.stringify(result).length;
       if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
+        modelInputBudgetFailureCount += 1;
         throw unavailable();
       }
       modelInputCharacters += resultCharacters;
+      successfulReadCount += 1;
       return result;
     },
 
@@ -481,5 +485,12 @@ export function createProjectSnapshot(
         }
       }
     },
-  });
+  };
+  snapshot.readProjectFile.reviewCoverage = () =>
+    Object.freeze({
+      successfulReadCount,
+      modelInputBudgetFailureCount,
+      relationshipsTruncated,
+    });
+  return Object.freeze(snapshot);
 }

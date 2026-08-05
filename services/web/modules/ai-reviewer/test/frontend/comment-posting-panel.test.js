@@ -13,7 +13,11 @@ const sinon = require("sinon");
 
 const {
   AiReviewerPanelView,
+  commentPostingErrorMessage,
 } = require("../../frontend/js/components/ai-reviewer-panel");
+const {
+  postAiReviewerArtifactComment,
+} = require("../../frontend/js/services/editor-artifact-comment-posting");
 
 const createdAt = "2026-07-26T00:00:00.000Z";
 const projectId = "project-comment-posting";
@@ -222,6 +226,7 @@ async function renderCompletedPanel({
   navigationResult = {
     status: "navigated",
   },
+  postingError,
 } = {}) {
   const sourceRequest = request();
   const capture = deferred();
@@ -233,9 +238,10 @@ async function renderCompletedPanel({
     return stream.promise;
   });
   const navigateEvidence = sinon.stub().resolves(navigationResult);
-  const postEditorComment = sinon.stub().resolves({
-    commentId: "comment-posted",
-  });
+  const postEditorComment =
+    postingError == null
+      ? sinon.stub().resolves({ commentId: "comment-posted" })
+      : sinon.stub().rejects(postingError);
 
   render(
     React.createElement(AiReviewerPanelView, {
@@ -402,5 +408,89 @@ describe("AI reviewer comment-posting panel", function () {
     );
     expect(within(findings).getByText("Status: Unresolved")).to.exist;
     expect(postEditorComment.called).to.equal(false);
+  });
+
+  it("warns against retrying when the posting response is unconfirmed", async function () {
+    const { postEditorComment } = await renderCompletedPanel({
+      postingError: Object.assign(new TypeError("response unavailable"), {
+        code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+      }),
+    });
+    const findings = screen.getByRole("region", {
+      name: "Review findings",
+    });
+    fireEvent.click(
+      within(findings).getByRole("button", {
+        name: "Post finding as comment",
+      }),
+    );
+    fireEvent.click(
+      within(findings).getByRole("button", {
+        name: "Post comment",
+      }),
+    );
+
+    expect((await within(findings).findByRole("alert")).textContent).to.equal(
+      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+    );
+    expect(postEditorComment.calledOnce).to.equal(true);
+  });
+
+  it("keeps concurrent uncertain and failed result wording isolated", async function () {
+    const uncertain = deferred();
+    const failed = deferred();
+    const postingOptions = {
+      request: request(),
+      artifact: ordinaryFinding(),
+      content: "Synthetic comment.",
+      getContext: selectionContext,
+      navigateEvidence: sinon.stub().resolves({ status: "navigated" }),
+      signal: new AbortController().signal,
+    };
+    const uncertainPosting = postAiReviewerArtifactComment({
+      ...postingOptions,
+      postComment: () => uncertain.promise,
+    });
+    const failedPosting = postAiReviewerArtifactComment({
+      ...postingOptions,
+      postComment: () => failed.promise,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    failed.reject(
+      Object.assign(new Error("rejected"), {
+        code: "AI_REVIEWER_COMMENT_POST_FAILED",
+      }),
+    );
+    uncertain.reject(
+      Object.assign(new Error("response unavailable"), {
+        code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+      }),
+    );
+    const [uncertainResult, failedResult] = await Promise.all([
+      uncertainPosting,
+      failedPosting,
+    ]);
+    const t = (key, defaultValue) =>
+      defaultValue ??
+      {
+        ai_reviewer_comment_post_failed: "The comment could not be posted.",
+      }[key] ??
+      key;
+
+    expect(uncertainResult).to.deep.equal({
+      status: "error",
+      code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    });
+    expect(failedResult).to.deep.equal({
+      status: "error",
+      code: "AI_REVIEWER_COMMENT_POST_FAILED",
+    });
+    expect(commentPostingErrorMessage(uncertainResult, t)).to.equal(
+      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+    );
+    expect(commentPostingErrorMessage(failedResult, t)).to.equal(
+      "The comment could not be posted.",
+    );
   });
 });

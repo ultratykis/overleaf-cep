@@ -4,6 +4,9 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import Ajv from "ajv";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP, SocketAddress } from "node:net";
+import { Agent, buildConnector } from "undici";
 
 import { AgentGatewayError } from "./AgentGateway.mjs";
 import {
@@ -12,7 +15,9 @@ import {
   classifySdkError,
 } from "./AiSdkAgentGateway.mjs";
 import {
+  assertAllowedResolvedIpAddress,
   OPENAI_COMPATIBLE_FETCH_REDIRECT,
+  OpenAiCompatibleEndpointPolicyError,
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
@@ -2237,17 +2242,161 @@ function runProviderConstruction(work) {
   }
 }
 
+class ResolvedEndpointPeerMismatch extends Error {}
+
+/**
+ * @param {unknown} error
+ */
+function hasEndpointPolicyCause(error) {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (
+      current instanceof OpenAiCompatibleEndpointPolicyError ||
+      current instanceof ResolvedEndpointPeerMismatch
+    ) {
+      return true;
+    }
+    if (current == null || typeof current !== "object") {
+      return false;
+    }
+    current = Reflect.get(current, "cause");
+  }
+  return false;
+}
+
+/**
+ * @param {string | undefined} address
+ * @returns {string | null}
+ */
+function canonicalIpAddress(address) {
+  const family = typeof address === "string" ? isIP(address) : 0;
+  if (family === 0) {
+    return null;
+  }
+  return new SocketAddress({
+    address,
+    family: family === 4 ? "ipv4" : "ipv6",
+  }).address;
+}
+
+/**
+ * @param {{
+ *   hostname: string,
+ *   lookupAll?: typeof dnsLookup,
+ *   agentFactory?: (options: import("undici").Agent.Options) => import("undici").Dispatcher,
+ *   connectorBuilder?: typeof buildConnector,
+ * }} options
+ */
+export function createPinnedOpenAiCompatibleDispatcher({
+  hostname,
+  lookupAll = dnsLookup,
+  agentFactory = (options) => new Agent(options),
+  connectorBuilder = buildConnector,
+}) {
+  let resolution;
+  const resolveOnce = () => {
+    resolution ??= Promise.resolve()
+      .then(() => lookupAll(hostname, { all: true, verbatim: true }))
+      .then((addresses) => {
+        if (!Array.isArray(addresses) || addresses.length === 0) {
+          throw new Error("OpenAI-compatible endpoint resolution failed.");
+        }
+        for (const result of addresses) {
+          assertAllowedResolvedIpAddress(result?.address);
+        }
+        const selected = addresses.find(
+          (result) =>
+            result != null &&
+            typeof result === "object" &&
+            (result.family === 4 || result.family === 6) &&
+            canonicalIpAddress(result.address) !== null,
+        );
+        if (selected === undefined) {
+          throw new Error("OpenAI-compatible endpoint resolution failed.");
+        }
+        const selectedAddress = canonicalIpAddress(selected.address);
+        if (selectedAddress === null) {
+          throw new Error("OpenAI-compatible endpoint resolution failed.");
+        }
+        const lookup = (_hostname, lookupOptions, callback) => {
+          if (lookupOptions?.all === true) {
+            callback(null, [
+              { address: selectedAddress, family: selected.family },
+            ]);
+          } else {
+            callback(null, selectedAddress, selected.family);
+          }
+        };
+        return {
+          address: selectedAddress,
+          connect: connectorBuilder({
+            family: selected.family,
+            lookup,
+            servername: hostname,
+          }),
+        };
+      });
+    return resolution;
+  };
+
+  return agentFactory({
+    connect(connectOptions, callback) {
+      resolveOnce().then(
+        ({ address, connect }) => {
+          connect(
+            { ...connectOptions, servername: hostname },
+            (error, socket) => {
+              if (error != null) {
+                callback(error, null);
+                return;
+              }
+              if (
+                socket == null ||
+                canonicalIpAddress(socket.remoteAddress) !== address
+              ) {
+                socket?.destroy();
+                callback(new ResolvedEndpointPeerMismatch(), null);
+                return;
+              }
+              callback(null, socket);
+            },
+          );
+        },
+        (error) => callback(error, null),
+      );
+    },
+  });
+}
+
+/**
+ * @param {import("undici").Dispatcher | undefined} dispatcher
+ */
+function closePinnedDispatcher(dispatcher) {
+  if (dispatcher === undefined) {
+    return;
+  }
+  try {
+    Promise.resolve(dispatcher.close()).catch(observeInvalidNativePromise);
+  } catch (error) {
+    observeInvalidNativePromise(error);
+  }
+}
+
 /**
  * @param {{
  *   baseUrl: string,
  *   allowedRequestUrl: string,
  *   fetchImpl: typeof fetch,
+ *   lookupAll?: typeof dnsLookup,
+ *   dispatcherFactory?: typeof createPinnedOpenAiCompatibleDispatcher,
  * }} options
  */
-function createGuardedOpenAiCompatibleFetch({
+export function createGuardedOpenAiCompatibleFetch({
   baseUrl,
   allowedRequestUrl,
   fetchImpl,
+  lookupAll = dnsLookup,
+  dispatcherFactory = createPinnedOpenAiCompatibleDispatcher,
 }) {
   const configuredEndpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
   const configuredOrigin = new URL(configuredEndpoint.baseUrl).origin;
@@ -2276,13 +2425,24 @@ function createGuardedOpenAiCompatibleFetch({
       throw requestUrlNotAllowed();
     }
 
+    /** @type {import("undici").Dispatcher | undefined} */
+    let dispatcher;
     let response;
     try {
-      response = await fetchImpl(input, {
-        ...init,
-        redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
+      dispatcher = dispatcherFactory({
+        hostname: configuredEndpoint.host.replace(/^\[|\]$/gu, ""),
+        lookupAll,
       });
+      response = await fetchImpl(
+        input,
+        /** @type {RequestInit & { dispatcher: import("undici").Dispatcher }} */ ({
+          ...init,
+          redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
+          dispatcher,
+        }),
+      );
     } catch (error) {
+      closePinnedDispatcher(dispatcher);
       observeInvalidNativePromise(error);
       const signal =
         init?.signal ??
@@ -2292,6 +2452,9 @@ function createGuardedOpenAiCompatibleFetch({
       if (signal?.aborted) {
         throw classifyTransportError(error, signal);
       }
+      if (hasEndpointPolicyCause(error)) {
+        throw localTransportError(new OpenAiCompatibleEndpointPolicyError());
+      }
       throw localTransportError(
         new AgentGatewayError("The AI provider could not be reached.", {
           code: "AI_PROVIDER_NETWORK_FAILED",
@@ -2300,6 +2463,7 @@ function createGuardedOpenAiCompatibleFetch({
         }),
       );
     }
+    closePinnedDispatcher(dispatcher);
     if (response.status >= 300 && response.status <= 399) {
       const error = redirectRejected();
       cancelRejectedResponseBody(response, error);

@@ -47,7 +47,10 @@ export type ArtifactCommentPostingResult =
     }
   | {
       status: "error";
-      code: "AI_COMMENT_POST_FAILED";
+      code:
+        | "AI_COMMENT_POST_FAILED"
+        | "AI_REVIEWER_COMMENT_POST_FAILED"
+        | "AI_REVIEWER_COMMENT_POST_UNCERTAIN";
     };
 
 export type ArtifactCommentPostingOptions = {
@@ -239,6 +242,15 @@ function postingFailure(error: unknown): ArtifactCommentPostingResult {
     return {
       status: "conflict",
       code: "AI_COMMENT_DOCUMENT_UNAVAILABLE",
+    };
+  }
+  if (
+    code === "AI_REVIEWER_COMMENT_POST_FAILED" ||
+    code === "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
+  ) {
+    return {
+      status: "error",
+      code,
     };
   }
   return {

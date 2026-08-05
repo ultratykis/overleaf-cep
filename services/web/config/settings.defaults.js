@@ -479,6 +479,13 @@ module.exports = {
 
   aiReviewer: {
     enabled: aiReviewerEnabled,
+    // Development aid only: records why a provider refused a request. The text
+    // is provider-controlled and can quote the request, so this must stay off
+    // wherever real manuscripts are reviewed.
+    debugProviderErrors: booleanFromEnv(
+      'OVERLEAF_AI_REVIEWER_DEBUG_PROVIDER_ERRORS',
+      false
+    ),
   },
 
   quotaGrants: {

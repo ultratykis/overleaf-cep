@@ -1,6 +1,7 @@
 // @ts-check
 
 import logger from "@overleaf/logger";
+import Settings from "@overleaf/settings";
 
 import {
   safeProviderErrorType,
@@ -41,5 +42,36 @@ export function recordAiReviewerFailure(record) {
       elapsedMs: record.elapsedMs,
     },
     AI_REVIEWER_FAILURE_LOG_MESSAGE,
+  );
+}
+
+export const AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE =
+  "AI reviewer provider diagnostic";
+
+/**
+ * Off unless `OVERLEAF_AI_REVIEWER_DEBUG_PROVIDER_ERRORS=true` is set in the
+ * environment, which surfaces as `aiReviewer.debugProviderErrors`.
+ *
+ * A provider rejection carries the reason the request shape was refused, which
+ * is the only way to tell an unsupported request combination from a transport
+ * fault. That text is provider-controlled and can quote the request, so it is
+ * never recorded on the normal path. Enable this on a development instance
+ * only, and never where real manuscripts are reviewed.
+ *
+ * @param {{ provider: string | null, model: string | null, detail: unknown }} record
+ */
+export function recordAiReviewerProviderDiagnostic(record) {
+  if (Settings.aiReviewer?.debugProviderErrors !== true) {
+    return;
+  }
+  const detail =
+    record.detail instanceof Error ? record.detail.message : record.detail;
+  logger.warn(
+    {
+      provider: record.provider,
+      model: record.model,
+      detail: typeof detail === "string" ? detail.slice(0, 4_000) : null,
+    },
+    AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
   );
 }

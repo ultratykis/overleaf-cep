@@ -342,7 +342,7 @@ describe("AI reviewer: single document selection workspace", function () {
       expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
       expect(screen.getByText("The selected phrase needs a more precise term."))
         .to.exist;
-      expect(screen.getAllByText(`${path}:6-10`)).to.have.length(2);
+      expect(screen.getAllByText(`${path} (chars 6\u201310)`)).to.have.length(2);
       expect(screen.getByText("Original: beta")).to.exist;
       expect(screen.getByText("Replacement: clear")).to.exist;
       expect(screen.getByText("Rationale: Use a more precise synthetic term."))
@@ -523,7 +523,7 @@ describe("AI reviewer: single document selection workspace", function () {
       within(findingsSection)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal(["Go to location 1", "Discuss finding", "Discard finding"]);
+    ).to.deep.equal(["Go to text", "Discuss finding", "Discard finding"]);
     expect(within(findingsSection).queryByText(/Apply/u)).not.to.exist;
     expect(within(findingsSection).queryByText(/Copy proposed text/u)).not.to
       .exist;
@@ -536,7 +536,7 @@ describe("AI reviewer: single document selection workspace", function () {
         .getAllByRole("button")
         .map((button) => button.textContent),
     ).to.deep.equal([
-      "Go to location 1",
+      "Go to text",
       "Discuss citation finding",
       "Copy proposed text",
       "Discard citation finding",
@@ -1786,7 +1786,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -1827,7 +1827,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
 
@@ -1840,7 +1840,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
     expect(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     ).to.exist;
   });
@@ -1877,7 +1877,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
       fireEvent.click(
         screen.getByRole("button", {
-          name: "Go to location 1",
+          name: "Go to text",
         }),
       );
 
@@ -1903,7 +1903,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
 
@@ -1920,10 +1920,10 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
   it("offers cross-file navigation for project-scope evidence", async function () {
     const workspace = await renderCompletedProjectEvidenceWorkspace();
-    expect(screen.getByText("chapters/other.tex:1-3")).to.exist;
+    expect(screen.getByText("chapters/other.tex (chars 1–3)")).to.exist;
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
     await waitFor(() =>
@@ -1959,7 +1959,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
 
@@ -2090,7 +2090,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -2126,7 +2126,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
       name: "Review selection",
     });
     const staleEvidenceButton = screen.getByRole("button", {
-      name: "Go to location 1",
+      name: "Go to text",
     });
 
     await act(async () => {
@@ -2147,7 +2147,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     expect(screen.getByText("Evidence selected")).to.exist;
     expect(
       screen.getAllByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     ).to.have.length(2);
   });
@@ -2161,7 +2161,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
@@ -2188,7 +2188,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Go to location 1",
+        name: "Go to text",
       }),
     );
 

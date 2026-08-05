@@ -10,11 +10,17 @@ import { createAiReviewerCommentProvenanceController } from "./AiReviewerComment
 import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProvenanceStore.mjs";
 import { createAiReviewerController } from "./AiReviewerController.mjs";
 import { recordAiReviewerFailure } from "./AiReviewerFailureLogger.mjs";
-import { createAiReviewerProviderConfigStore } from "./AiReviewerProviderConfigStore.mjs";
+import {
+  AiReviewerConnectionAmbiguousError,
+  AiReviewerConnectionNotFoundError,
+  aiReviewerModelCacheKey,
+  createAiReviewerProviderConfigStore,
+} from "./AiReviewerProviderConfigStore.mjs";
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
 import { createAiReviewerProviderService } from "./OllamaProviderService.mjs";
+import { parseOpenAiCompatibleModelId } from "./OllamaEndpointPolicy.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
 import {
   authenticatedUserId,
@@ -47,6 +53,149 @@ export function setAiReviewerGatewayFactoryForTests(gatewayFactory) {
   };
 }
 
+/** @param {any} gateway @param {any} scope */
+function enforceProjectReviewCoverage(gateway, scope) {
+  const reviewCoverage = scope.readProjectFile?.reviewCoverage;
+  if (scope.kind !== "project" || typeof reviewCoverage !== "function") {
+    return gateway;
+  }
+  return {
+    async *stream(request, options) {
+      for await (const event of gateway.stream(request, options)) {
+        if (event.type !== "completed") {
+          yield event;
+          continue;
+        }
+        const coverage = reviewCoverage();
+        if (coverage.successfulReadCount === 0) {
+          throw new AgentGatewayError(
+            "The review could not read any manuscript content. Use a model with a larger context length or narrow the scope.",
+            {
+              code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+              category: "configuration",
+              retryable: false,
+            },
+          );
+        }
+        const contextTruncated =
+          coverage.relationshipsTruncated ||
+          coverage.modelInputBudgetFailureCount > 0;
+        yield contextTruncated ? { ...event, contextTruncated: true } : event;
+        return;
+      }
+    },
+  };
+}
+
+function invalidRunModel() {
+  return new AgentGatewayError("The requested AI model is unavailable.", {
+    code: "AI_PROVIDER_CONFIGURATION_INVALID",
+    category: "configuration",
+    retryable: false,
+  });
+}
+
+function modelSelectionRequired() {
+  return new AgentGatewayError("This review did not select an AI model.", {
+    code: "AI_PROVIDER_MODEL_NOT_SELECTED",
+    category: "configuration",
+    retryable: false,
+  });
+}
+
+/**
+ * Load the connection the request selected. A connection identifier that is
+ * not this user's own is absent rather than readable, and is reported as an
+ * unconfigured provider instead of leaking that it exists for somebody else.
+ * With several connections and no selection there is nothing to fall back to,
+ * so the run asks for a model rather than picking a destination on its own.
+ *
+ * @param {any} configStore @param {any} context
+ */
+async function loadRunConnection(configStore, context) {
+  try {
+    return await configStore.get(
+      authenticatedUserId(context.httpRequest),
+      context.request.connectionId ?? null,
+    );
+  } catch (error) {
+    if (error instanceof AiReviewerConnectionAmbiguousError) {
+      throw modelSelectionRequired();
+    }
+    if (error instanceof AiReviewerConnectionNotFoundError) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Decide which model this run uses. Discovery answers both questions: whether
+ * a named model belongs to this connection, and — when the request named none
+ * — whether the connection leaves anything to choose between.
+ *
+ * @param {any} connection @param {any} context @param {any} providerService
+ */
+async function resolveRunModel(connection, context, providerService) {
+  const requestedModel = context.request.model ?? null;
+  let models;
+  try {
+    if (requestedModel != null) {
+      parseOpenAiCompatibleModelId(requestedModel);
+    }
+    models = await providerService.listModels(connection, {
+      signal: context.signal,
+      cacheKey: aiReviewerModelCacheKey(
+        authenticatedUserId(context.httpRequest),
+        connection.id ?? null,
+      ),
+    });
+  } catch (error) {
+    if (
+      error instanceof AgentGatewayError &&
+      error.code === "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED"
+    ) {
+      // Providers without discovery still receive the existing bounded ID
+      // check, but cannot say which model a request that named none wanted.
+      if (requestedModel == null) {
+        throw modelSelectionRequired();
+      }
+      return requestedModel;
+    }
+    throw error instanceof AgentGatewayError ? error : invalidRunModel();
+  }
+  if (requestedModel == null) {
+    if (models.length !== 1) {
+      throw modelSelectionRequired();
+    }
+    return models[0].id;
+  }
+  if (!models.some((candidate) => candidate.id === requestedModel)) {
+    throw invalidRunModel();
+  }
+  return requestedModel;
+}
+
+/** @param {any} connection @param {any} context @param {any} providerService */
+async function resolveRunConfiguration(connection, context, providerService) {
+  const model = await resolveRunModel(connection, context, providerService);
+  const resolution = await providerService.resolveContextLength(
+    connection,
+    model,
+  );
+  return Object.freeze({
+    provider: connection.provider,
+    ...(connection.provider === "openai-compatible"
+      ? { baseUrl: connection.baseUrl }
+      : {}),
+    ...(typeof connection.credential === "string"
+      ? { credential: connection.credential }
+      : {}),
+    model,
+    ...resolution,
+  });
+}
+
 /** @param {any} dependencies */
 export function createConfiguredAiReviewerController({
   configStore,
@@ -64,9 +213,7 @@ export function createConfiguredAiReviewerController({
         return await testGatewayFactory(context);
       }
 
-      const configuration = await configStore.get(
-        authenticatedUserId(context.httpRequest),
-      );
+      const configuration = await loadRunConnection(configStore, context);
       if (configuration == null) {
         throw new AgentGatewayError("No AI provider is configured.", {
           code: "AI_PROVIDER_NOT_CONFIGURED",
@@ -74,20 +221,29 @@ export function createConfiguredAiReviewerController({
           retryable: false,
         });
       }
-      context.setFailureProvider(configuration.provider, configuration.model);
+      const runConfiguration = await resolveRunConfiguration(
+        configuration,
+        context,
+        providerService,
+      );
+      context.setFailureProvider(
+        runConfiguration.provider,
+        runConfiguration.model,
+      );
       if (DiscussionRequestSchema.safeParse(context.request).success) {
-        return providerService.createDiscussionGateway(configuration);
+        return providerService.createDiscussionGateway(runConfiguration);
       }
       const scope = await requestScopeReader.read(context.httpRequest, {
         signal: context.signal,
-        contextLength: configuration.contextLength,
+        contextLength: runConfiguration.contextLength,
       });
-      return providerService.createAgentGateway(configuration, {
+      const gateway = providerService.createAgentGateway(runConfiguration, {
         readProjectFile: scope.readProjectFile,
         projectContext: scope.projectContext,
         searchZotero: scope.searchZotero,
         validateEvidence: scope.validateEvidence,
       });
+      return enforceProjectReviewCoverage(gateway, scope);
     },
     timeoutSignalFactory,
     now,
@@ -142,9 +298,7 @@ async function loadProjectDocuments(projectId, { signal } = {}) {
 }
 
 const providerService = createAiReviewerProviderService();
-const configStore = createAiReviewerProviderConfigStore({
-  resolveContextLength: providerService.resolveContextLength,
-});
+const configStore = createAiReviewerProviderConfigStore();
 const requestScopeReader = createRequestScopeReader({
   loadProjectDocuments,
   isZoteroLinked(userId) {
@@ -178,9 +332,12 @@ const provenanceController = createAiReviewerCommentProvenanceController({
 });
 
 export default {
-  getConfiguration: expressify(providerController.getConfiguration),
-  saveConfiguration: expressify(providerController.saveConfiguration),
+  listModels: expressify(providerController.listModels),
   testConnection: expressify(providerController.testConnection),
+  listConnections: expressify(providerController.listConnections),
+  createConnection: expressify(providerController.createConnection),
+  updateConnection: expressify(providerController.updateConnection),
+  deleteConnection: expressify(providerController.deleteConnection),
   stream: expressify(configuredController.stream),
   discussionStream: expressify(configuredController.discussionStream),
   getWorkspace: expressify(workspaceController.getWorkspace),

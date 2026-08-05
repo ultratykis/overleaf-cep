@@ -10,9 +10,12 @@
  *     ensureUserCanReadProject: (...args: any[]) => unknown,
  *   },
  *   rateLimit: (...args: any[]) => unknown,
- *   getConfiguration: (...args: any[]) => unknown,
- *   saveConfiguration: (...args: any[]) => unknown,
+ *   listModels: (...args: any[]) => unknown,
  *   testConnection: (...args: any[]) => unknown,
+ *   listConnections: (...args: any[]) => unknown,
+ *   createConnection: (...args: any[]) => unknown,
+ *   updateConnection: (...args: any[]) => unknown,
+ *   deleteConnection: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
  *   discussionStream: (...args: any[]) => unknown,
  *   getWorkspace: (...args: any[]) => unknown,
@@ -28,9 +31,12 @@ export function createAiReviewerRouter({
   authenticationController,
   authorizationMiddleware,
   rateLimit,
-  getConfiguration,
-  saveConfiguration,
+  listModels,
   testConnection,
+  listConnections,
+  createConnection,
+  updateConnection,
+  deleteConnection,
   stream,
   discussionStream,
   getWorkspace,
@@ -42,7 +48,6 @@ export function createAiReviewerRouter({
   deleteWorkspace,
 }) {
   const appliedRouters = new WeakSet();
-
   return {
     /**
      * @param {{
@@ -67,9 +72,9 @@ export function createAiReviewerRouter({
       ];
 
       webRouter.get(
-        "/project/:project_id/ai-reviewer/config",
+        "/project/:project_id/ai-reviewer/provider/models",
         ...commonMiddleware,
-        getConfiguration,
+        listModels,
       );
       webRouter.get(
         "/project/:project_id/ai-reviewer/workspace",
@@ -80,11 +85,6 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/comment-provenance",
         ...commonMiddleware,
         getCommentProvenance,
-      );
-      webRouter.put(
-        "/project/:project_id/ai-reviewer/config",
-        ...commonMiddleware,
-        saveConfiguration,
       );
       webRouter.put(
         "/project/:project_id/ai-reviewer/workspace",
@@ -125,6 +125,29 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
         ...commonMiddleware,
         deleteCommentProvenance,
+      );
+
+      // Connections stay inside the same authorization chain as the single
+      // configuration they replaced.
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/connections",
+        ...commonMiddleware,
+        listConnections,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/connections",
+        ...commonMiddleware,
+        createConnection,
+      );
+      webRouter.put(
+        "/project/:project_id/ai-reviewer/connections/:connection_id",
+        ...commonMiddleware,
+        updateConnection,
+      );
+      webRouter.delete(
+        "/project/:project_id/ai-reviewer/connections/:connection_id",
+        ...commonMiddleware,
+        deleteConnection,
       );
     },
   };

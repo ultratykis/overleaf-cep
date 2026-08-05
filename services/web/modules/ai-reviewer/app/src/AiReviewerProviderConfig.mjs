@@ -39,6 +39,16 @@ const CoreProviderConfigSchema = z.discriminatedUnion("provider", [
     })
     .strict(),
 ]);
+const DestinationSchema = z.discriminatedUnion("provider", [
+  z
+    .object({
+      provider: z.literal("openai-compatible"),
+      baseUrl: z.string(),
+    })
+    .strict(),
+  z.object({ provider: z.literal("gemini") }).strict(),
+  z.object({ provider: z.literal("claude") }).strict(),
+]);
 const CredentialSchema = z
   .string()
   .min(1)
@@ -47,10 +57,31 @@ const CredentialSchema = z
     // eslint-disable-next-line no-control-regex -- credentials reject ASCII controls
     (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value),
   );
+const LabelSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .refine(
+    // eslint-disable-next-line no-control-regex -- labels reject ASCII controls
+    (value) => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/u.test(value),
+  )
+  .transform((value) => value.trim());
+
+const ConnectionIdSchema = z.string().min(1).max(200);
+
+const NATIVE_PROVIDER_LABELS = Object.freeze({
+  gemini: "Google Gemini",
+  claude: "Anthropic Claude",
+});
 
 /** @param {unknown} input */
 export function parseAiReviewerProviderCredential(input) {
   return CredentialSchema.parse(input);
+}
+
+/** @param {unknown} input */
+export function parseAiReviewerConnectionId(input) {
+  return ConnectionIdSchema.parse(input);
 }
 
 /** @param {unknown} input */
@@ -76,9 +107,56 @@ function parseCoreProviderConfig(input) {
     case "claude":
       return Object.freeze({
         provider: value.provider,
-        model: parseOpenAiCompatibleModelId(value.model),
+        // Gemini names models `models/<id>` in its own listing and accepts
+        // either form on the wire. Model discovery reports the bare id, so
+        // store that form too or a configured model stops matching the list.
+        model: parseOpenAiCompatibleModelId(
+          value.provider === "gemini" && typeof value.model === "string"
+            ? value.model.replace(/^models\//u, "")
+            : value.model,
+        ),
       });
   }
+}
+
+/**
+ * Parse the provider and endpoint a connection points at. Legacy `ollama`
+ * records are normalized without requiring the user to save their local
+ * configuration again.
+ *
+ * @param {Record<string, unknown>} value
+ */
+function parseDestination(value) {
+  const candidate = {
+    provider:
+      value.provider === "ollama" ? "openai-compatible" : value.provider,
+    ...(Object.hasOwn(value, "baseUrl") ? { baseUrl: value.baseUrl } : {}),
+  };
+  const destination = DestinationSchema.parse(candidate);
+  return destination.provider === "openai-compatible"
+    ? Object.freeze({
+        provider: destination.provider,
+        baseUrl: parseOpenAiCompatibleBaseUrl(destination.baseUrl).baseUrl,
+      })
+    : Object.freeze({ provider: destination.provider });
+}
+
+/**
+ * Name a connection the user never named. The endpoint host identifies a
+ * self-hosted server on screen, the vendor name identifies a hosted one.
+ * Deriving this on read is what lets an existing connection gain a label
+ * without a migration.
+ *
+ * @param {{ provider: "openai-compatible" | "gemini" | "claude", baseUrl?: string }} destination
+ */
+export function deriveAiReviewerConnectionLabel(destination) {
+  if (destination.provider !== "openai-compatible") {
+    return NATIVE_PROVIDER_LABELS[destination.provider];
+  }
+  const endpoint = parseOpenAiCompatibleBaseUrl(destination.baseUrl);
+  return endpoint.port === null
+    ? endpoint.host
+    : `${endpoint.host}:${endpoint.port}`;
 }
 
 /**
@@ -114,26 +192,14 @@ function parseCredentialTimestamp(input) {
 }
 
 /**
- * Parse the private server-side configuration used by provider requests.
- * Legacy `ollama` records are normalized without requiring the user to save
- * their local configuration again.
- *
  * @param {unknown} input
+ * @param {Set<string>} allowedKeys
  */
-export function parseAiReviewerProviderConfig(input) {
+function objectWithKnownKeys(input, allowedKeys) {
   if (input == null || typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("AI provider configuration must be an object.");
   }
   const value = /** @type {Record<string, unknown>} */ (input);
-  const allowedKeys = new Set([
-    "provider",
-    "baseUrl",
-    "model",
-    "contextLength",
-    "contextLengthSource",
-    "credential",
-    "credentialUpdatedAt",
-  ]);
   if (
     Reflect.ownKeys(value).some(
       (key) => typeof key !== "string" || !allowedKeys.has(key),
@@ -141,6 +207,114 @@ export function parseAiReviewerProviderConfig(input) {
   ) {
     throw new TypeError("AI provider configuration has unknown fields.");
   }
+  return value;
+}
+
+// The identifier is server-issued, so it belongs to a connection that was read
+// back but never to one a client writes.
+const CONNECTION_KEYS = new Set([
+  "id",
+  "provider",
+  "baseUrl",
+  "label",
+  "contextLengthOverride",
+  "credential",
+  "credentialUpdatedAt",
+]);
+const CONNECTION_UPDATE_KEYS = new Set([
+  "provider",
+  "baseUrl",
+  "label",
+  "contextLengthOverride",
+  "credential",
+]);
+const RUN_CONFIG_KEYS = new Set([
+  "provider",
+  "baseUrl",
+  "model",
+  "contextLength",
+  "contextLengthSource",
+  "credential",
+  "credentialUpdatedAt",
+]);
+
+/**
+ * Parse a stored connection: a destination plus how to reach it. A model is
+ * not part of a connection, so it is chosen per review instead.
+ *
+ * @param {unknown} input
+ */
+export function parseAiReviewerConnection(input) {
+  const value = objectWithKnownKeys(input, CONNECTION_KEYS);
+  const destination = parseDestination(value);
+  const label = Object.hasOwn(value, "label")
+    ? LabelSchema.parse(value.label)
+    : deriveAiReviewerConnectionLabel(destination);
+  const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
+    ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
+    : undefined;
+  const credential = Object.hasOwn(value, "credential")
+    ? value.credential == null
+      ? null
+      : parseAiReviewerProviderCredential(value.credential)
+    : undefined;
+  const credentialUpdatedAt = Object.hasOwn(value, "credentialUpdatedAt")
+    ? parseCredentialTimestamp(value.credentialUpdatedAt)
+    : undefined;
+  return Object.freeze({
+    ...(Object.hasOwn(value, "id")
+      ? { id: parseAiReviewerConnectionId(value.id) }
+      : {}),
+    ...destination,
+    label,
+    ...(contextLengthOverride == null ? {} : { contextLengthOverride }),
+    ...(credential === undefined ? {} : { credential }),
+    ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
+  });
+}
+
+/**
+ * Parse a connection write from the HTTP boundary. Credential metadata is
+ * server-owned and therefore not part of this schema, and an omitted label
+ * stays omitted so it keeps following the endpoint it was derived from.
+ *
+ * @param {unknown} input
+ */
+export function parseAiReviewerConnectionUpdate(input) {
+  const value = objectWithKnownKeys(input, CONNECTION_UPDATE_KEYS);
+  const destination = parseDestination(value);
+  // An empty label is how the client asks to go back to the derived name.
+  const label =
+    !Object.hasOwn(value, "label") ||
+    value.label == null ||
+    (typeof value.label === "string" && value.label.trim().length === 0)
+      ? null
+      : LabelSchema.parse(value.label);
+  const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
+    ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
+    : undefined;
+  const credential = Object.hasOwn(value, "credential")
+    ? value.credential == null
+      ? null
+      : parseAiReviewerProviderCredential(value.credential)
+    : undefined;
+  return Object.freeze({
+    ...destination,
+    label,
+    ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
+    ...(credential === undefined ? {} : { credential }),
+  });
+}
+
+/**
+ * Parse the private configuration one review run uses: the connection it was
+ * resolved from, plus the model the request selected and the context length
+ * that pair resolved to.
+ *
+ * @param {unknown} input
+ */
+export function parseAiReviewerProviderConfig(input) {
+  const value = objectWithKnownKeys(input, RUN_CONFIG_KEYS);
   const config = parseCoreProviderConfig(coreProviderConfigInput(value));
   const contextLength = ContextLengthSchema.parse(value.contextLength);
   const contextLengthSource = Object.hasOwn(value, "contextLengthSource")
@@ -178,106 +352,33 @@ export function parseAiReviewerProviderConfig(input) {
 }
 
 /**
- * Parse a configuration write from the HTTP boundary. Credential metadata is
- * server-owned and therefore not part of this schema.
+ * Public view of one stored connection. A listing never decrypts a stored
+ * credential, so whether one is set is reported by the caller from the stored
+ * envelope rather than derived from a plaintext value.
  *
  * @param {unknown} input
  */
-export function parseAiReviewerProviderConfigUpdate(input) {
+export function publicAiReviewerProviderConnection(input) {
   if (input == null || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("AI provider configuration must be an object.");
+    throw new TypeError("AI provider connection must be an object.");
   }
-  const value = /** @type {Record<string, unknown>} */ (input);
-  const allowedKeys = new Set([
-    "provider",
-    "baseUrl",
-    "model",
-    "contextLength",
-    "contextLengthOverride",
-    "credential",
-  ]);
-  if (
-    Reflect.ownKeys(value).some(
-      (key) => typeof key !== "string" || !allowedKeys.has(key),
-    )
-  ) {
-    throw new TypeError("AI provider configuration has unknown fields.");
-  }
-  if (
-    Object.hasOwn(value, "contextLength") &&
-    Object.hasOwn(value, "contextLengthOverride")
-  ) {
-    throw new TypeError(
-      "Only one AI provider context length override may be supplied.",
-    );
-  }
-  const config = parseCoreProviderConfig(coreProviderConfigInput(value));
-  const legacyContextLength = Object.hasOwn(value, "contextLength")
-    ? ContextLengthSchema.parse(value.contextLength)
-    : undefined;
-  const contextLengthOverride = Object.hasOwn(value, "contextLengthOverride")
-    ? ContextLengthSchema.nullable().parse(value.contextLengthOverride)
-    : undefined;
-  const credential = Object.hasOwn(value, "credential")
-    ? value.credential == null
-      ? null
-      : parseAiReviewerProviderCredential(value.credential)
-    : undefined;
+  const { credentialSet, ...rest } = /** @type {any} */ (input);
+  const connection = parseAiReviewerConnection(rest);
   return Object.freeze({
-    provider: config.provider,
-    ...(config.provider === "openai-compatible"
-      ? { baseUrl: config.baseUrl }
-      : {}),
-    model: config.model,
-    ...(legacyContextLength === undefined
-      ? {}
-      : { contextLength: legacyContextLength }),
-    ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
-    ...(credential === undefined ? {} : { credential }),
-  });
-}
-
-/**
- * @param {unknown} input
- */
-export function publicAiReviewerProviderConfig(input) {
-  if (input == null) {
-    return Object.freeze({
-      configured: false,
-      config: null,
-      classification: null,
-    });
-  }
-  const config = parseAiReviewerProviderConfig(input);
-  const credentialSet = typeof config.credential === "string";
-  const credentialUpdatedAt = config.credentialUpdatedAt ?? null;
-  const contextLengthSource = config.contextLengthSource ?? "override";
-  if (config.provider === "openai-compatible") {
-    const endpoint = parseOpenAiCompatibleBaseUrl(config.baseUrl);
-    return Object.freeze({
-      configured: true,
-      config: Object.freeze({
-        provider: config.provider,
-        baseUrl: config.baseUrl,
-        model: config.model,
-        contextLength: config.contextLength,
-        contextLengthSource,
-        credentialSet,
-        credentialUpdatedAt,
-      }),
-      classification: endpoint.classification,
-    });
-  }
-  return Object.freeze({
-    configured: true,
+    id: parseAiReviewerConnectionId(connection.id),
+    label: connection.label,
+    classification:
+      connection.provider === "openai-compatible"
+        ? parseOpenAiCompatibleBaseUrl(connection.baseUrl).classification
+        : "remote",
     config: Object.freeze({
-      provider: config.provider,
-      model: config.model,
-      contextLength: config.contextLength,
-      contextLengthSource,
-      credentialSet,
-      credentialUpdatedAt,
+      provider: connection.provider,
+      ...(connection.provider === "openai-compatible"
+        ? { baseUrl: connection.baseUrl }
+        : {}),
+      contextLengthOverride: connection.contextLengthOverride ?? null,
+      credentialSet: credentialSet === true,
+      credentialUpdatedAt: connection.credentialUpdatedAt ?? null,
     }),
-    classification: "remote",
   });
 }

@@ -1,0 +1,1041 @@
+import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import { publicAiReviewerProviderConnection } from "../../../app/src/AiReviewerProviderConfig.mjs";
+import {
+  AI_REVIEWER_CONNECTION_LIMIT,
+  AiReviewerConnectionAmbiguousError,
+  AiReviewerConnectionLimitError,
+  AiReviewerConnectionNotFoundError,
+  createAiReviewerProviderConfigStore,
+} from "../../../app/src/AiReviewerProviderConfigStore.mjs";
+import { createAiReviewerProviderCredentialManager } from "../../../app/src/AiReviewerProviderCredentialManager.mjs";
+import { createAiReviewerProviderController } from "../../../app/src/AiReviewerProviderController.mjs";
+import { createConfiguredAiReviewerController } from "../../../app/src/ConfiguredAiReviewerController.mjs";
+import { AgentEventSchema } from "../../../shared/contracts.mjs";
+
+const userId = "user-connections-0001";
+const otherUserId = "user-connections-0002";
+const projectId = "project-connections-0001";
+const createdAt = "2026-07-30T00:00:00.000Z";
+const credentialUpdatedAt = "2026-07-30T00:01:00.000Z";
+const contextLength = 8_192;
+const localBaseUrl = "http://127.0.0.1:11434/v1";
+const localModel = "overleaf-ai-reviewer-compat-8k:latest";
+const sharedModel = "reviewer/shared-v1";
+const geminiModel = "gemini-2.5-pro";
+const claudeModel = "claude-sonnet-4-20250514";
+const geminiCredential = "PRIVATE_GEMINI_CREDENTIAL";
+const claudeCredential = "PRIVATE_CLAUDE_CREDENTIAL";
+
+// A connection is a destination: provider, endpoint, credential. No model.
+const localConnection = Object.freeze({
+  provider: "openai-compatible",
+  baseUrl: localBaseUrl,
+});
+const geminiConnection = Object.freeze({
+  provider: "gemini",
+  credential: geminiCredential,
+});
+const claudeConnection = Object.freeze({
+  provider: "claude",
+  credential: claudeCredential,
+});
+
+function fakeQuery(value) {
+  const query = { exec: vi.fn(async () => value) };
+  query.lean = vi.fn(() => query);
+  return query;
+}
+
+function matchesRevision(record, filter) {
+  if (record == null) {
+    return false;
+  }
+  if (Object.hasOwn(filter, "revision")) {
+    return record.revision === filter.revision;
+  }
+  return filter.$or.some(({ revision }) =>
+    typeof revision === "object"
+      ? revision.$exists === false && !Object.hasOwn(record, "revision")
+      : record.revision === revision,
+  );
+}
+
+function inMemoryModel() {
+  const records = new Map();
+  const modelDependency = {
+    findOne: vi.fn(({ _id }) =>
+      fakeQuery(records.has(_id) ? { _id, ...records.get(_id) } : null),
+    ),
+    findOneAndUpdate: vi.fn((filter, update, options = {}) => {
+      const query = {
+        exec: async () => {
+          const { _id } = filter;
+          const current = records.get(_id);
+          if (!matchesRevision(current, filter) && !options.upsert) {
+            return null;
+          }
+          const next = { ...current, ...update.$set };
+          for (const [key, increment] of Object.entries(update.$inc ?? {})) {
+            next[key] = (current?.[key] ?? 0) + increment;
+          }
+          for (const key of Object.keys(update.$unset ?? {})) {
+            delete next[key];
+          }
+          records.set(_id, next);
+          return { _id, ...next };
+        },
+      };
+      query.lean = () => query;
+      return query;
+    }),
+    deleteOne: vi.fn(({ _id }) => ({
+      exec: async () => {
+        records.delete(_id);
+      },
+    })),
+  };
+  return { modelDependency, records };
+}
+
+function credentialManagerFixture() {
+  const envelopes = new Map();
+  let sequence = 0;
+  const encryptor = {
+    encryptJson: vi.fn(async (value) => {
+      sequence += 1;
+      const encrypted = `ciphertext-${sequence}`;
+      envelopes.set(encrypted, structuredClone(value));
+      return encrypted;
+    }),
+    decryptToJson: vi.fn(async (encrypted) => {
+      if (!envelopes.has(encrypted)) {
+        throw new Error("Unknown ciphertext.");
+      }
+      return structuredClone(envelopes.get(encrypted));
+    }),
+  };
+  return {
+    envelopes,
+    manager: createAiReviewerProviderCredentialManager({ encryptor }),
+  };
+}
+
+function storeFixture() {
+  const { modelDependency, records } = inMemoryModel();
+  const { envelopes, manager } = credentialManagerFixture();
+  let sequence = 0;
+  const store = createAiReviewerProviderConfigStore({
+    model: modelDependency,
+    credentialManager: manager,
+    now: () => credentialUpdatedAt,
+    newConnectionId: () => `connection-${(sequence += 1)}`,
+  });
+  return { envelopes, modelDependency, records, store };
+}
+
+function httpRequest({
+  body,
+  query,
+  params,
+  authenticatedUserId = userId,
+} = {}) {
+  const request = new EventEmitter();
+  request.body = body;
+  request.query = query;
+  request.params = { project_id: projectId, ...params };
+  request.user = { _id: { toString: () => authenticatedUserId } };
+  return request;
+}
+
+class FakeResponse extends EventEmitter {
+  constructor() {
+    super();
+    this.statusCode = 200;
+    this.body = undefined;
+    this.headers = new Map();
+    this.chunks = [];
+    this.writableEnded = false;
+  }
+
+  status(statusCode) {
+    this.statusCode = statusCode;
+    return this;
+  }
+
+  json(body) {
+    this.body = body;
+    return this;
+  }
+
+  setHeader(name, value) {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  flushHeaders() {}
+
+  write(chunk) {
+    this.chunks.push(String(chunk));
+    return true;
+  }
+
+  end() {
+    this.writableEnded = true;
+  }
+}
+
+function parseNdjson(response) {
+  return response.chunks
+    .join("")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => AgentEventSchema.parse(JSON.parse(line)));
+}
+
+function selectionRequest(overrides = {}) {
+  return {
+    requestId: "request-connections-0001",
+    projectId,
+    action: "review",
+    instruction: "Review this synthetic selection.",
+    skill: "referee-review",
+    scope: {
+      kind: "selection",
+      documentId: "document-connections-0001",
+      path: "main.tex",
+      baseRevision: 9,
+      baseTextHash: "a".repeat(64),
+      range: { from: 5, to: 14 },
+      text: "Synthetic",
+    },
+    ...overrides,
+  };
+}
+
+function streamEvents() {
+  return [
+    {
+      type: "started",
+      eventId: "event-connections",
+      requestId: "request-connections-0001",
+      sequence: 0,
+      createdAt,
+      provider: "gemini",
+      model: geminiModel,
+      skill: "referee-review",
+    },
+    {
+      type: "completed",
+      eventId: "event-connections",
+      requestId: "request-connections-0001",
+      sequence: 1,
+      createdAt,
+      finishReason: "stop",
+    },
+  ];
+}
+
+/**
+ * Each connection discovers its own models, so which models exist depends on
+ * the connection a run resolved to.
+ */
+function connectionModels(connection) {
+  switch (connection.provider) {
+    case "gemini":
+      return [
+        { id: geminiModel, displayName: "Gemini 2.5 Pro" },
+        { id: sharedModel, displayName: sharedModel },
+      ];
+    case "claude":
+      return [{ id: claudeModel, displayName: "Claude Sonnet 4" }];
+    default:
+      return [
+        { id: localModel, displayName: localModel },
+        { id: sharedModel, displayName: sharedModel },
+      ];
+  }
+}
+
+function streamFixture({ store, listModels }) {
+  const providerService = {
+    listModels:
+      listModels ?? vi.fn(async (connection) => connectionModels(connection)),
+    resolveContextLength: vi.fn(async () => ({
+      contextLength,
+      contextLengthSource: "default",
+    })),
+    createAgentGateway: vi.fn(() => ({
+      async *stream() {
+        yield* streamEvents();
+      },
+    })),
+  };
+  const requestScopeReader = {
+    read: vi.fn(async () => ({
+      kind: "selection",
+      readProjectFile: vi.fn(),
+    })),
+  };
+  return {
+    providerService,
+    requestScopeReader,
+    controller: createConfiguredAiReviewerController({
+      configStore: store,
+      providerService,
+      requestScopeReader,
+      now: () => createdAt,
+      eventId: () => "event-connections",
+    }),
+  };
+}
+
+async function captureError(work) {
+  try {
+    await work;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the operation to reject.");
+}
+
+describe("AI reviewer provider connections", function () {
+  it("saves a connection without asking for a model name", async function () {
+    const { records, store } = storeFixture();
+
+    const local = await store.create(userId, localConnection);
+
+    expect(local).toMatchObject({
+      provider: "openai-compatible",
+      baseUrl: localBaseUrl,
+      label: "127.0.0.1:11434",
+      credentialSet: false,
+    });
+    expect(records.get(userId).connections[0]).not.toHaveProperty("model");
+    expect(records.get(userId).connections[0]).not.toHaveProperty(
+      "contextLength",
+    );
+    expect(await store.get(userId, local.id)).toEqual({
+      id: local.id,
+      provider: "openai-compatible",
+      baseUrl: localBaseUrl,
+      label: "127.0.0.1:11434",
+    });
+  });
+
+  it("names an unnamed connection after its endpoint or its vendor", async function () {
+    const { store } = storeFixture();
+    await store.create(userId, localConnection);
+    await store.create(userId, geminiConnection);
+    await store.create(userId, claudeConnection);
+    const named = await store.create(userId, {
+      ...localConnection,
+      label: "  Lab GPU box  ",
+    });
+
+    expect((await store.list(userId)).map(({ label }) => label)).toEqual([
+      "127.0.0.1:11434",
+      "Google Gemini",
+      "Anthropic Claude",
+      "Lab GPU box",
+    ]);
+    // A name the user did not type is not stored, so it keeps following the
+    // endpoint when the endpoint is edited.
+    await store.update(userId, named.id, {
+      ...localConnection,
+      baseUrl: "https://api.example.com/v1",
+      label: "",
+    });
+    expect((await store.list(userId)).at(-1).label).toBe("api.example.com");
+  });
+
+  it("keeps three provider connections side by side and edits each on its own", async function () {
+    const { records, store } = storeFixture();
+
+    const local = await store.create(userId, localConnection);
+    const gemini = await store.create(userId, geminiConnection);
+    const claude = await store.create(userId, claudeConnection);
+
+    expect(new Set([local.id, gemini.id, claude.id]).size).toBe(3);
+    expect((await store.list(userId)).map((entry) => entry.provider)).toEqual([
+      "openai-compatible",
+      "gemini",
+      "claude",
+    ]);
+    expect(await store.get(userId, gemini.id)).toEqual({
+      id: gemini.id,
+      provider: "gemini",
+      label: "Google Gemini",
+      credential: geminiCredential,
+      credentialUpdatedAt,
+    });
+
+    await store.update(userId, gemini.id, {
+      ...geminiConnection,
+      contextLengthOverride: 32_768,
+    });
+    expect((await store.get(userId, gemini.id)).contextLengthOverride).toBe(
+      32_768,
+    );
+    expect(await store.get(userId, claude.id)).toMatchObject({
+      provider: "claude",
+      credential: claudeCredential,
+    });
+
+    const remaining = await store.remove(userId, claude.id);
+    expect(remaining.map((entry) => entry.id)).toEqual([local.id, gemini.id]);
+    expect(await captureError(store.get(userId, claude.id))).toBeInstanceOf(
+      AiReviewerConnectionNotFoundError,
+    );
+    expect(records.get(userId).connections).toHaveLength(2);
+  });
+
+  it("carries an existing configuration forward without its model or context length", async function () {
+    const { records, store } = storeFixture();
+    records.set(userId, {
+      provider: "ollama",
+      baseUrl: localBaseUrl,
+      model: localModel,
+      contextLength,
+      contextLengthSource: "override",
+    });
+
+    const migrated = await store.list(userId);
+    expect(migrated).toHaveLength(1);
+    // The document id is reused so the identifier is already stable for a
+    // reader that arrives before the first write.
+    expect(migrated[0]).toEqual({
+      id: userId,
+      credentialSet: false,
+      provider: "openai-compatible",
+      baseUrl: localBaseUrl,
+      label: "127.0.0.1:11434",
+    });
+    expect(await store.get(userId)).toEqual({
+      id: userId,
+      provider: "openai-compatible",
+      baseUrl: localBaseUrl,
+      label: "127.0.0.1:11434",
+    });
+
+    const added = await store.create(userId, geminiConnection);
+    expect(records.get(userId).connections.map(({ _id }) => _id)).toEqual([
+      userId,
+      added.id,
+    ]);
+    for (const legacyField of [
+      "provider",
+      "baseUrl",
+      "model",
+      "contextLength",
+      "contextLengthSource",
+    ]) {
+      expect(records.get(userId)).not.toHaveProperty(legacyField);
+    }
+  });
+
+  it("carries an existing credential forward with its destination binding", async function () {
+    const { records, store } = storeFixture();
+    const seeded = await store.create(otherUserId, {
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      credential: geminiCredential,
+    });
+    const encrypted = records
+      .get(otherUserId)
+      .connections.find(({ _id }) => _id === seeded.id).credentialEncrypted;
+    records.set(userId, {
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      model: "hosted/reviewer-v1",
+      contextLength,
+      credentialEncrypted: encrypted,
+      credentialUpdatedAt: new Date(credentialUpdatedAt),
+    });
+
+    expect(await store.get(userId)).toEqual({
+      id: userId,
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      label: "api.example.com",
+      credential: geminiCredential,
+      credentialUpdatedAt,
+    });
+  });
+
+  it("fails rather than discarding a stored connection it cannot convert", async function () {
+    const { records, store } = storeFixture();
+    records.set(userId, {
+      provider: "openai-compatible",
+      baseUrl: "not-a-url",
+    });
+
+    expect(await captureError(store.list(userId))).toBeInstanceOf(Error);
+  });
+
+  it("refuses to read one connection's credential through another connection", async function () {
+    const { records, store } = storeFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    const claude = await store.create(userId, claudeConnection);
+    const geminiEnvelope = records
+      .get(userId)
+      .connections.find(({ _id }) => _id === gemini.id).credentialEncrypted;
+
+    records.set(userId, {
+      ...records.get(userId),
+      connections: records
+        .get(userId)
+        .connections.map((connection) =>
+          connection._id === claude.id
+            ? { ...connection, credentialEncrypted: geminiEnvelope }
+            : connection,
+        ),
+    });
+
+    const error = await captureError(store.get(userId, claude.id));
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toBe("The AI provider credential could not be read.");
+    expect(String(error)).not.toContain(geminiCredential);
+    expect(await store.get(userId, gemini.id)).toMatchObject({
+      credential: geminiCredential,
+    });
+  });
+
+  it("never puts a credential in a connection listing", async function () {
+    const { store } = storeFixture();
+    await store.create(userId, geminiConnection);
+    await store.create(userId, claudeConnection);
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+    });
+    const response = new FakeResponse();
+
+    await controller.listConnections(httpRequest(), response);
+
+    expect(response.body.connections).toHaveLength(2);
+    expect(response.body.connections[0]).toEqual({
+      id: expect.any(String),
+      label: "Google Gemini",
+      classification: "remote",
+      config: {
+        provider: "gemini",
+        contextLengthOverride: null,
+        credentialSet: true,
+        credentialUpdatedAt,
+      },
+    });
+    const serialized = JSON.stringify(response.body);
+    expect(serialized).not.toContain(geminiCredential);
+    expect(serialized).not.toContain(claudeCredential);
+    expect(serialized).not.toContain("credentialEncrypted");
+  });
+
+  it("rejects a connection past the per-user limit", async function () {
+    const { store } = storeFixture();
+    for (let index = 0; index < AI_REVIEWER_CONNECTION_LIMIT; index += 1) {
+      await store.create(userId, {
+        ...localConnection,
+        label: `Endpoint ${index}`,
+      });
+    }
+
+    expect(
+      await captureError(store.create(userId, localConnection)),
+    ).toBeInstanceOf(AiReviewerConnectionLimitError);
+    expect(await store.list(userId)).toHaveLength(AI_REVIEWER_CONNECTION_LIMIT);
+
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+    });
+    const response = new FakeResponse();
+    await controller.createConnection(
+      httpRequest({ body: localConnection }),
+      response,
+    );
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error.code).toBe(
+      "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
+    );
+  });
+
+  it("removes the encrypted credential together with its connection", async function () {
+    const { records, store } = storeFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    await store.create(userId, claudeConnection);
+    const geminiEnvelope = records
+      .get(userId)
+      .connections.find(({ _id }) => _id === gemini.id).credentialEncrypted;
+
+    await store.remove(userId, gemini.id);
+
+    expect(JSON.stringify(records.get(userId))).not.toContain(geminiEnvelope);
+    expect(JSON.stringify(records.get(userId))).not.toContain(geminiCredential);
+  });
+
+  it("shapes a connection for the client without its credential", function () {
+    expect(
+      publicAiReviewerProviderConnection({
+        id: "connection-1",
+        credentialSet: true,
+        ...localConnection,
+        contextLengthOverride: 16_384,
+        credentialUpdatedAt,
+      }),
+    ).toEqual({
+      id: "connection-1",
+      label: "127.0.0.1:11434",
+      classification: "local",
+      config: {
+        provider: "openai-compatible",
+        baseUrl: localBaseUrl,
+        contextLengthOverride: 16_384,
+        credentialSet: true,
+        credentialUpdatedAt,
+      },
+    });
+  });
+
+  it("keeps the removed default connection out of the module", async function () {
+    const sources = [
+      "../../../app/models/AiReviewerProviderConfig.mjs",
+      "../../../app/src/AiReviewerProviderConfig.mjs",
+      "../../../app/src/AiReviewerProviderConfigStore.mjs",
+      "../../../app/src/AiReviewerProviderController.mjs",
+      "../../../app/src/AiReviewerRouter.mjs",
+      "../../../app/src/ConfiguredAiReviewerController.mjs",
+      "../../../app/src/ConfiguredAiReviewerRouter.mjs",
+      "../../../shared/contracts.mjs",
+    ];
+
+    for (const source of sources) {
+      const text = await readFile(new URL(source, import.meta.url), "utf8");
+      for (const removed of [
+        "defaultConnectionId",
+        "isDefault",
+        "setDefault(",
+        "setDefaultConnection",
+        "/default",
+      ]) {
+        expect(text, source).not.toContain(removed);
+      }
+    }
+  });
+});
+
+describe("AI reviewer unified model list", function () {
+  function modelListFixture({ listModels } = {}) {
+    const { store } = storeFixture();
+    const providerService = {
+      listModels:
+        listModels ?? vi.fn(async (connection) => connectionModels(connection)),
+    };
+    return {
+      store,
+      providerService,
+      controller: createAiReviewerProviderController({
+        configStore: store,
+        providerService,
+      }),
+    };
+  }
+
+  it("returns every connection's models with the connection each came from", async function () {
+    const { controller, store } = modelListFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    const local = await store.create(userId, {
+      ...localConnection,
+      label: "Lab GPU box",
+    });
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.body).toEqual({
+      models: [
+        {
+          id: geminiModel,
+          displayName: "Gemini 2.5 Pro",
+          connectionId: gemini.id,
+          connectionLabel: "Google Gemini",
+        },
+        {
+          id: sharedModel,
+          displayName: sharedModel,
+          connectionId: gemini.id,
+          connectionLabel: "Google Gemini",
+        },
+        {
+          id: localModel,
+          displayName: localModel,
+          connectionId: local.id,
+          connectionLabel: "Lab GPU box",
+        },
+        {
+          // The same model id reachable through two connections stays two
+          // entries, told apart by the connection label beside them.
+          id: sharedModel,
+          displayName: sharedModel,
+          connectionId: local.id,
+          connectionLabel: "Lab GPU box",
+        },
+      ],
+      failures: [],
+    });
+    expect(JSON.stringify(response.body)).not.toContain(geminiCredential);
+  });
+
+  it("keeps a reachable connection's models when another connection fails", async function () {
+    const rawProviderBody = "RAW_PROVIDER_FAILURE_BODY";
+    const { controller, store } = modelListFixture({
+      listModels: vi.fn(async (connection) => {
+        if (connection.provider === "gemini") {
+          throw new AgentGatewayError(rawProviderBody, {
+            code: rawProviderBody,
+            category: "authentication",
+            retryable: false,
+          });
+        }
+        return connectionModels(connection);
+      }),
+    });
+    const gemini = await store.create(userId, geminiConnection);
+    const local = await store.create(userId, localConnection);
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.statusCode).toBe(200);
+    expect(
+      response.body.models.map(({ connectionId }) => connectionId),
+    ).toEqual([local.id, local.id]);
+    expect(response.body.failures).toEqual([
+      {
+        connectionId: gemini.id,
+        connectionLabel: "Google Gemini",
+        code: "AI_PROVIDER_AUTHENTICATION_ERROR",
+        category: "authentication",
+      },
+    ]);
+    expect(JSON.stringify(response.body)).not.toContain(rawProviderBody);
+  });
+
+  it("reports an unconfigured provider when the user has no connection", async function () {
+    const { controller, providerService } = modelListFixture();
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error.code).toBe("AI_PROVIDER_NOT_CONFIGURED");
+    expect(providerService.listModels).not.toHaveBeenCalled();
+  });
+
+  it("checks one connection by asking it what it can run", async function () {
+    const { store } = storeFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    await store.create(userId, localConnection);
+    const providerService = {
+      listModels: vi.fn(async (connection) => connectionModels(connection)),
+      testConnection: vi.fn(async () => ({
+        ok: true,
+        provider: "gemini",
+        modelCount: 2,
+        classification: "remote",
+      })),
+    };
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService,
+    });
+
+    const response = new FakeResponse();
+    await controller.testConnection(
+      httpRequest({ body: { connectionId: gemini.id } }),
+      response,
+    );
+    expect(response.body).toEqual({
+      ok: true,
+      provider: "gemini",
+      modelCount: 2,
+      classification: "remote",
+    });
+    expect(providerService.testConnection).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: gemini.id, provider: "gemini" }),
+      { signal: expect.any(AbortSignal) },
+    );
+
+    // Naming no connection cannot mean "any of them".
+    const ambiguous = new FakeResponse();
+    await controller.testConnection(httpRequest(), ambiguous);
+    expect(ambiguous.statusCode).toBe(400);
+    expect(ambiguous.body.error.code).toBe(
+      "AI_PROVIDER_CONNECTION_NOT_SELECTED",
+    );
+  });
+});
+
+describe("AI reviewer run destination", function () {
+  it("runs a review on the sole connection when the request names nothing", async function () {
+    const { store } = storeFixture();
+    await store.create(userId, claudeConnection);
+    const { controller, providerService, requestScopeReader } = streamFixture({
+      store,
+    });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(parseNdjson(response)).toEqual(streamEvents());
+    // The one connection lists exactly one model, so nothing was chosen for
+    // the user that they could have chosen differently.
+    expect(providerService.createAgentGateway).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "claude", model: claudeModel }),
+      expect.anything(),
+    );
+    expect(requestScopeReader.read).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ contextLength }),
+    );
+  });
+
+  it("asks for a model instead of choosing between connections", async function () {
+    const { store } = storeFixture();
+    await store.create(userId, geminiConnection);
+    await store.create(userId, claudeConnection);
+    const { controller, providerService } = streamFixture({ store });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(parseNdjson(response)[0]).toMatchObject({
+      type: "error",
+      error: {
+        code: "AI_PROVIDER_MODEL_NOT_SELECTED",
+        category: "configuration",
+        message: "Select an AI model for this review, then run it again.",
+        retryable: false,
+      },
+    });
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+    // The store refuses to answer the same question, rather than leaving the
+    // choice to whichever caller asked first.
+    expect(await captureError(store.get(userId))).toBeInstanceOf(
+      AiReviewerConnectionAmbiguousError,
+    );
+  });
+
+  it("asks for a model when the sole connection offers more than one", async function () {
+    const { store } = storeFixture();
+    await store.create(userId, geminiConnection);
+    const { controller, providerService } = streamFixture({ store });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({ body: selectionRequest() }),
+      response,
+    );
+
+    expect(parseNdjson(response)[0]).toMatchObject({
+      type: "error",
+      error: { code: "AI_PROVIDER_MODEL_NOT_SELECTED" },
+    });
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+  });
+
+  it("refuses another user's connection identifier", async function () {
+    const { store } = storeFixture();
+    const mine = await store.create(userId, geminiConnection);
+    const theirs = await store.create(otherUserId, claudeConnection);
+    const { controller, providerService } = streamFixture({ store });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({
+          connectionId: theirs.id,
+          model: claudeModel,
+        }),
+      }),
+      response,
+    );
+
+    expect(parseNdjson(response)[0]).toMatchObject({
+      type: "error",
+      error: { code: "AI_PROVIDER_NOT_CONFIGURED", category: "configuration" },
+    });
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+    expect(response.chunks.join("")).not.toContain(claudeCredential);
+
+    const mineResponse = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({ connectionId: mine.id, model: geminiModel }),
+      }),
+      mineResponse,
+    );
+    expect(parseNdjson(mineResponse)).toEqual(streamEvents());
+  });
+
+  it("refuses a model the selected connection does not list", async function () {
+    const { store } = storeFixture();
+    const gemini = await store.create(userId, geminiConnection);
+    const claude = await store.create(userId, claudeConnection);
+    const { controller, providerService } = streamFixture({ store });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({ connectionId: claude.id, model: geminiModel }),
+      }),
+      response,
+    );
+
+    // The model exists for the Gemini connection, but not for the selected one.
+    expect(parseNdjson(response)[0]).toMatchObject({
+      type: "error",
+      error: { code: "AI_PROVIDER_NOT_CONFIGURED", category: "configuration" },
+    });
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+
+    const accepted = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({ connectionId: gemini.id, model: geminiModel }),
+      }),
+      accepted,
+    );
+    expect(parseNdjson(accepted)).toEqual(streamEvents());
+  });
+
+  it("resolves the context length from the connection and the selected model", async function () {
+    const { store } = storeFixture();
+    const gemini = await store.create(userId, {
+      ...geminiConnection,
+      contextLengthOverride: 12_345,
+    });
+    const { controller, providerService, requestScopeReader } = streamFixture({
+      store,
+    });
+    providerService.resolveContextLength.mockResolvedValue({
+      contextLength: 12_345,
+      contextLengthSource: "override",
+    });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({ connectionId: gemini.id, model: sharedModel }),
+      }),
+      response,
+    );
+
+    expect(
+      providerService.resolveContextLength,
+    ).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        id: gemini.id,
+        provider: "gemini",
+        contextLengthOverride: 12_345,
+      }),
+      sharedModel,
+    );
+    expect(requestScopeReader.read).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ contextLength: 12_345 }),
+    );
+    expect(providerService.createAgentGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: sharedModel,
+        contextLength: 12_345,
+        contextLengthSource: "override",
+      }),
+      expect.anything(),
+    );
+  });
+});
+
+describe("AI reviewer connection deletion lifecycle", function () {
+  beforeEach(function () {
+    vi.resetModules();
+  });
+
+  it("removes every connection and credential when the user is deleted", async function () {
+    const { records, store } = storeFixture();
+    await store.create(userId, geminiConnection);
+    await store.create(userId, claudeConnection);
+    await store.create(otherUserId, localConnection);
+    vi.doMock("../../../app/src/AiReviewerWorkspaceStore.mjs", () => ({
+      createAiReviewerWorkspaceStore: vi.fn(() => ({ deleteUser: vi.fn() })),
+    }));
+    vi.doMock("../../../app/src/AiReviewerProviderConfigStore.mjs", () => ({
+      createAiReviewerProviderConfigStore: vi.fn(() => store),
+    }));
+
+    // Cleanup is registered outside the feature flag, so it reaches the store
+    // through the module hooks rather than through a request path.
+    const { default: hooks } =
+      await import("../../../app/src/AiReviewerCleanupHooks.mjs");
+    await hooks.promises.deleteUser(userId);
+
+    expect(records.has(userId)).toBe(false);
+    expect(JSON.stringify([...records.values()])).not.toContain(
+      geminiCredential,
+    );
+    expect(await store.list(userId)).toEqual([]);
+    expect(await store.list(otherUserId)).toHaveLength(1);
+  });
+
+  it("rewrites a legacy connection that still carries a model", async function () {
+    // The in-memory model used elsewhere in this file does not enforce
+    // `strict: "throw"`, so a stored `model` survived every unit test and only
+    // failed against the real schema, on the first write after the upgrade.
+    const { AiReviewerProviderConfigSchema } = await import(
+      "../../../app/models/AiReviewerProviderConfig.mjs"
+    );
+    const legacy = {
+      _id: "6a6578790109d23a0cf7ca00",
+      connections: [
+        {
+          _id: "6a6578790109d23a0cf7ca00",
+          provider: "gemini",
+          model: "gemini-3.5-flash-lite",
+          contextLength: 1_048_576,
+          contextLengthSource: "derived",
+        },
+      ],
+    };
+
+    const { records, store } = storeFixture();
+    records.set(legacy._id, legacy);
+
+    await store.create(legacy._id, {
+      provider: "openai-compatible",
+      baseUrl: "http://127.0.0.1:11434/v1",
+    });
+
+    for (const connection of records.get(legacy._id).connections) {
+      expect(Object.hasOwn(connection, "model")).toBe(false);
+      expect(Object.hasOwn(connection, "contextLength")).toBe(false);
+      // The real schema rejects any path it no longer declares, which is what
+      // the running server hit. Cast with a schema-shaped id so the check is
+      // about the removed fields, not the fixture's synthetic identifier.
+      expect(() =>
+        AiReviewerProviderConfigSchema.path("connections").cast([
+          { ...connection, _id: "6a6578790109d23a0cf7ca11" },
+        ]),
+      ).not.toThrow();
+    }
+  });
+});

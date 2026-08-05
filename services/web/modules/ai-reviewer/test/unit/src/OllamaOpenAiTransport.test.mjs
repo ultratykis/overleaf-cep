@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { APICallError, RetryError } from "ai";
+import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -6269,7 +6270,10 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(fixture.fetchImpl).toHaveBeenCalledOnce();
     const [forwardedRequest, forwardedInit] = fixture.fetchImpl.mock.calls[0];
     expect(forwardedRequest).toBe(request);
-    expect(forwardedInit).toEqual({ redirect: "error" });
+    expect(forwardedInit).toEqual({
+      redirect: "error",
+      dispatcher: expect.any(Agent),
+    });
     const reason = new DOMException("Synthetic cancellation.", "AbortError");
     controller.abort(reason);
     expect(forwardedRequest.signal).toMatchObject({

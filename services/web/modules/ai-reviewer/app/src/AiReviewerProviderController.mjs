@@ -1,12 +1,20 @@
 // @ts-check
 
+import logger from "@overleaf/logger";
+
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import {
-  parseAiReviewerProviderConfig,
-  parseAiReviewerProviderConfigUpdate,
-  publicAiReviewerProviderConfig,
+  parseAiReviewerConnectionId,
+  parseAiReviewerConnectionUpdate,
+  publicAiReviewerProviderConnection,
 } from "./AiReviewerProviderConfig.mjs";
-import { AiReviewerProviderConfigInputError } from "./AiReviewerProviderConfigStore.mjs";
+import {
+  AiReviewerConnectionAmbiguousError,
+  AiReviewerConnectionLimitError,
+  AiReviewerConnectionNotFoundError,
+  AiReviewerProviderConfigInputError,
+  aiReviewerModelCacheKey,
+} from "./AiReviewerProviderConfigStore.mjs";
 
 /** @import { Request, Response } from 'express' */
 
@@ -21,6 +29,30 @@ const ERRORS = Object.freeze({
     code: "AI_PROVIDER_NOT_CONFIGURED",
     category: "configuration",
     message: "No AI provider is configured.",
+    retryable: false,
+  }),
+  connectionMissing: Object.freeze({
+    code: "AI_PROVIDER_CONNECTION_NOT_FOUND",
+    category: "configuration",
+    message: "The selected AI provider connection does not exist.",
+    retryable: false,
+  }),
+  connectionRequired: Object.freeze({
+    code: "AI_PROVIDER_CONNECTION_NOT_SELECTED",
+    category: "configuration",
+    message: "An AI provider connection must be selected.",
+    retryable: false,
+  }),
+  connectionLimit: Object.freeze({
+    code: "AI_PROVIDER_CONNECTION_LIMIT_REACHED",
+    category: "configuration",
+    message: "No more AI provider connections can be added.",
+    retryable: false,
+  }),
+  unsupported: Object.freeze({
+    code: "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
+    category: "configuration",
+    message: "The AI provider does not expose a supported model list.",
     retryable: false,
   }),
   persistence: Object.freeze({
@@ -84,6 +116,20 @@ function userId(request) {
 }
 
 /**
+ * The selected connection travels in the route, the query or the body
+ * depending on the request shape. Omitting it means the sole connection.
+ *
+ * @param {Request} request
+ */
+function selectedConnectionId(request) {
+  const value =
+    /** @type {any} */ (request.params)?.connection_id ??
+    /** @type {any} */ (request.query)?.connectionId ??
+    /** @type {any} */ (request.body)?.connectionId;
+  return value == null ? null : parseAiReviewerConnectionId(value);
+}
+
+/**
  * @param {Response} response
  * @param {number} status
  * @param {keyof typeof ERRORS} kind
@@ -115,6 +161,17 @@ function providerFailureKind(error) {
   return /** @type {const} */ ("provider");
 }
 
+/** @param {unknown} error */
+function modelFailureKind(error) {
+  if (
+    error instanceof AgentGatewayError &&
+    error.code === ERRORS.unsupported.code
+  ) {
+    return /** @type {const} */ ("unsupported");
+  }
+  return providerFailureKind(error);
+}
+
 /** @param {() => number} elapsedNow */
 function readElapsedNow(elapsedNow) {
   try {
@@ -143,15 +200,49 @@ export function createAiReviewerProviderController(dependencies) {
   } = dependencies;
   const timeoutSignalFactory =
     dependencies.timeoutSignalFactory ?? (() => AbortSignal.timeout(30_000));
+  const modelTimeoutSignalFactory =
+    dependencies.modelTimeoutSignalFactory ??
+    (() => AbortSignal.timeout(10_000));
+
+  /**
+   * @param {string | null} provider
+   * @param {number} startedAt
+   */
+  function recordPersistenceFailure(provider, startedAt) {
+    try {
+      failureRecorder({
+        requestId: null,
+        provider,
+        model: null,
+        scopeKind: "none",
+        failureCategory: ERRORS.persistence.category,
+        failureCode: ERRORS.persistence.code,
+        providerStatusCode: null,
+        providerErrorType: null,
+        elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
+      });
+    } catch {
+      // Logging cannot replace the bounded public failure response.
+    }
+  }
+
+  /**
+   * @param {Response} response
+   * @param {any[]} connections
+   */
+  function sendConnections(response, connections) {
+    return response.json({
+      connections: connections.map(publicAiReviewerProviderConnection),
+    });
+  }
+
   /**
    * @param {Request} request
    * @param {Response} response
    */
-  async function getConfiguration(request, response) {
+  async function listConnections(request, response) {
     try {
-      return response.json(
-        publicAiReviewerProviderConfig(await configStore.get(userId(request))),
-      );
+      return sendConnections(response, await configStore.list(userId(request)));
     } catch {
       return sendError(response, 400, "invalid");
     }
@@ -160,38 +251,46 @@ export function createAiReviewerProviderController(dependencies) {
   /**
    * @param {Request} request
    * @param {Response} response
+   * @param {boolean} create
    */
-  async function saveConfiguration(request, response) {
+  async function writeConnection(request, response, create) {
     let config;
+    let connectionId = null;
     try {
-      config = parseAiReviewerProviderConfigUpdate(request.body);
+      config = parseAiReviewerConnectionUpdate(request.body);
+      if (!create) {
+        connectionId = parseAiReviewerConnectionId(
+          selectedConnectionId(request),
+        );
+      }
     } catch {
       return sendError(response, 400, "invalid");
     }
 
     const startedAt = readElapsedNow(elapsedNow);
     try {
-      const saved = await configStore.save(userId(request), config);
-      return response.json(publicAiReviewerProviderConfig(saved));
+      const saved = create
+        ? await configStore.create(userId(request), config)
+        : await configStore.update(userId(request), connectionId, config);
+      return response.json(publicAiReviewerProviderConnection(saved));
     } catch (error) {
+      if (error instanceof AiReviewerConnectionNotFoundError) {
+        return sendError(response, 404, "connectionMissing");
+      }
+      if (error instanceof AiReviewerConnectionLimitError) {
+        return sendError(response, 409, "connectionLimit");
+      }
       if (error instanceof AiReviewerProviderConfigInputError) {
         return sendError(response, 400, "invalid");
       }
-      try {
-        failureRecorder({
-          requestId: null,
-          provider: config.provider,
-          model: config.model,
-          scopeKind: "none",
-          failureCategory: ERRORS.persistence.category,
-          failureCode: ERRORS.persistence.code,
-          providerStatusCode: null,
-          providerErrorType: null,
-          elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
-        });
-      } catch {
-        // Logging cannot replace the bounded public failure response.
-      }
+      // An unclassified write failure is a defect in this module, not a
+      // provider fault. The public response stays bounded, but the cause has
+      // to reach the log or it cannot be diagnosed.
+      logger.error(
+        { err: error, provider: config.provider },
+        "AI reviewer connection write failed",
+      );
+      recordPersistenceFailure(config.provider, startedAt);
       return sendError(response, 500, "persistence");
     }
   }
@@ -200,16 +299,195 @@ export function createAiReviewerProviderController(dependencies) {
    * @param {Request} request
    * @param {Response} response
    */
-  async function testConnection(request, response) {
-    let stored;
+  async function deleteConnection(request, response) {
+    let connectionId;
     try {
-      stored = await configStore.get(userId(request));
-      if (stored == null) {
-        return sendError(response, 409, "missing");
+      connectionId = parseAiReviewerConnectionId(selectedConnectionId(request));
+    } catch {
+      return sendError(response, 400, "invalid");
+    }
+
+    const startedAt = readElapsedNow(elapsedNow);
+    try {
+      return sendConnections(
+        response,
+        await configStore.remove(userId(request), connectionId),
+      );
+    } catch (error) {
+      if (error instanceof AiReviewerConnectionNotFoundError) {
+        return sendError(response, 404, "connectionMissing");
       }
-      stored = parseAiReviewerProviderConfig(stored);
+      recordPersistenceFailure(null, startedAt);
+      return sendError(response, 500, "persistence");
+    }
+  }
+
+  /**
+   * Load the connection a single-connection route names, mapping the store's
+   * typed absences onto their bounded public responses.
+   *
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function loadSelectedConnection(request, response) {
+    try {
+      const connection = await configStore.get(
+        userId(request),
+        selectedConnectionId(request),
+      );
+      if (connection != null) {
+        return connection;
+      }
+      sendError(response, 409, "missing");
+    } catch (error) {
+      if (error instanceof AiReviewerConnectionNotFoundError) {
+        sendError(response, 404, "connectionMissing");
+      } else if (error instanceof AiReviewerConnectionAmbiguousError) {
+        sendError(response, 400, "connectionRequired");
+      } else {
+        sendError(response, 409, "invalid");
+      }
+    }
+    return null;
+  }
+
+  /**
+   * @param {any} connection
+   * @param {unknown} error
+   * @param {number} startedAt
+   */
+  function recordModelFailure(connection, error, startedAt) {
+    const publicError = ERRORS[modelFailureKind(error)];
+    try {
+      failureRecorder({
+        requestId: null,
+        provider: connection.provider,
+        model: null,
+        scopeKind: "none",
+        failureCategory: publicError.category,
+        failureCode: publicError.code,
+        providerStatusCode:
+          error instanceof AgentGatewayError ? error.providerStatusCode : null,
+        providerErrorType:
+          error instanceof AgentGatewayError ? error.providerErrorType : null,
+        elapsedMs: elapsedMilliseconds(startedAt, elapsedNow),
+      });
+    } catch {
+      // Logging cannot replace the bounded public failure response.
+    }
+    return publicError;
+  }
+
+  /**
+   * List every model the user can reach, across all of their connections. One
+   * unreachable connection must not hide the models of the others, so each
+   * failure is reported as a classification beside the models that did arrive.
+   *
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function listModels(request, response) {
+    let connections;
+    let authenticatedUserId;
+    try {
+      authenticatedUserId = userId(request);
+      connections = await configStore.getAll(authenticatedUserId);
     } catch {
       return sendError(response, 409, "invalid");
+    }
+    if (connections.length === 0) {
+      return sendError(response, 409, "missing");
+    }
+
+    const startedAt = readElapsedNow(elapsedNow);
+    const disconnected = new AbortController();
+    const timeout = modelTimeoutSignalFactory();
+    const signal = AbortSignal.any([disconnected.signal, timeout]);
+    const onAborted = () => disconnected.abort(new AgentGatewayAbortError());
+    request.once?.("aborted", onAborted);
+    try {
+      if (timeout.aborted) {
+        throw timeout.reason;
+      }
+      const models = [];
+      const failures = [];
+      const listings = await Promise.all(
+        connections.map(async (/** @type {any} */ connection) => {
+          try {
+            return {
+              connection,
+              models: await providerService.listModels(connection, {
+                signal,
+                cacheKey: aiReviewerModelCacheKey(
+                  authenticatedUserId,
+                  connection.id,
+                ),
+              }),
+            };
+          } catch (error) {
+            return { connection, error };
+          }
+        }),
+      );
+      if (timeout.aborted) {
+        return sendError(response, 504, "timeout");
+      }
+      if (disconnected.signal.aborted) {
+        return sendError(response, 499, "aborted");
+      }
+      for (const listing of listings) {
+        if (listing.error !== undefined) {
+          const publicError = recordModelFailure(
+            listing.connection,
+            listing.error,
+            startedAt,
+          );
+          failures.push({
+            connectionId: listing.connection.id,
+            connectionLabel: listing.connection.label,
+            code: publicError.code,
+            category: publicError.category,
+          });
+          continue;
+        }
+        for (const model of listing.models) {
+          models.push({
+            id: model.id,
+            displayName: model.displayName,
+            connectionId: listing.connection.id,
+            connectionLabel: listing.connection.label,
+          });
+        }
+      }
+      return response.json({ models, failures });
+    } catch (error) {
+      if (timeout.aborted) {
+        return sendError(response, 504, "timeout");
+      }
+      if (
+        disconnected.signal.aborted ||
+        error instanceof AgentGatewayAbortError
+      ) {
+        return sendError(response, 499, "aborted");
+      }
+      return sendError(response, 502, "provider");
+    } finally {
+      request.removeListener?.("aborted", onAborted);
+    }
+  }
+
+  /**
+   * Check one connection. A connection carries no model, so the only thing
+   * this can honestly report is that the endpoint answered and accepted the
+   * stored credential.
+   *
+   * @param {Request} request
+   * @param {Response} response
+   */
+  async function testConnection(request, response) {
+    const connection = await loadSelectedConnection(request, response);
+    if (connection == null) {
+      return response;
     }
 
     const disconnected = new AbortController();
@@ -222,7 +500,7 @@ export function createAiReviewerProviderController(dependencies) {
         throw timeout.reason;
       }
       return response.json(
-        await providerService.testConnection(stored, { signal }),
+        await providerService.testConnection(connection, { signal }),
       );
     } catch (error) {
       if (timeout.aborted) {
@@ -235,11 +513,22 @@ export function createAiReviewerProviderController(dependencies) {
       ) {
         return sendError(response, 499, "aborted");
       }
-      return sendError(response, 502, providerFailureKind(error));
+      const kind = modelFailureKind(error);
+      return sendError(response, kind === "unsupported" ? 501 : 502, kind);
     } finally {
       request.removeListener?.("aborted", onAborted);
     }
   }
 
-  return { getConfiguration, saveConfiguration, testConnection };
+  return {
+    listModels,
+    testConnection,
+    listConnections,
+    /** @type {(request: Request, response: Response) => Promise<unknown>} */
+    createConnection: (request, response) =>
+      writeConnection(request, response, true),
+    updateConnection: (request, response) =>
+      writeConnection(request, response, false),
+    deleteConnection,
+  };
 }

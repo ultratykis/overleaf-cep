@@ -9,7 +9,7 @@ import * as sass from "sass";
 import { AiIntegrationDetailsView } from "../../frontend/js/components/ai-integration-details";
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
 import { AgentStreamError } from "../../frontend/js/services/agent-stream";
-import type { AiProviderConfigurationResponse } from "../../frontend/js/services/ai-provider-configuration";
+import type { AiProviderConnection } from "../../frontend/js/services/ai-provider-configuration";
 import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import { AiReviewerWorkspaceSchema } from "../../shared/contracts.mjs";
 import type { AiReviewerWorkspace } from "../../shared/contract-types";
@@ -103,18 +103,17 @@ const settingsWrapSelectors = [
   ".ai-reviewer-provider-advanced-help",
   ".ai-reviewer-provider-settings-footer .button-content",
 ];
-const settingsConfiguration: AiProviderConfigurationResponse = {
-  configured: true,
+const settingsConnection: AiProviderConnection = {
+  id: "layout-connection",
+  label: "api.example.com",
+  classification: "remote",
   config: {
     provider: "openai-compatible",
     baseUrl: "https://api.example.com/v1",
-    model: "hosted-review-model",
-    contextLength: 32_768,
-    contextLengthSource: "detected",
+    contextLengthOverride: null,
     credentialSet: true,
     credentialUpdatedAt: "2026-07-26T01:02:03.000Z",
   },
-  classification: "remote",
 };
 
 function installPanelStyles() {
@@ -459,12 +458,14 @@ describe("AI reviewer panel width", function () {
         <AiIntegrationDetailsView
           projectId={projectId}
           onHide={() => {}}
-          getConfiguration={async () => settingsConfiguration}
-          saveConfiguration={async () => settingsConfiguration}
+          listConnections={async () => ({ connections: [settingsConnection] })}
+          createConnection={async () => settingsConnection}
+          updateConnection={async () => settingsConnection}
+          deleteConnection={async () => ({ connections: [] })}
           testConnection={async () => ({
             ok: true,
             provider: "openai-compatible",
-            model: "hosted-review-model",
+            modelCount: 2,
             classification: "remote",
           })}
         />,
@@ -545,7 +546,9 @@ describe("AI reviewer panel width", function () {
         </div>,
       );
 
-      const locations = await screen.findAllByTitle(`${longPath}:0-4`);
+      const locations = await screen.findAllByTitle(
+        `${longPath} (chars 0\u20134)`,
+      );
       expect(locations[0].textContent?.length ?? 0).to.be.greaterThan(233);
       assertEllipsis(locations[0]);
 

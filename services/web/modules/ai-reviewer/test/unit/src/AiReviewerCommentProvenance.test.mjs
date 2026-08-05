@@ -35,7 +35,7 @@ function inMemoryModel() {
         ),
       ),
     ),
-    updateOne: vi.fn((filter, update, options) =>
+    updateOne: vi.fn((filter, update, options = {}) =>
       fakeQuery(() => {
         const current = records.get(filter._id);
         if (current != null) {
@@ -43,6 +43,9 @@ function inMemoryModel() {
             const error = new Error("duplicate comment identifier");
             error.code = 11000;
             throw error;
+          }
+          if (update.$set != null) {
+            Object.assign(current, clone(update.$set));
           }
           return {
             acknowledged: true,
@@ -133,7 +136,7 @@ async function captureError(promise) {
 describe("AI reviewer comment provenance model and store", function () {
   it("stores only the project and comment identifiers", function () {
     expect(Object.keys(AiReviewerCommentProvenanceSchema.paths).sort()).toEqual(
-      ["_id", "projectId"],
+      ["_id", "projectId", "uncertain"],
     );
     expect(AiReviewerCommentProvenanceSchema.options).toEqual(
       expect.objectContaining({
@@ -147,7 +150,11 @@ describe("AI reviewer comment provenance model and store", function () {
 
   it("marks idempotently, lists by project, rolls back by id, and deletes by project", async function () {
     const { model, records } = inMemoryModel();
-    const store = createAiReviewerCommentProvenanceStore({ model });
+    const getThreadState = vi.fn(async () => ({ state: "current" }));
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState,
+    });
 
     expect(
       await store.mark(projectId.toUpperCase(), commentId.toUpperCase()),
@@ -168,12 +175,16 @@ describe("AI reviewer comment provenance model and store", function () {
     ]);
     expect([...records.values()]).toEqual(
       expect.arrayContaining([
-        { _id: commentId, projectId },
-        { _id: otherCommentId, projectId },
+        { _id: commentId, projectId, uncertain: false },
+        { _id: otherCommentId, projectId, uncertain: false },
       ]),
     );
     for (const record of records.values()) {
-      expect(Object.keys(record).sort()).toEqual(["_id", "projectId"]);
+      expect(Object.keys(record).sort()).toEqual([
+        "_id",
+        "projectId",
+        "uncertain",
+      ]);
     }
 
     expect(await store.unmark(otherProjectId, commentId)).toBe(false);
@@ -188,9 +199,59 @@ describe("AI reviewer comment provenance model and store", function () {
     expect(model.deleteMany).toHaveBeenCalledWith({ projectId });
   });
 
+  it("resolves uncertain reservations while listing comment provenance", async function () {
+    const { model, records } = inMemoryModel();
+    const states = new Map([
+      [commentId, "current"],
+      [otherCommentId, "absent"],
+    ]);
+    const getThreadState = vi.fn(async (_projectId, id) => ({
+      state: states.get(id),
+    }));
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState,
+    });
+
+    await store.mark(projectId, commentId);
+    await store.mark(projectId, otherCommentId);
+
+    expect(await store.list(projectId)).toEqual([commentId]);
+    expect(records.get(commentId)).toEqual({
+      _id: commentId,
+      projectId,
+      uncertain: false,
+    });
+    expect(records.has(otherCommentId)).toBe(false);
+    expect(getThreadState).toHaveBeenCalledTimes(2);
+  });
+
+  it("still lists provenance when the thread state cannot be reached", async function () {
+    const { model, records } = inMemoryModel();
+    const getThreadState = vi.fn(async () => {
+      throw new Error("chat service unavailable");
+    });
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState,
+    });
+
+    await store.mark(projectId, commentId);
+
+    expect(await store.list(projectId)).toEqual([commentId]);
+    expect(records.get(commentId)).toEqual({
+      _id: commentId,
+      projectId,
+      uncertain: true,
+    });
+  });
+
   it("rejects identifiers outside the existing ThreadId shape before storage", async function () {
     const { model } = inMemoryModel();
-    const store = createAiReviewerCommentProvenanceStore({ model });
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState: vi.fn(),
+    });
 
     expect(
       await captureError(store.list("project-not-an-object-id")),
@@ -210,7 +271,10 @@ describe("AI reviewer comment provenance model and store", function () {
 describe("AI reviewer comment provenance controller", function () {
   it("shares project provenance across authenticated users without accepting content", async function () {
     const { model, records } = inMemoryModel();
-    const provenanceStore = createAiReviewerCommentProvenanceStore({ model });
+    const provenanceStore = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState: vi.fn(async () => ({ state: "current" })),
+    });
     const controller = createAiReviewerCommentProvenanceController({
       provenanceStore,
     });
@@ -242,7 +306,9 @@ describe("AI reviewer comment provenance controller", function () {
 
     expect(markResponse.body).toEqual({ commentId, created: true });
     expect(listResponse.body).toEqual({ commentIds: [commentId] });
-    expect([...records.values()]).toEqual([{ _id: commentId, projectId }]);
+    expect([...records.values()]).toEqual([
+      { _id: commentId, projectId, uncertain: false },
+    ]);
 
     await controller.deleteCommentProvenance(
       {

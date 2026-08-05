@@ -1,6 +1,11 @@
 // @ts-check
 
 import { AiReviewerCommentProvenance as AiReviewerCommentProvenanceModel } from "../models/AiReviewerCommentProvenance.mjs";
+import ChatApiHandler from "../../../../app/src/Features/Chat/ChatApiHandler.mjs";
+
+AiReviewerCommentProvenanceModel.schema.add({
+  uncertain: { type: Boolean, required: true, default: false },
+});
 
 export class AiReviewerCommentProvenanceValidationError extends Error {
   constructor() {
@@ -31,18 +36,56 @@ function objectId(input) {
 }
 
 /**
- * @param {{ model?: typeof AiReviewerCommentProvenanceModel }} [dependencies]
+ * @param {{
+ *   model?: typeof AiReviewerCommentProvenanceModel,
+ *   getThreadState?: (projectId: string, commentId: string, signal: AbortSignal) => Promise<{ state: string }>
+ * }} [dependencies]
  */
 export function createAiReviewerCommentProvenanceStore({
   model = AiReviewerCommentProvenanceModel,
+  getThreadState = ChatApiHandler.promises.getThreadState,
 } = {}) {
   return {
     /** @param {unknown} projectIdInput */
     async list(projectIdInput) {
       const projectId = objectId(projectIdInput);
       const records = await model.find({ projectId }).lean().exec();
-      return records
-        .map((record) => objectId(record._id))
+      const resolvedRecords = await Promise.all(
+        records.map(async (record) => {
+          const commentId = objectId(record._id);
+          if (record.uncertain !== true) {
+            return commentId;
+          }
+          // Resolving an unconfirmed record is opportunistic. When the chat
+          // service cannot answer, keep the record unconfirmed and still list
+          // it: a reconciliation failure must not fail the read itself.
+          let state;
+          try {
+            ({ state } = await getThreadState(
+              projectId,
+              commentId,
+              new AbortController().signal,
+            ));
+          } catch {
+            return commentId;
+          }
+          if (state === "absent") {
+            await model.deleteOne({ _id: commentId, projectId }).exec();
+            return null;
+          }
+          if (state === "current" || state === "resolved") {
+            await model
+              .updateOne(
+                { _id: commentId, projectId },
+                { $set: { uncertain: false } },
+              )
+              .exec();
+          }
+          return commentId;
+        }),
+      );
+      return resolvedRecords
+        .filter((commentId) => commentId != null)
         .sort((left, right) => left.localeCompare(right));
     },
 
@@ -60,6 +103,7 @@ export function createAiReviewerCommentProvenanceStore({
             $setOnInsert: {
               _id: commentId,
               projectId,
+              uncertain: true,
             },
           },
           {

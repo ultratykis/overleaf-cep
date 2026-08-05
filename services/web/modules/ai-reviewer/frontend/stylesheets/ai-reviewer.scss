@@ -72,6 +72,37 @@
     gap: var(--spacing-02);
   }
 
+  .ai-reviewer-connections,
+  .ai-reviewer-connection-list,
+  .ai-reviewer-connection-row {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .ai-reviewer-connection-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .ai-reviewer-connection-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--spacing-02);
+  }
+
+  .ai-reviewer-connection-name {
+    flex: 1 1 auto;
+    text-align: start;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    overflow-wrap: anywhere;
+  }
+
   .modal-title,
   .form-label,
   .ai-reviewer-provider-settings-details,
@@ -240,6 +271,13 @@
   overflow-wrap: anywhere;
 }
 
+// A connection label is user-supplied, so the failure line has to wrap it.
+.ai-reviewer-panel-model-failures {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .ai-reviewer-panel-send {
   position: absolute;
   inset-inline-end: var(--spacing-02);
@@ -288,7 +326,9 @@
   max-width: 100%;
   border: 1px solid var(--border-divider-themed);
   border-radius: var(--border-radius-base);
-  overflow: hidden;
+  // No overflow clipping here: a turn grows with its text, and hiding the
+  // overflow cut the author's own message off behind the next turn.
+  overflow-wrap: anywhere;
 }
 
 .ai-reviewer-run {
@@ -515,6 +555,7 @@
 .ai-reviewer-discussion-turn {
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   gap: var(--spacing-02);
   padding: var(--spacing-02);
   background: var(--bg-primary-themed);
@@ -595,5 +636,41 @@
 
   .ai-reviewer-run-header > .ai-reviewer-panel-actions {
     width: auto;
+  }
+}
+
+.ai-reviewer-discussion-responding {
+  align-self: flex-start;
+  color: var(--content-secondary, #5d6879);
+  font-size: 0.875rem;
+
+  &::after {
+    content: "";
+    display: inline-block;
+    width: 1.2em;
+    text-align: left;
+    animation: ai-reviewer-responding-dots 1.2s steps(4, end) infinite;
+  }
+}
+
+@keyframes ai-reviewer-responding-dots {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75% {
+    content: "...";
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-reviewer-discussion-responding::after {
+    animation: none;
+    content: "...";
   }
 }

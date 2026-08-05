@@ -4,11 +4,9 @@
 
 import hooks from "./AiReviewerCleanupHooks.mjs";
 
-/**
- * Startup remains inert. The authenticated router creates provider state only
- * when a user explicitly starts a request.
- */
-async function start() {}
+async function start() {
+  // The enabled shell has no background runtime.
+}
 
 const configuredRouterPath = "./ConfiguredAiReviewerRouter.mjs";
 

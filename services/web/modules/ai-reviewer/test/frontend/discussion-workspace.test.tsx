@@ -260,6 +260,64 @@ async function sendDiscussionMessage(text: string) {
 }
 
 describe("AI reviewer: discussion workspace", function () {
+  it("shows a responding indicator while an answer is still streaming", async function () {
+    // A real answer can take tens of seconds. Without this the composer just
+    // goes quiet, which reads as a hang.
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const streamDiscussionRequest = sinon
+      .stub()
+      .callsFake(async (call: DiscussionStreamCall) => {
+        const { requestId } = call.request;
+        call.onEvent(
+          discussionEvent(requestId, 0, {
+            type: "started",
+            provider: "fake",
+            model: "deterministic-v1",
+          }),
+        );
+        await held;
+        call.onEvent(
+          discussionEvent(requestId, 1, {
+            type: "text.delta",
+            delta: "Delayed reply",
+          }),
+        );
+        call.onEvent(
+          discussionEvent(requestId, 2, {
+            type: "completed",
+            finishReason: "stop",
+          }),
+        );
+      });
+
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        createDiscussionId={() => "responding-discussion-0001"}
+        createDiscussionRequestId={() => "responding-discussion-request-1"}
+        now={() => createdAt}
+        streamDiscussionRequest={streamDiscussionRequest}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Discussion message"), {
+      target: { value: "Please answer slowly" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    const indicator = await screen.findByTestId("discussion-responding");
+    expect(indicator.textContent).to.equal("Responding");
+    expect(screen.getByRole("button", { name: "Cancel response" })).to.exist;
+
+    release?.();
+    await waitFor(() => {
+      expect(screen.queryByTestId("discussion-responding")).not.to.exist;
+    });
+  });
+
   it("starts an open discussion from the list input, sends only 12 recent turns, and returns to one collapsed row with no subject", async function () {
     let responseNumber = 0;
     const streamDiscussionRequest = sinon

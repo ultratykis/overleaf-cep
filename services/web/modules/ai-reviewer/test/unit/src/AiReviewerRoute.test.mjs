@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 
 import { describe, expect, it, vi } from "vitest";
@@ -354,8 +355,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     const blockRestricted = vi.fn();
     const ensureCanRead = vi.fn();
     const rateLimit = vi.fn();
-    const getConfiguration = vi.fn();
-    const saveConfiguration = vi.fn();
+    const listModels = vi.fn();
     const testConnection = vi.fn();
     const stream = vi.fn();
     const discussionStream = vi.fn();
@@ -366,6 +366,10 @@ describe("AI reviewer: module shell authenticated route", function () {
     const deleteCommentProvenance = vi.fn();
     const deleteDiscussion = vi.fn();
     const deleteWorkspace = vi.fn();
+    const listConnections = vi.fn();
+    const createConnection = vi.fn();
+    const updateConnection = vi.fn();
+    const deleteConnection = vi.fn();
     const requireLogin = vi.fn(() => login);
     const get = vi.fn();
     const post = vi.fn();
@@ -385,8 +389,7 @@ describe("AI reviewer: module shell authenticated route", function () {
         ensureUserCanReadProject: ensureCanRead,
       },
       rateLimit,
-      getConfiguration,
-      saveConfiguration,
+      listModels,
       testConnection,
       stream,
       discussionStream,
@@ -397,6 +400,10 @@ describe("AI reviewer: module shell authenticated route", function () {
       deleteCommentProvenance,
       deleteDiscussion,
       deleteWorkspace,
+      listConnections,
+      createConnection,
+      updateConnection,
+      deleteConnection,
     });
 
     router.apply(webRouter);
@@ -406,12 +413,12 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(requireLogin).toHaveBeenCalledTimes(2);
     expect(get).toHaveBeenNthCalledWith(
       1,
-      "/project/:project_id/ai-reviewer/config",
+      "/project/:project_id/ai-reviewer/provider/models",
       login,
       rateLimit,
       blockRestricted,
       ensureCanRead,
-      getConfiguration,
+      listModels,
     );
     expect(get).toHaveBeenNthCalledWith(
       2,
@@ -433,15 +440,6 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
     expect(put).toHaveBeenNthCalledWith(
       1,
-      "/project/:project_id/ai-reviewer/config",
-      login,
-      rateLimit,
-      blockRestricted,
-      ensureCanRead,
-      saveConfiguration,
-    );
-    expect(put).toHaveBeenNthCalledWith(
-      2,
       "/project/:project_id/ai-reviewer/workspace",
       login,
       rateLimit,
@@ -450,7 +448,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       saveWorkspace,
     );
     expect(put).toHaveBeenNthCalledWith(
-      3,
+      2,
       "/project/:project_id/ai-reviewer/comment-provenance/:comment_id",
       login,
       rateLimit,
@@ -512,10 +510,46 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       deleteCommentProvenance,
     );
-    expect(anotherRouter.get).toHaveBeenCalledTimes(3);
+    expect(get).toHaveBeenNthCalledWith(
+      4,
+      "/project/:project_id/ai-reviewer/connections",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      listConnections,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/project/:project_id/ai-reviewer/connections",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      createConnection,
+    );
+    expect(put).toHaveBeenNthCalledWith(
+      3,
+      "/project/:project_id/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      updateConnection,
+    );
+    expect(remove).toHaveBeenNthCalledWith(
+      4,
+      "/project/:project_id/ai-reviewer/connections/:connection_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      deleteConnection,
+    );
+    expect(anotherRouter.get).toHaveBeenCalledTimes(4);
     expect(anotherRouter.put).toHaveBeenCalledTimes(3);
-    expect(anotherRouter.post).toHaveBeenCalledTimes(3);
-    expect(anotherRouter.delete).toHaveBeenCalledTimes(3);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(4);
+    expect(anotherRouter.delete).toHaveBeenCalledTimes(4);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
     expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);
@@ -524,10 +558,14 @@ describe("AI reviewer: module shell authenticated route", function () {
 
   it("streams validated fake-provider events as NDJSON", async function () {
     const gateway = new ScriptedFakeAgentGateway({ events: events() });
+    const release = vi.fn(async () => {});
     const controller = createAiReviewerController({
       gatewayFactory: () => gateway,
       now: () => createdAt,
       eventId: () => "event-error",
+      concurrencyStore: {
+        acquire: vi.fn(async () => ({ acquired: true, release })),
+      },
     });
     const response = new FakeResponse();
 
@@ -542,6 +580,85 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(response.writableEnded).toBe(true);
     expect(parseNdjson(response)).toEqual(events());
     expect(gateway.calls).toEqual([request()]);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      "review",
+      "stream",
+      request(),
+      "user",
+      "AI_REVIEWER_USER_CONCURRENCY_LIMITED",
+    ],
+    [
+      "discussion",
+      "discussionStream",
+      discussionRequest(),
+      "system",
+      "AI_REVIEWER_SYSTEM_CONCURRENCY_LIMITED",
+    ],
+  ])(
+    "returns the same bounded 429 response when %s capacity is exhausted",
+    async function (_label, method, body, limit, failureCode) {
+      const gatewayFactory = vi.fn();
+      const failureRecorder = vi.fn();
+      const concurrencyStore = {
+        acquire: vi.fn(async () => ({ acquired: false, limit })),
+      };
+      const controller = createAiReviewerController({
+        gatewayFactory,
+        concurrencyStore,
+        failureRecorder,
+        elapsedNow: vi.fn().mockReturnValueOnce(10).mockReturnValue(14),
+      });
+      const rawRequest = {
+        ...httpRequest(body),
+        user: { _id: "user-0001" },
+      };
+      const response = new FakeResponse();
+
+      await controller[method](rawRequest, response);
+
+      expect(response.statusCode).toBe(429);
+      expect(JSON.parse(response.chunks.join(""))).toEqual({
+        error: {
+          code: "AI_REVIEWER_CONCURRENCY_LIMITED",
+          category: "rate-limit",
+          message:
+            "An AI review is already running. Wait for it to finish, then try again.",
+          retryable: true,
+        },
+      });
+      expect(response.chunks.join("")).not.toContain("user-0001");
+      expect(concurrencyStore.acquire).toHaveBeenCalledExactlyOnceWith(
+        "user-0001",
+      );
+      expect(gatewayFactory).not.toHaveBeenCalled();
+      expect(failureRecorder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestId: body.requestId,
+          failureCategory: "rate-limit",
+          failureCode,
+        }),
+      );
+    },
+  );
+
+  it("releases capacity when provider startup fails", async function () {
+    const release = vi.fn(async () => {});
+    const controller = createAiReviewerController({
+      gatewayFactory: () => {
+        throw new Error("synthetic startup failure");
+      },
+      concurrencyStore: {
+        acquire: vi.fn(async () => ({ acquired: true, release })),
+      },
+    });
+
+    await controller.stream(httpRequest(), new FakeResponse());
+
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -872,6 +989,7 @@ describe("AI reviewer: module shell authenticated route", function () {
 
   it("applies the shared timeout handling to a discussion stream", async function () {
     const timeout = new AbortController();
+    const release = vi.fn(async () => {});
     const next = vi.fn(() => new Promise(() => {}));
     const returnIterator = vi.fn(async () => ({
       done: true,
@@ -894,6 +1012,12 @@ describe("AI reviewer: module shell authenticated route", function () {
       timeoutSignalFactory: () => timeout.signal,
       now: () => createdAt,
       eventId: () => "event-error",
+      concurrencyStore: {
+        acquire: vi.fn(async () => ({
+          acquired: true,
+          release,
+        })),
+      },
     });
     const response = new FakeResponse();
 
@@ -906,6 +1030,7 @@ describe("AI reviewer: module shell authenticated route", function () {
 
     expect(await settlesWithin(streaming)).toBe(true);
     expect(returnIterator).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
     expect(parseDiscussionNdjson(response)).toEqual([
       {
         type: "error",
@@ -1719,5 +1844,41 @@ describe("AI reviewer: module shell authenticated route", function () {
     );
     expect(parseNdjson(successfulResponse)).toEqual(events());
     expect(gatewayFactory).toHaveBeenCalledTimes(2);
+  });
+
+  it("exposes every handler the router destructures", async function () {
+    // The router mocks its handlers, so a handler that exists on the provider
+    // controller but is never re-exported still passes those tests and only
+    // fails when Express refuses the undefined callback at boot.
+    const { default: controller } =
+      await import("../../../app/src/ConfiguredAiReviewerController.mjs");
+    const source = await readFile(
+      new URL("../../../app/src/AiReviewerRouter.mjs", import.meta.url),
+      "utf8",
+    );
+    const destructured = source
+      .slice(
+        source.indexOf("export function createAiReviewerRouter({"),
+        source.indexOf("}) {"),
+      )
+      .split("\n")
+      .map((line) => line.trim().replace(/,$/u, ""))
+      .filter((line) => /^[a-zA-Z][a-zA-Z0-9]*$/u.test(line));
+
+    expect(destructured.length).toBeGreaterThan(10);
+    for (const name of destructured) {
+      if (
+        [
+          "authenticationController",
+          "authorizationMiddleware",
+          "rateLimit",
+        ].includes(name)
+      ) {
+        continue;
+      }
+      expect(typeof controller[name], `${name} must be exported`).toBe(
+        "function",
+      );
+    }
   });
 });
