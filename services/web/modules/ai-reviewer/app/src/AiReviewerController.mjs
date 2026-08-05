@@ -79,6 +79,13 @@ const PUBLIC_ERRORS = Object.freeze({
   }),
 });
 
+const PUBLIC_PROJECT_CONTENT_ERROR = Object.freeze({
+  code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+  category: "configuration",
+  message: "The project content could not be read for review.",
+  retryable: false,
+});
+
 /**
  * Return a bounded public error selected only by a known category. Provider
  * messages, codes, and retry hints never cross the HTTP boundary.
@@ -118,6 +125,9 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
     return publicErrorForCategory("schema");
   }
   if (error instanceof AgentGatewayError) {
+    if (error.code === PUBLIC_PROJECT_CONTENT_ERROR.code) {
+      return { ...PUBLIC_PROJECT_CONTENT_ERROR };
+    }
     return publicErrorForCategory(error.category);
   }
   return publicErrorForCategory("unknown");
@@ -323,7 +333,11 @@ async function allowAbortPropagation(work) {
 
 /**
  * @param {{
- *   gatewayFactory: () => AgentGateway,
+ *   gatewayFactory: (context: {
+ *     request: AgentRequest,
+ *     httpRequest: Request,
+ *     signal: AbortSignal,
+ *   }) => AgentGateway | PromiseLike<AgentGateway>,
  *   timeoutSignalFactory?: () => AbortSignal,
  *   now?: () => string,
  *   eventId?: () => string,
@@ -398,7 +412,16 @@ export function createAiReviewerController({
     let pendingStep;
     let iteratorFinished = false;
     try {
-      const gateway = gatewayFactory();
+      const gateway = await raceWithAbort(
+        Promise.resolve().then(() =>
+          gatewayFactory({
+            request: parsedRequest.data,
+            httpRequest: request,
+            signal,
+          }),
+        ),
+        signal,
+      );
       const stream = gateway.stream(parsedRequest.data, { signal });
       const activeIterator = stream[Symbol.asyncIterator]();
       iterator = activeIterator;

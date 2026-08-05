@@ -6,6 +6,8 @@ export const OLLAMA_FETCH_REDIRECT = "error";
 
 const CANONICAL_ENDPOINT =
   /^http:\/\/(127\.0\.0\.1|\[::1\]|localhost|host\.docker\.internal):([1-9][0-9]{0,4})\/v1$/u;
+const CANONICAL_MODEL_TAG =
+  /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 export class OllamaEndpointPolicyError extends AgentGatewayError {
   constructor() {
@@ -56,4 +58,21 @@ export function parseOllamaOpenAiBaseUrl(input) {
     host,
     port,
   });
+}
+
+/**
+ * Require an explicit canonical Ollama tag. Implicit `latest`, surrounding
+ * whitespace, query-like suffixes, and control characters are rejected.
+ *
+ * @param {unknown} input
+ * @returns {string}
+ */
+export function parseOllamaModelTag(input) {
+  if (
+    typeof input !== "string" ||
+    CANONICAL_MODEL_TAG.exec(input)?.[0] !== input
+  ) {
+    throw new TypeError("modelTag must be an explicit canonical Ollama tag.");
+  }
+  return input;
 }

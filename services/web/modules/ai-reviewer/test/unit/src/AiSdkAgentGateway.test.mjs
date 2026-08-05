@@ -62,26 +62,7 @@ function finish(finishReason, tokenUsage = usage()) {
 function structuredOutput() {
   return {
     narrative: "Synthetic structured review.",
-    suggestions: [
-      {
-        documentId: "document-sdk-0001",
-        path: "main.tex",
-        baseRevision: 1,
-        baseTextHash: "a".repeat(64),
-        range: { from: 0, to: 4 },
-        original: "Text",
-        replacement: "Edit",
-        rationale: "Synthetic rationale.",
-        evidence: [
-          {
-            path: "main.tex",
-            range: { from: 0, to: 4 },
-            revision: 1,
-            textHash: "a".repeat(64),
-          },
-        ],
-      },
-    ],
+    suggestions: [],
     findings: [
       {
         severity: "suggestion",
@@ -177,8 +158,16 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       path: "main.tex",
       text: "Synthetic tool result.",
     }));
+    const validateEvidence = vi.fn();
     const controller = new AbortController();
-    const gateway = createGateway(model, { readProjectFile });
+    const gateway = createGateway(model, {
+      readProjectFile,
+      projectContext: {
+        summary: { fileCount: 1 },
+        files: [{ path: "main.tex", textLength: 4 }],
+      },
+      validateEvidence,
+    });
 
     const events = await collect(
       gateway.stream(request(), { signal: controller.signal }),
@@ -188,11 +177,10 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       "started",
       "tool.call",
       "text.delta",
-      "suggestion",
       "finding",
       "completed",
     ]);
-    expect(events.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(events.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4]);
     expect(events[1]).toMatchObject({
       call: {
         id: "tool-call-0001",
@@ -204,21 +192,12 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       },
     });
     expect(events[3]).toMatchObject({
-      suggestion: {
-        requestId: "request-sdk-0001",
-        projectId: "project-sdk-0001",
-        provider: "fixture-provider",
-        model: "fixture-model",
-        status: "proposed",
-      },
-    });
-    expect(events[4]).toMatchObject({
       finding: {
         requestId: "request-sdk-0001",
         projectId: "project-sdk-0001",
       },
     });
-    expect(events[5]).toMatchObject({
+    expect(events[4]).toMatchObject({
       finishReason: "stop",
       usage: {
         inputTokens: 8,
@@ -230,6 +209,105 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     expect(model.doStreamCalls).toHaveLength(2);
     expect(model.doStreamCalls[0].abortSignal).toBe(controller.signal);
     expect(model.doStreamCalls[1].abortSignal).toBe(controller.signal);
+    const userPrompt = model.doStreamCalls[0].prompt[1].content[0].text;
+    expect(JSON.parse(userPrompt).project).toEqual({
+      summary: { fileCount: 1 },
+      files: [{ path: "main.tex", textLength: 4 }],
+    });
+    expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
+      structuredOutput().findings[0].evidence,
+      {
+        request: request(),
+        signal: controller.signal,
+      },
+    );
+  });
+
+  it("allows one bounded Zotero search during a project review", async function () {
+    const toolStep = streamResult([
+      {
+        type: "tool-call",
+        toolCallId: "tool-call-zotero-0001",
+        toolName: "search_zotero",
+        input: JSON.stringify({ query: "Synthetic 2026" }),
+      },
+      finish("tool-calls"),
+    ]);
+    const output = JSON.stringify(structuredOutput());
+    const structuredStep = streamResult([
+      { type: "text-start", id: "text-zotero-0001" },
+      { type: "text-delta", id: "text-zotero-0001", delta: output },
+      { type: "text-end", id: "text-zotero-0001" },
+      finish("stop", usage(5, 8)),
+    ]);
+    const { model } = strictStreamModel([toolStep, structuredStep]);
+    const searchZotero = vi.fn(async () => [
+      {
+        itemKey: "ITEM1",
+        itemType: "journalArticle",
+        title: "Synthetic result",
+        creators: [],
+        year: "2026",
+        doi: null,
+        verificationDepth: "metadata-only",
+      },
+    ]);
+    const validateEvidence = vi.fn();
+    const controller = new AbortController();
+    const gateway = createGateway(model, {
+      searchZotero,
+      validateEvidence,
+    });
+    const activeRequest = request();
+
+    const events = await collect(
+      gateway.stream(activeRequest, { signal: controller.signal }),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "text.delta",
+      "finding",
+      "completed",
+    ]);
+    expect(searchZotero).toHaveBeenCalledExactlyOnceWith(
+      { query: "Synthetic 2026" },
+      {
+        request: activeRequest,
+        signal: controller.signal,
+      },
+    );
+    expect(validateEvidence).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a second Zotero search in the same review", async function () {
+    const toolStep = streamResult([
+      {
+        type: "tool-call",
+        toolCallId: "tool-call-zotero-first",
+        toolName: "search_zotero",
+        input: JSON.stringify({ query: "First query" }),
+      },
+      {
+        type: "tool-call",
+        toolCallId: "tool-call-zotero-second",
+        toolName: "search_zotero",
+        input: JSON.stringify({ query: "Second query" }),
+      },
+      finish("tool-calls"),
+    ]);
+    const { model } = strictStreamModel([toolStep]);
+    const searchZotero = vi.fn(async () => []);
+    const gateway = createGateway(model, { searchZotero });
+
+    expect(
+      await captureError(collect(gateway.stream(request()))),
+    ).toMatchObject({
+      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
+      category: "schema",
+      retryable: false,
+    });
+    expect(searchZotero).toHaveBeenCalledOnce();
   });
 
   it("rejects a string model identifier instead of using the default gateway", function () {

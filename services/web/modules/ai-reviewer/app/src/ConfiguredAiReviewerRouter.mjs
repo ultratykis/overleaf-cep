@@ -18,5 +18,8 @@ export default createAiReviewerRouter({
   rateLimit: RateLimiterMiddleware.rateLimit(requestRateLimiter, {
     params: ["project_id"],
   }),
+  getConfiguration: AiReviewerController.getConfiguration,
+  saveConfiguration: AiReviewerController.saveConfiguration,
+  testConnection: AiReviewerController.testConnection,
   stream: AiReviewerController.stream,
 });

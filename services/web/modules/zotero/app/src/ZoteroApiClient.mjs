@@ -1,10 +1,8 @@
 import logger from '@overleaf/logger'
 import OError from '@overleaf/o-error'
-import AbortError from 'node-fetch'
 import {
   fetchNothing,
   fetchJson,
-  fetchString,
   fetchStringWithResponse,
   RequestFailedError,
 } from '@overleaf/fetch-utils'
@@ -19,7 +17,12 @@ import TokenManager from './TokenManager.mjs'
 
 const ZOTERO_API_URL = 'https://api.zotero.org'
 const REQUEST_TIMEOUT_MS = 60 * 1000
-// TODO: implement conditional requests 
+const SEARCH_RESULT_LIMIT = 5
+// TODO: implement conditional requests
+
+async function isLinked(userId) {
+  return (await TokenManager.getCredentials(userId)) != null
+}
 
 /**
  * Build a header for Zotero API request.
@@ -127,6 +130,84 @@ async function _fetchBibtex(apiKey, basePath, format) {
   return allBibtex
 }
 
+function boundedText(value, limit) {
+  return typeof value === 'string' ? value.trim().slice(0, limit) : ''
+}
+
+function normalizeSearchItem(item) {
+  const data = item?.data
+  const itemKey = boundedText(item?.key || data?.key, 100)
+  const itemType = boundedText(data?.itemType, 100)
+  if (
+    !itemKey ||
+    !itemType ||
+    ['attachment', 'note', 'annotation'].includes(itemType)
+  ) {
+    return null
+  }
+
+  const creators = Array.isArray(data.creators)
+    ? data.creators.slice(0, 20).map(creator => ({
+        firstName: boundedText(creator?.firstName, 200),
+        lastName: boundedText(creator?.lastName || creator?.name, 200),
+        creatorType: boundedText(creator?.creatorType, 100),
+      }))
+    : []
+  const date = boundedText(data.date, 100)
+
+  return Object.freeze({
+    itemKey,
+    itemType,
+    title: boundedText(data.title, 2000),
+    creators: Object.freeze(creators),
+    year: date.match(/\b\d{4}\b/u)?.[0] || null,
+    doi: boundedText(data.DOI, 300) || null,
+    verificationDepth: 'metadata-only',
+  })
+}
+
+/**
+ * Search the authenticated user's personal library without exposing the key.
+ */
+async function searchItems(userId, { query, signal } = {}) {
+  if (
+    typeof query !== 'string' ||
+    query.trim().length === 0 ||
+    query.trim().length > 200
+  ) {
+    throw new TypeError('Zotero search query must be 1 to 200 characters')
+  }
+  const normalizedQuery = query.trim()
+  const credentials = await TokenManager.getCredentials(userId)
+  if (!credentials) return null
+
+  const url = new URL(
+    `${ZOTERO_API_URL}/users/${credentials.zoteroUserId}/items/top`
+  )
+  url.searchParams.set('format', 'json')
+  url.searchParams.set('include', 'data')
+  url.searchParams.set('itemType', '-attachment')
+  url.searchParams.set('q', normalizedQuery)
+  url.searchParams.set('qmode', 'titleCreatorYear')
+  url.searchParams.set('limit', String(SEARCH_RESULT_LIMIT))
+
+  try {
+    const items = await fetchJson(url.toString(), {
+      headers: buildHeaders(credentials.apiKey),
+      signal: signal || AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (!Array.isArray(items)) return []
+    return Object.freeze(
+      items
+        .slice(0, SEARCH_RESULT_LIMIT)
+        .map(normalizeSearchItem)
+        .filter(item => item != null)
+    )
+  } catch (err) {
+    normalizeApiError(err, 'searchItems')
+  }
+}
+
 /**
  * Unlink a Zotero account.
  */
@@ -190,8 +271,10 @@ function normalizeApiError(err, operation) {
 }
 
 export default {
+  isLinked,
   getConnectionStatus,
   getGroupsForUser,
   getLibraryBibtex,
+  searchItems,
   unlinkAccount,
 }

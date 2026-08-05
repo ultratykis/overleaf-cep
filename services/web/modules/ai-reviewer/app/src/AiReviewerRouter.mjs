@@ -10,6 +10,9 @@
  *     ensureUserCanReadProject: (...args: any[]) => unknown,
  *   },
  *   rateLimit: (...args: any[]) => unknown,
+ *   getConfiguration: (...args: any[]) => unknown,
+ *   saveConfiguration: (...args: any[]) => unknown,
+ *   testConnection: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
  * }} dependencies
  */
@@ -17,13 +20,20 @@ export function createAiReviewerRouter({
   authenticationController,
   authorizationMiddleware,
   rateLimit,
+  getConfiguration,
+  saveConfiguration,
+  testConnection,
   stream,
 }) {
   const appliedRouters = new WeakSet();
 
   return {
     /**
-     * @param {{ post: (...args: any[]) => unknown }} webRouter
+     * @param {{
+     *   get: (...args: any[]) => unknown,
+     *   put: (...args: any[]) => unknown,
+     *   post: (...args: any[]) => unknown,
+     * }} webRouter
      */
     apply(webRouter) {
       if (appliedRouters.has(webRouter)) {
@@ -31,12 +41,32 @@ export function createAiReviewerRouter({
       }
       appliedRouters.add(webRouter);
 
-      webRouter.post(
-        "/project/:project_id/ai-reviewer/stream",
-        authenticationController.requireLogin(),
+      const requireLogin = authenticationController.requireLogin();
+      const commonMiddleware = [
+        requireLogin,
         rateLimit,
         authorizationMiddleware.blockRestrictedUserFromProject,
         authorizationMiddleware.ensureUserCanReadProject,
+      ];
+
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/config",
+        ...commonMiddleware,
+        getConfiguration,
+      );
+      webRouter.put(
+        "/project/:project_id/ai-reviewer/config",
+        ...commonMiddleware,
+        saveConfiguration,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/connection-test",
+        ...commonMiddleware,
+        testConnection,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/stream",
+        ...commonMiddleware,
         stream,
       );
     },

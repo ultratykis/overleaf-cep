@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import Settings from "@overleaf/settings";
 import { expect } from "chai";
 import sinon from "sinon";
@@ -196,5 +198,138 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
       restoreGatewayFactory();
       sandbox.restore();
     }
+  });
+
+  it("saves and uses the configured local Ollama provider", async function () {
+    if (process.env.OVERLEAF_AI_REVIEWER_REAL_OLLAMA !== "true") {
+      this.skip();
+    }
+    this.timeout(180_000);
+
+    const baseUrl = process.env.OVERLEAF_AI_REVIEWER_OLLAMA_BASE_URL;
+    const model = process.env.OVERLEAF_AI_REVIEWER_OLLAMA_MODEL;
+    expect(baseUrl).to.equal("http://127.0.0.1:11434/v1");
+    expect(model).to.be.a("string").and.not.empty;
+
+    const owner = new User();
+    await owner.login();
+    const projectId = await owner.createProject(
+      "AI reviewer Ollama smoke project",
+    );
+    const route = `/project/${projectId}/ai-reviewer`;
+    const configuration = { provider: "ollama", baseUrl, model };
+    const csrfHeaders = { "x-csrf-token": owner.csrfToken };
+
+    const saved = await owner.doRequest("PUT", {
+      url: `${route}/config`,
+      headers: csrfHeaders,
+      json: configuration,
+    });
+    expect(saved.response.statusCode).to.equal(200);
+    expect(saved.body).to.deep.equal({
+      configured: true,
+      config: configuration,
+      classification: "local",
+    });
+
+    const connection = await owner.doRequest("POST", {
+      url: `${route}/connection-test`,
+      headers: csrfHeaders,
+    });
+    expect(connection.response.statusCode).to.equal(200);
+    expect(JSON.parse(connection.body)).to.deep.equal({
+      ok: true,
+      provider: "ollama",
+      model,
+      classification: "local",
+    });
+
+    const text =
+      "\\section{Introduction}\nThis is a synthetic manuscript sentence.";
+    const requestId = "ai-reviewer-ollama-smoke";
+    const review = await owner.doRequest("POST", {
+      url: `${route}/stream`,
+      headers: {
+        ...csrfHeaders,
+        accept: "application/x-ndjson",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        requestId,
+        projectId: projectId.toString(),
+        action: "review",
+        instruction:
+          "Return one short narrative review. Use empty findings and suggestions arrays.",
+        skill: null,
+        scope: {
+          kind: "document",
+          documentId: "main-document",
+          path: "main.tex",
+          baseRevision: 1,
+          baseTextHash: createHash("sha256").update(text).digest("hex"),
+          text,
+        },
+      }),
+    });
+    expect(review.response.statusCode).to.equal(200);
+
+    const events = review.body
+      .trimEnd()
+      .split("\n")
+      .map((line) => AgentEventSchema.parse(JSON.parse(line)));
+    expect(events[0]).to.include({
+      type: "started",
+      requestId,
+      provider: "ollama",
+      model,
+    });
+    expect(
+      events.some(
+        (event) => event.type === "text.delta" && event.delta.length > 0,
+      ),
+    ).to.equal(true);
+    expect(
+      events.filter(
+        (event) => event.type === "completed" || event.type === "error",
+      ),
+    ).to.have.lengthOf(1);
+    expect(events.at(-1)?.type).to.equal("completed");
+
+    const projectRequestId = "ai-reviewer-project-ollama-smoke";
+    const projectReview = await owner.doRequest("POST", {
+      url: `${route}/stream`,
+      headers: {
+        ...csrfHeaders,
+        accept: "application/x-ndjson",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        requestId: projectRequestId,
+        projectId: projectId.toString(),
+        action: "review",
+        instruction:
+          "Return one short narrative based on the project manifest. Use empty findings and suggestions arrays.",
+        skill: null,
+        scope: { kind: "project" },
+      }),
+    });
+    expect(projectReview.response.statusCode).to.equal(200);
+
+    const projectEvents = projectReview.body
+      .trimEnd()
+      .split("\n")
+      .map((line) => AgentEventSchema.parse(JSON.parse(line)));
+    expect(projectEvents[0]).to.include({
+      type: "started",
+      requestId: projectRequestId,
+      provider: "ollama",
+      model,
+    });
+    expect(
+      projectEvents.some(
+        (event) => event.type === "text.delta" && event.delta.length > 0,
+      ),
+    ).to.equal(true);
+    expect(projectEvents.at(-1)?.type).to.equal("completed");
   });
 });

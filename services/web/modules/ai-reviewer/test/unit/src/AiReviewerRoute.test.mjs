@@ -286,16 +286,25 @@ async function settlesWithin(promise, milliseconds = 50) {
 }
 
 describe("AI reviewer: module shell authenticated route", function () {
-  it("registers one authenticated project-read route per web router", function () {
+  it("registers each authenticated project-read route once and in middleware order", function () {
     const login = vi.fn();
     const blockRestricted = vi.fn();
     const ensureCanRead = vi.fn();
     const rateLimit = vi.fn();
+    const getConfiguration = vi.fn();
+    const saveConfiguration = vi.fn();
+    const testConnection = vi.fn();
     const stream = vi.fn();
     const requireLogin = vi.fn(() => login);
+    const get = vi.fn();
     const post = vi.fn();
-    const webRouter = { post };
-    const anotherRouter = { post: vi.fn() };
+    const put = vi.fn();
+    const webRouter = { get, post, put };
+    const anotherRouter = {
+      get: vi.fn(),
+      post: vi.fn(),
+      put: vi.fn(),
+    };
     const router = createAiReviewerRouter({
       authenticationController: { requireLogin },
       authorizationMiddleware: {
@@ -303,6 +312,9 @@ describe("AI reviewer: module shell authenticated route", function () {
         ensureUserCanReadProject: ensureCanRead,
       },
       rateLimit,
+      getConfiguration,
+      saveConfiguration,
+      testConnection,
       stream,
     });
 
@@ -311,8 +323,33 @@ describe("AI reviewer: module shell authenticated route", function () {
     router.apply(anotherRouter);
 
     expect(requireLogin).toHaveBeenCalledTimes(2);
-    expect(post).toHaveBeenCalledOnce();
-    expect(post).toHaveBeenCalledWith(
+    expect(get).toHaveBeenCalledExactlyOnceWith(
+      "/project/:project_id/ai-reviewer/config",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      getConfiguration,
+    );
+    expect(put).toHaveBeenCalledExactlyOnceWith(
+      "/project/:project_id/ai-reviewer/config",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      saveConfiguration,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/project/:project_id/ai-reviewer/connection-test",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      testConnection,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
       "/project/:project_id/ai-reviewer/stream",
       login,
       rateLimit,
@@ -320,7 +357,12 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       stream,
     );
-    expect(anotherRouter.post).toHaveBeenCalledOnce();
+    expect(anotherRouter.get).toHaveBeenCalledOnce();
+    expect(anotherRouter.put).toHaveBeenCalledOnce();
+    expect(anotherRouter.post).toHaveBeenCalledTimes(2);
+    expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
+    expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);
+    expect(anotherRouter.post.mock.calls).toEqual(post.mock.calls);
   });
 
   it("streams validated fake-provider events as NDJSON", async function () {
@@ -344,6 +386,64 @@ describe("AI reviewer: module shell authenticated route", function () {
     expect(parseNdjson(response)).toEqual(events());
     expect(gateway.calls).toEqual([request()]);
   });
+
+  it.each([
+    {
+      label: "timeout",
+      trigger({ timeout }) {
+        timeout.abort(new DOMException("Synthetic timeout", "TimeoutError"));
+      },
+      expectedEvents: [
+        {
+          type: "error",
+          eventId: "event-error",
+          requestId: "request-0001",
+          sequence: 0,
+          createdAt,
+          error: {
+            code: "AI_REQUEST_TIMEOUT",
+            category: "timeout",
+            message: "The AI reviewer request timed out.",
+            retryable: true,
+          },
+        },
+      ],
+      expectEnded: true,
+    },
+    {
+      label: "request abort",
+      trigger({ rawHttpRequest }) {
+        rawHttpRequest.emit("aborted");
+      },
+      expectedEvents: [],
+      expectEnded: false,
+    },
+  ])(
+    "settles a pending asynchronous gateway factory on $label",
+    async function ({ expectEnded, expectedEvents, trigger }) {
+      const timeout = new AbortController();
+      const gatewayFactory = vi.fn(() => new Promise(() => {}));
+      const controller = createAiReviewerController({
+        gatewayFactory,
+        timeoutSignalFactory: () => timeout.signal,
+        now: () => createdAt,
+        eventId: () => "event-error",
+      });
+      const rawHttpRequest = Object.assign(new EventEmitter(), httpRequest());
+      const response = new FakeResponse();
+      const streaming = controller.stream(rawHttpRequest, response);
+      await vi.waitFor(() => expect(gatewayFactory).toHaveBeenCalledOnce());
+
+      trigger({ rawHttpRequest, timeout });
+
+      expect(await settlesWithin(streaming)).toBe(true);
+      expect(response.writableEnded).toBe(expectEnded);
+      expect(response.chunks.length === 0 ? [] : parseNdjson(response)).toEqual(
+        expectedEvents,
+      );
+      expect(gatewayFactory).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     ["an empty stream", []],

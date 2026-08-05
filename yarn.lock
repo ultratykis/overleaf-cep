@@ -6549,6 +6549,7 @@ __metadata:
     jsonwebtoken: "npm:^9.0.3"
     katex: "npm:^0.16.28"
     knip: "npm:^5.64.1"
+    latex-utensils: "npm:7.0.0"
     lodash: "npm:^4.18.1"
     lottie-react: "npm:^2.4.1"
     lru-cache: "npm:^7.10.1"
@@ -13241,7 +13242,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"commander@npm:^11.1.0":
+"commander@npm:^11.0.0, commander@npm:^11.1.0":
   version: 11.1.0
   resolution: "commander@npm:11.1.0"
   checksum: 10c0/13cc6ac875e48780250f723fb81c1c1178d35c5decb1abb1b628b3177af08a8554e76b2c0f29de72d69eef7c864d12613272a71fabef8047922bc622ab75a179
@@ -20147,6 +20148,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"latex-utensils@npm:7.0.0":
+  version: 7.0.0
+  resolution: "latex-utensils@npm:7.0.0"
+  dependencies:
+    commander: "npm:^11.0.0"
+    pegjs-backtrace: "npm:^0.2.1"
+  dependenciesMeta:
+    commander:
+      optional: true
+    pegjs-backtrace:
+      optional: true
+  bin:
+    luparse: bin/luparse
+  checksum: 10c0/e60105ea4f9c084b86e51d451c0b6a362399441bd0625f82d9119df1fbb6fc86649cbad0ffbb2fbfbb937894f38733b3d503266d804070c9b5b79ab2f6f7d272
+  languageName: node
+  linkType: hard
+
 "launch-editor@npm:^2.6.1":
   version: 2.13.2
   resolution: "launch-editor@npm:2.13.2"
@@ -23812,6 +23830,13 @@ __metadata:
     "@napi-rs/canvas":
       optional: true
   checksum: 10c0/fad356c6fa399f27897cc7111637a415c01035c62d406c121520c595eb88452b4859205df8ab34f4d1fc3921fa632af045900ced1123f0514972fb91acf60501
+  languageName: node
+  linkType: hard
+
+"pegjs-backtrace@npm:^0.2.1":
+  version: 0.2.1
+  resolution: "pegjs-backtrace@npm:0.2.1"
+  checksum: 10c0/11486299772eab0fff32ddca51f04ab842e3dd2e6ba9764226247ff975387adbeca8bae6df4c263ecea72995c8ccd41fbbec51fec2f327e885d3be772c90d6e2
   languageName: node
   linkType: hard
 

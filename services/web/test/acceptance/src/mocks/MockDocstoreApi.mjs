@@ -79,15 +79,18 @@ class MockDocstoreApi extends AbstractMockApi {
       res.json(this.getDeletedDocs(req.params.projectId))
     })
 
-    this.app.get('/project/:projectId/doc/:docId', (req, res) => {
-      const { projectId, docId } = req.params
-      const doc = this.docs[projectId][docId]
-      if (!doc || (doc.deleted && !req.query.include_deleted)) {
-        res.sendStatus(404)
-      } else {
-        res.json(doc)
+    this.app.get(
+      ['/project/:projectId/doc/:docId', '/project/:projectId/doc/:docId/peek'],
+      (req, res) => {
+        const { projectId, docId } = req.params
+        const doc = this.docs[projectId][docId]
+        if (!doc || (doc.deleted && !req.query.include_deleted)) {
+          res.sendStatus(404)
+        } else {
+          res.json(doc)
+        }
       }
-    })
+    )
 
     this.app.get('/project/:projectId/doc/:docId/deleted', (req, res) => {
       const { projectId, docId } = req.params
