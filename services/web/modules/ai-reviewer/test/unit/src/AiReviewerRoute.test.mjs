@@ -774,9 +774,9 @@ describe("AI reviewer: module shell authenticated route", function () {
       },
     },
     {
-      label: "structured-output schema rejection",
+      label: "invalid tool input",
       category: "schema",
-      internalCode: "AI_PROVIDER_SCHEMA_INVALID",
+      internalCode: "AI_TOOL_INPUT_INVALID",
       publicError: {
         code: "AI_STREAM_PROTOCOL_ERROR",
         category: "schema",
@@ -813,6 +813,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     "records classified metadata and preserves the four-field public payload for $label",
     async function ({ category, internalCode, publicError }) {
       const privateMessage = `PRIVATE_${category}_FAILURE_DETAIL`;
+      const credential = `PRIVATE_${category}_CREDENTIAL`;
       const gateway = {
         async *stream() {
           yield events()[0];
@@ -823,6 +824,7 @@ describe("AI reviewer: module shell authenticated route", function () {
             code: internalCode,
             category,
             retryable: false,
+            cause: new Error(credential),
           });
         },
       };
@@ -874,7 +876,11 @@ describe("AI reviewer: module shell authenticated route", function () {
       expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
         privateMessage,
       );
+      expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
+        credential,
+      );
       expect(response.chunks.join("")).not.toContain(privateMessage);
+      expect(response.chunks.join("")).not.toContain(credential);
     },
   );
 
@@ -1523,19 +1529,6 @@ describe("AI reviewer: module shell authenticated route", function () {
         },
       },
     },
-    {
-      label: "tool path",
-      body: documentRequest(),
-      event: toolCallEvent({
-        path: "references.tex",
-        range: { from: 0, to: 9 },
-      }),
-    },
-    {
-      label: "selection tool range",
-      body: selectionRequest(),
-      event: toolCallEvent({ path: "main.tex" }),
-    },
   ])(
     "rejects a raw gateway event with mismatched $label",
     async function ({ body, event }) {
@@ -1566,6 +1559,44 @@ describe("AI reviewer: module shell authenticated route", function () {
       expect(response.writableEnded).toBe(true);
     },
   );
+
+  it.each([
+    {
+      label: "another project file",
+      body: documentRequest(),
+      event: toolCallEvent({
+        path: "references.tex",
+        range: { from: 0, to: 9 },
+      }),
+    },
+    {
+      label: "the whole selection document",
+      body: selectionRequest(),
+      event: toolCallEvent({ path: "main.tex" }),
+    },
+  ])("accepts a raw gateway read of $label", async function ({ body, event }) {
+    const completed = {
+      ...events()[2],
+      sequence: 1,
+    };
+    const gateway = {
+      async *stream() {
+        yield event;
+        yield completed;
+      },
+    };
+    const controller = createAiReviewerController({
+      gatewayFactory: () => gateway,
+      now: () => createdAt,
+      eventId: () => "event-error",
+    });
+    const response = new FakeResponse();
+
+    await controller.stream(httpRequest(body), response);
+
+    expect(parseNdjson(response)).toEqual([event, completed]);
+    expect(response.writableEnded).toBe(true);
+  });
 
   it("converts provider failures into a typed terminal event", async function () {
     const gateway = {

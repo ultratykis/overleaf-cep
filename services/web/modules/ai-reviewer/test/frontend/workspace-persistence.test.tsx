@@ -90,6 +90,7 @@ function clearResolvedArtifacts(
       }))
       .filter(
         (run) =>
+          run.text.trim().length > 0 ||
           run.findings.length > 0 ||
           run.suggestions.length > 0 ||
           boundRequestIds.has(run.request.requestId),
@@ -100,6 +101,7 @@ function clearResolvedArtifacts(
 
 function dropUnboundEmptyRuns(
   workspace: AiReviewerWorkspace,
+  orphanedRequestIds: Set<string>,
 ): AiReviewerWorkspace {
   const boundRequestIds = new Set(
     workspace.discussions.flatMap((discussion) =>
@@ -111,6 +113,8 @@ function dropUnboundEmptyRuns(
   return {
     runs: workspace.runs.filter(
       (run) =>
+        !orphanedRequestIds.has(run.request.requestId) ||
+        run.text.trim().length > 0 ||
         run.findings.length > 0 ||
         run.suggestions.length > 0 ||
         boundRequestIds.has(run.request.requestId),
@@ -192,12 +196,22 @@ class MemoryWorkspacePersistence implements AiReviewerWorkspacePersistence {
   ): Promise<AiReviewerWorkspaceSnapshot> {
     await this.discussionDeleteGates.get(`${projectId}:${discussionId}`);
     const workspace = this.stores.get(projectId) ?? emptyWorkspace();
-    const next = dropUnboundEmptyRuns({
-      runs: workspace.runs,
-      discussions: workspace.discussions.filter(
-        (discussion) => discussion.id !== discussionId,
+    const orphanedRequestIds = new Set(
+      workspace.discussions.flatMap((discussion) =>
+        discussion.id !== discussionId || discussion.subject == null
+          ? []
+          : [discussion.subject.sourceRequest.requestId],
       ),
-    });
+    );
+    const next = dropUnboundEmptyRuns(
+      {
+        runs: workspace.runs,
+        discussions: workspace.discussions.filter(
+          (discussion) => discussion.id !== discussionId,
+        ),
+      },
+      orphanedRequestIds,
+    );
     this.stores.set(projectId, cloneWorkspace(next));
     const nextRevision = (this.revisions.get(projectId) ?? 0) + 1;
     this.revisions.set(projectId, nextRevision);
@@ -400,7 +414,7 @@ function panel(
       projectId={projectId}
       workspacePersistence={workspacePersistence}
       selectionPreview={{
-        fileType: "tex",
+        filename: "main.tex",
         fromLine: 1,
         toLine: 1,
         wordCount: 3,
@@ -496,6 +510,66 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(screen.getByText("Keep this answer.")).to.exist;
     expect(load.callCount).to.equal(2);
     expect(save.called).to.equal(false);
+  });
+
+  it("opens a discussion in place of the timeline and returns it intact", async function () {
+    const projectId = "discussion-navigation-project";
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: workspaceWithFinding({
+        projectId,
+        includeDiscussion: true,
+      }),
+    });
+
+    render(panel(projectId, persistence));
+    await screen.findByText("Persisted unresolved finding");
+    const summary = screen.getByRole("article", {
+      name: "Discussion summary",
+    });
+    fireEvent.click(
+      within(summary).getByRole("button", {
+        name: "Finding: Persisted unresolved finding",
+      }),
+    );
+
+    expect(screen.getByRole("article", { name: "AI reviewer discussion" })).to
+      .exist;
+    expect(document.querySelector(".ai-reviewer-panel-timeline")).to.equal(
+      null,
+    );
+    expect(screen.queryByLabelText("Review run 1")).not.to.exist;
+    expect(screen.queryByRole("article", { name: "Discussion summary" })).not.to
+      .exist;
+    const back = screen.getByRole("button", { name: "Back to review list" });
+    expect(back.closest(".ai-reviewer-panel-header")).not.to.equal(null);
+
+    fireEvent.click(back);
+
+    expect(document.querySelector(".ai-reviewer-panel-timeline")).not.to.equal(
+      null,
+    );
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    expect(screen.getByRole("article", { name: "Discussion summary" })).to
+      .exist;
+    expect(screen.queryByRole("button", { name: "Back to review list" })).not.to
+      .exist;
+    expect(persistence.read(projectId).discussions).to.have.length(1);
+  });
+
+  it("does not show a back control when no discussion is open", async function () {
+    const projectId = "discussion-navigation-list-project";
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: workspaceWithFinding({
+        projectId,
+        includeDiscussion: true,
+      }),
+    });
+
+    render(panel(projectId, persistence));
+    await screen.findByText("Persisted unresolved finding");
+
+    expect(screen.queryByRole("button", { name: "Back to review list" })).not.to
+      .exist;
   });
 
   it("persists, reloads, and deletes an open discussion", async function () {
@@ -781,7 +855,7 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(screen.getByText("Persisted unresolved finding")).to.exist;
   });
 
-  it("keeps a resolved artifact collapsed until the next load, then removes its empty run", async function () {
+  it("keeps review text on the next load after clearing its resolved artifact", async function () {
     const projectId = "resolved-project";
     const persistence = new MemoryWorkspacePersistence({
       [projectId]: workspaceWithFinding({ projectId }),
@@ -817,8 +891,16 @@ describe("AI reviewer: persisted review workspace", function () {
           .hasAttribute("disabled"),
       ).to.equal(false);
     });
-    expect(screen.queryByLabelText("Review run 1")).not.to.exist;
-    expect(persistence.read(projectId)).to.deep.equal(emptyWorkspace());
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    expect(persistence.read(projectId).runs).to.deep.equal([
+      {
+        ...workspaceWithFinding({ projectId }).runs[0],
+        findings: [],
+      },
+    ]);
+    expect(persistence.read(projectId).runs[0].text).to.equal(
+      "Stored review text",
+    );
   });
 
   it("deletes one discussion and then all saved review work", async function () {

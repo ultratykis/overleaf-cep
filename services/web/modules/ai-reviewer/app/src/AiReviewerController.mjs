@@ -45,30 +45,7 @@ const DEFAULT_FAILURE_CODES = Object.freeze({
   unknown: "AI_PROVIDER_ERROR",
 });
 
-/** @type {ReadonlyMap<string, FailureCategory>} */
-const SAFE_FAILURE_CODE_CATEGORIES = new Map([
-  ["AI_PROVIDER_SCHEMA_INVALID", "schema"],
-  ["AI_PROVIDER_NETWORK_FAILED", "network"],
-  ["AI_PROVIDER_RETRY_EXHAUSTED", "network"],
-  ["AI_PROVIDER_AUTHENTICATION_FAILED", "authentication"],
-  ["AI_PROVIDER_NOT_CONFIGURED", "configuration"],
-  ["AI_PROVIDER_CONFIGURATION_INVALID", "configuration"],
-  ["AI_PROVIDER_MODEL_NOT_SELECTED", "configuration"],
-  ["AI_OPENAI_COMPATIBLE_ENDPOINT_NOT_ALLOWED", "configuration"],
-  ["AI_OLLAMA_REQUEST_URL_NOT_ALLOWED", "configuration"],
-  ["AI_PROJECT_CONTENT_NOT_AVAILABLE", "configuration"],
-  ["AI_SDK_TELEMETRY_UNSAFE", "configuration"],
-  ["AI_PROVIDER_RATE_LIMITED", "rate-limit"],
-  ["AI_REVIEWER_USER_CONCURRENCY_LIMITED", "rate-limit"],
-  ["AI_REVIEWER_SYSTEM_CONCURRENCY_LIMITED", "rate-limit"],
-  ["AI_REQUEST_TIMEOUT", "timeout"],
-  ["AI_REQUEST_ABORTED", "aborted"],
-  ["AI_PROVIDER_FAILED", "provider"],
-  ["AI_PROVIDER_REQUEST_FAILED", "provider"],
-  ["AI_PROVIDER_FINISH_INVALID", "provider"],
-  ["AI_PROVIDER_COMPATIBILITY_FAILED", "provider"],
-  ["AI_PROVIDER_REDIRECT_REJECTED", "provider"],
-]);
+const INTERNAL_FAILURE_CODE_PATTERN = /^AI_[A-Z0-9_]{1,125}$/u;
 
 /** @type {Readonly<Record<AgentError["category"], AgentError>>} */
 const PUBLIC_ERRORS = Object.freeze({
@@ -264,9 +241,9 @@ function failureCategory(category) {
 }
 
 /**
- * Preserve only module-owned diagnostic codes whose category also matches.
- * Provider-supplied codes and messages are otherwise reduced to a fixed
- * classification.
+ * Internal failure codes distinguish operator-actionable failures even when
+ * their public category is deliberately broader. Free-form values still fall
+ * back because this record must never become a path for provider content.
  *
  * @param {FailureCategory} category
  * @param {unknown} error
@@ -281,8 +258,7 @@ function failureCode(category, error) {
   } catch {
     code = undefined;
   }
-  return typeof code === "string" &&
-    SAFE_FAILURE_CODE_CATEGORIES.get(code) === category
+  return typeof code === "string" && INTERNAL_FAILURE_CODE_PATTERN.test(code)
     ? code
     : DEFAULT_FAILURE_CODES[category];
 }

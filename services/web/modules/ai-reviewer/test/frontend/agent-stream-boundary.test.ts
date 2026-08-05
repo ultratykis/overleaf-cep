@@ -1052,6 +1052,34 @@ describe("AI reviewer: OT safety stream boundary", function () {
     expect(run.received).to.deep.equal([start]);
   });
 
+  it("delivers wider finding evidence when the first entry anchors the selection", async function () {
+    const finding = findingEvent({
+      findingOverrides: {
+        evidence: [
+          evidence(),
+          evidence({
+            path: "sections/support.tex",
+            range: { from: 0, to: 4 },
+            revision: 9,
+            textHash: otherTextHash,
+          }),
+        ],
+      },
+    });
+    const run = await runStream({
+      response: responseForEvents([startedEvent(), finding, completedEvent()])
+        .response,
+    });
+
+    await run.operation;
+
+    expect(run.received).to.deep.equal([
+      startedEvent(),
+      wireClone(finding),
+      completedEvent(),
+    ]);
+  });
+
   const eventBindingCases: Array<{
     title: string;
     event: () => Record<string, unknown>;
@@ -1272,48 +1300,6 @@ describe("AI reviewer: OT safety stream boundary", function () {
           },
         }),
     },
-    {
-      title: "read tool path",
-      event: () =>
-        toolCallEvent({
-          argumentOverrides: {
-            path: "other.tex",
-          },
-        }),
-    },
-    {
-      title: "read tool missing selection range",
-      event: () =>
-        toolCallEvent({
-          argumentOverrides: {
-            range: undefined,
-          },
-        }),
-    },
-    {
-      title: "read tool lower bound",
-      event: () =>
-        toolCallEvent({
-          argumentOverrides: {
-            range: {
-              from: 5,
-              to: 10,
-            },
-          },
-        }),
-    },
-    {
-      title: "read tool upper bound",
-      event: () =>
-        toolCallEvent({
-          argumentOverrides: {
-            range: {
-              from: 6,
-              to: 11,
-            },
-          },
-        }),
-    },
   ];
 
   for (const bindingCase of eventBindingCases) {
@@ -1335,6 +1321,48 @@ describe("AI reviewer: OT safety stream boundary", function () {
         retryable: false,
       });
       expect(run.received).to.deep.equal([startedEvent()]);
+    });
+  }
+
+  const widerReadCases = [
+    {
+      title: "another project file",
+      argumentOverrides: { path: "other.tex" },
+    },
+    {
+      title: "the whole selection document",
+      argumentOverrides: { range: undefined },
+    },
+    {
+      title: "before the selection",
+      argumentOverrides: { range: { from: 5, to: 10 } },
+    },
+    {
+      title: "after the selection",
+      argumentOverrides: { range: { from: 6, to: 11 } },
+    },
+  ];
+
+  for (const readCase of widerReadCases) {
+    it(`delivers a read tool call for ${readCase.title}`, async function () {
+      const readEvent = toolCallEvent({
+        argumentOverrides: readCase.argumentOverrides,
+      });
+      const run = await runStream({
+        response: responseForEvents([
+          startedEvent(),
+          readEvent,
+          completedEvent(),
+        ]).response,
+      });
+
+      await run.operation;
+
+      expect(run.received).to.deep.equal([
+        startedEvent(),
+        JSON.parse(JSON.stringify(readEvent)),
+        completedEvent(),
+      ]);
     });
   }
 

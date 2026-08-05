@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import type { EditorSelectionSessionContext } from "../services/editor-selection-session";
 
 export type EditorSelectionScopeDescriptor = Readonly<{
-  fileType: string;
+  filename: string;
   fromLine: number;
   toLine: number;
   wordCount: number;
@@ -29,13 +29,8 @@ export function countEditorSelectionWords(text: string) {
   return [...visibleText.matchAll(cjkOrWord)].length;
 }
 
-function fileTypeFromPath(path: string | null) {
-  const filename = path?.split("/").at(-1) ?? "";
-  const extensionStart = filename.lastIndexOf(".");
-  if (extensionStart > 0 && extensionStart < filename.length - 1) {
-    return filename.slice(extensionStart + 1).toLowerCase();
-  }
-  return filename || "text";
+function filenameFromPath(path: string | null) {
+  return path?.split("/").at(-1) || "text";
 }
 
 export function readEditorSelectionScopeDescriptor(
@@ -54,7 +49,7 @@ export function readEditorSelectionScopeDescriptor(
       : range.to;
   const selectedText = view.state.sliceDoc(range.from, range.to);
   return Object.freeze({
-    fileType: fileTypeFromPath(context.path),
+    filename: filenameFromPath(context.path),
     fromLine: document.lineAt(range.from).number,
     toLine: document.lineAt(inclusiveEnd).number,
     wordCount: countEditorSelectionWords(selectedText),

@@ -436,6 +436,63 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("keeps the Ollama grammar projection and strict finding declaration", async function () {
+    let requestBody;
+    const fetchImpl = vi.fn(async (_input, init) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ error: { message: "synthetic" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const transport = new OllamaOpenAiTransport({
+      baseUrl,
+      modelTag,
+      fetchImpl,
+    });
+    const gateway = transport.createAgentGateway({
+      contextLength: 8_192,
+      readProjectFile: vi.fn(),
+    });
+
+    await captureError(
+      collectStream(
+        gateway.stream({
+          requestId: "request-ollama-schema-0001",
+          projectId: "project-ollama-schema-0001",
+          action: "review",
+          instruction: "Review the synthetic project.",
+          skill: null,
+        }),
+      ),
+    );
+
+    const findingDeclaration = requestBody.tools.find(
+      (declaration) => declaration.function.name === "report_finding",
+    ).function;
+    expect(findingDeclaration.strict).toBe(true);
+    expect(findingDeclaration.parameters).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        category: { type: "string" },
+        evidence: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              path: { type: "string" },
+            },
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(findingDeclaration.parameters)).not.toMatch(
+      /"(?:maxItems|maxLength|maximum|minItems|minLength|minimum|pattern)":/u,
+    );
+  });
+
   it("creates the production gateway without exposing an SDK model getter", function () {
     const fixture = transportFixture();
     const readProjectFile = vi.fn();

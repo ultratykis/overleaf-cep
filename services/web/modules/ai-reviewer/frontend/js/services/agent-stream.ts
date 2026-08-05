@@ -225,26 +225,27 @@ function assertPathAndRangeWithinRequest(
   }
 }
 
-function assertEvidenceForRequest(
+function assertFindingEvidenceForRequest(
   request: AgentRequest,
   evidence: EvidenceReference[],
 ) {
-  for (const reference of evidence) {
-    assertPathAndRangeWithinRequest(request, reference);
-    const scope = request.scope;
-    if (
-      scope != null &&
-      scope.kind !== "project" &&
-      ((reference.revision != null &&
-        reference.revision !== scope.baseRevision) ||
-        (reference.textHash != null &&
-          reference.textHash !== scope.baseTextHash))
-    ) {
-      throw protocolError(
-        "AI_STREAM_EVENT_SCOPE_INVALID",
-        "The AI reviewer returned evidence for another document state.",
-      );
-    }
+  // Findings use their first evidence entry as the navigation anchor. Later
+  // entries support the criticism and may intentionally point elsewhere in
+  // the project after the server has verified them.
+  const reference = evidence[0];
+  assertPathAndRangeWithinRequest(request, reference);
+  const scope = request.scope;
+  if (
+    scope != null &&
+    scope.kind !== "project" &&
+    ((reference.revision != null &&
+      reference.revision !== scope.baseRevision) ||
+      (reference.textHash != null && reference.textHash !== scope.baseTextHash))
+  ) {
+    throw protocolError(
+      "AI_STREAM_EVENT_SCOPE_INVALID",
+      "The AI reviewer returned evidence for another document state.",
+    );
   }
 }
 
@@ -266,7 +267,7 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
         "The AI reviewer returned a finding for another project.",
       );
     }
-    assertEvidenceForRequest(request, event.finding.evidence);
+    assertFindingEvidenceForRequest(request, event.finding.evidence);
     return;
   }
 
@@ -300,12 +301,6 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
       );
     }
     return;
-  }
-
-  // Only the file read names a manuscript location; a Zotero query has none to
-  // check against the scope.
-  if (event.type === "tool.call" && event.call.name === "read_project_file") {
-    assertPathAndRangeWithinRequest(request, event.call.arguments);
   }
 }
 

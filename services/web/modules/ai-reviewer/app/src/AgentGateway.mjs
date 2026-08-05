@@ -11,7 +11,7 @@ import {
  *   AgentGateway as AgentGatewayContract,
  *   AgentRequest,
  *   EvidenceReference,
- *   ToolCall,
+ *   Suggestion,
  * } from '../../shared/contract-types'
  */
 
@@ -156,12 +156,9 @@ async function waitForCheckpoint(beforeEvent, context, signal) {
 
 /**
  * @param {AgentRequest} request
- * @param {AgentEvent} event
+ * @param {Suggestion} suggestion
  */
-function assertEventScope(request, event) {
-  if (event.type !== "suggestion") {
-    return;
-  }
+export function assertSuggestionForRequest(request, suggestion) {
   // An edit is only checkable against the document state the request carried,
   // so a request without one cannot produce an applicable suggestion.
   if (request.scope == null) {
@@ -186,7 +183,6 @@ function assertEventScope(request, event) {
   }
 
   const { scope } = request;
-  const { suggestion } = event;
   const identityMatches =
     suggestion.documentId === scope.documentId &&
     suggestion.path === scope.path &&
@@ -254,50 +250,53 @@ function assertPathAndRangeWithinRequest(request, reference, failure) {
 
 /**
  * @param {AgentRequest} request
- * @param {EvidenceReference[]} evidence
+ * @param {EvidenceReference} reference
  */
-export function assertEvidenceForRequest(request, evidence) {
-  for (const reference of evidence) {
-    assertPathAndRangeWithinRequest(request, reference, {
-      code: "AI_EVENT_EVIDENCE_SCOPE_MISMATCH",
-      message: "The provider evidence is outside the requested document state.",
-      requireSelectionRange: true,
-    });
-    if (
-      request.scope != null &&
-      request.scope.kind !== "project" &&
-      ((reference.revision != null &&
-        reference.revision !== request.scope.baseRevision) ||
-        (reference.textHash != null &&
-          reference.textHash !== request.scope.baseTextHash))
-    ) {
-      throw new AgentGatewayError(
-        "The provider evidence does not match the requested document state.",
-        {
-          code: "AI_EVENT_EVIDENCE_SCOPE_MISMATCH",
-          category: "schema",
-          retryable: false,
-        },
-      );
-    }
+function assertEvidenceReferenceForRequest(request, reference) {
+  assertPathAndRangeWithinRequest(request, reference, {
+    code: "AI_EVENT_EVIDENCE_SCOPE_MISMATCH",
+    message: "The provider evidence is outside the requested document state.",
+    requireSelectionRange: true,
+  });
+  if (
+    request.scope != null &&
+    request.scope.kind !== "project" &&
+    ((reference.revision != null &&
+      reference.revision !== request.scope.baseRevision) ||
+      (reference.textHash != null &&
+        reference.textHash !== request.scope.baseTextHash))
+  ) {
+    throw new AgentGatewayError(
+      "The provider evidence does not match the requested document state.",
+      {
+        code: "AI_EVENT_EVIDENCE_SCOPE_MISMATCH",
+        category: "schema",
+        retryable: false,
+      },
+    );
   }
 }
 
 /**
  * @param {AgentRequest} request
- * @param {ToolCall} call
+ * @param {EvidenceReference[]} evidence
  */
-export function assertToolCallForRequest(request, call) {
-  // A Zotero query names no manuscript position, so only the project read is
-  // bound to the active scope.
-  if (call.name !== "read_project_file") {
-    return;
+export function assertFindingEvidenceForRequest(request, evidence) {
+  // The legacy finding shape has no separate target, and its first evidence
+  // entry already owns navigation and migration anchoring. Keeping that entry
+  // scoped preserves what the finding is about without treating later support
+  // as another edit target.
+  assertEvidenceReferenceForRequest(request, evidence[0]);
+}
+
+/**
+ * @param {AgentRequest} request
+ * @param {EvidenceReference[]} evidence
+ */
+export function assertSuggestionEvidenceForRequest(request, evidence) {
+  for (const reference of evidence) {
+    assertEvidenceReferenceForRequest(request, reference);
   }
-  assertPathAndRangeWithinRequest(request, call.arguments, {
-    code: "AI_TOOL_SCOPE_MISMATCH",
-    message: "The read tool requested data outside the active scope.",
-    requireSelectionRange: true,
-  });
 }
 
 /**
@@ -355,14 +354,14 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
   }
 
   if (event.type === "finding") {
-    assertEvidenceForRequest(request, event.finding.evidence);
+    assertFindingEvidenceForRequest(request, event.finding.evidence);
   } else if (event.type === "suggestion") {
-    assertEvidenceForRequest(request, event.suggestion.evidence);
-  } else if (event.type === "tool.call") {
-    assertToolCallForRequest(request, event.call);
+    assertSuggestionEvidenceForRequest(request, event.suggestion.evidence);
   }
 
-  assertEventScope(request, event);
+  if (event.type === "suggestion") {
+    assertSuggestionForRequest(request, event.suggestion);
+  }
   if (event.sequence !== expectedSequence) {
     throw new AgentGatewayError(
       "The provider event sequence is not contiguous.",

@@ -36,7 +36,7 @@ const baseTextHash =
   "aea23d46109af9b94c5f15085d69113cc2cefa85f05748897a4df172a1ee5104";
 const selectedText = "beta";
 const selectionPreview = {
-  fileType: "tex",
+  filename: "main.tex",
   fromLine: 1,
   toLine: 1,
   wordCount: 1,

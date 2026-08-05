@@ -1,3 +1,4 @@
+import logger from "@overleaf/logger";
 import { describe, expect, it, vi } from "vitest";
 import { simulateReadableStream } from "ai";
 // The SDK publishes this test entrypoint, but the repository resolver does not
@@ -6,6 +7,7 @@ import { simulateReadableStream } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
+import { AI_REVIEWER_COMPLETION_LOG_MESSAGE } from "../../../app/src/AiReviewerFailureLogger.mjs";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
 
@@ -157,6 +159,40 @@ async function captureError(promise) {
 }
 
 describe("AI reviewer: AI SDK v6 adapter", function () {
+  it("records that the finding tool was offered even when the model made no tool call", async function () {
+    const { model } = strictStreamModel([
+      streamResult([
+        { type: "text-start", id: "text-no-finding-0001" },
+        {
+          type: "text-delta",
+          id: "text-no-finding-0001",
+          delta: "No structured finding was reported.",
+        },
+        { type: "text-end", id: "text-no-finding-0001" },
+        finish("stop"),
+      ]),
+    ]);
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+    try {
+      await collect(createGateway(model).stream(request()));
+
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        {
+          requestId: "request-sdk-0001",
+          provider: "fixture-provider",
+          model: "fixture-model",
+          scopeKind: "project",
+          findingToolOffered: true,
+          toolCallCount: 0,
+          pendingValidatedArtifactCount: 0,
+        },
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("emits a structured subject from the same review run", async function () {
     const subjectStep = streamResult([
       {
@@ -268,7 +304,13 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       "You are reviewing an academic manuscript as a referee.",
     );
     expect(model.doStreamCalls[0].prompt[0].content).toContain(
-      "Every finding must include at least one project-file evidence reference",
+      "copy the exact cited project-file passage into evidence.excerpt",
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).not.toContain(
+      "otherwise report no finding",
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).not.toContain(
+      "count offsets",
     );
     expect(model.doStreamCalls[0].prompt[0].content).toContain(
       'artifactKind "citation-finding"',

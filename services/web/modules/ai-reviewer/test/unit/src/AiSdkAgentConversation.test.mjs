@@ -3,6 +3,8 @@ import { simulateReadableStream } from "ai";
 // currently resolve package export subpaths.
 // eslint-disable-next-line import/no-unresolved
 import { MockLanguageModelV3 } from "ai/test";
+import logger from "@overleaf/logger";
+import Settings from "@overleaf/settings";
 import { describe, expect, it, vi } from "vitest";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
@@ -38,6 +40,26 @@ function documentRequest(overrides = {}) {
     ],
     ...overrides,
   };
+}
+
+function selectionTransformRequest(action) {
+  return documentRequest({
+    action,
+    instruction:
+      action === "shorten"
+        ? "Shorten the selected phrase."
+        : "Rewrite the selected phrase.",
+    scope: {
+      kind: "selection",
+      documentId: "document-conversation-0001",
+      path: "main.tex",
+      baseRevision: 7,
+      baseTextHash: contentHash,
+      range: { from: 23, to: 45 },
+      text: documentText.slice(23, 45),
+    },
+    turns: undefined,
+  });
 }
 
 function projectRequest(overrides = {}) {
@@ -396,6 +418,92 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     ]);
   });
 
+  it.each([
+    {
+      action: "rewrite",
+      replacement: "The result needs a clearer explanation.",
+    },
+    {
+      action: "shorten",
+      replacement: "Result unclear.",
+    },
+  ])(
+    "turns a minimal $action result into a server-bound suggestion",
+    async function ({ action, replacement }) {
+      const request = selectionTransformRequest(action);
+      const { model, consumed } = strictStreamModel([
+        toolStep([
+          toolChunk("propose_suggestion", {
+            replacement,
+            rationale: "Keep the edit focused on the selected sentence.",
+          }),
+        ]),
+      ]);
+
+      const events = await collect(createGateway(model).stream(request));
+
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "suggestion",
+        "completed",
+      ]);
+      expect(events[1].suggestion).toMatchObject({
+        requestId: request.requestId,
+        projectId: request.projectId,
+        documentId: request.scope.documentId,
+        path: request.scope.path,
+        baseRevision: request.scope.baseRevision,
+        baseTextHash: request.scope.baseTextHash,
+        range: request.scope.range,
+        original: request.scope.text,
+        replacement,
+        rationale: "Keep the edit focused on the selected sentence.",
+        evidence: [
+          {
+            path: request.scope.path,
+            range: request.scope.range,
+            revision: request.scope.baseRevision,
+            textHash: request.scope.baseTextHash,
+          },
+        ],
+        skill: "line-edit",
+        status: "unresolved",
+      });
+      expect(consumed()).toBe(1);
+      expect(model.doStreamCalls[0].toolChoice).toEqual({
+        type: "tool",
+        toolName: "propose_suggestion",
+      });
+      expect(
+        model.doStreamCalls[0].tools.map((declared) => declared.name),
+      ).toEqual(["propose_suggestion"]);
+      expect(sentSystemInstruction(model)).toContain(
+        "Call propose_suggestion exactly once",
+      );
+      expect(sentSystemInstruction(model)).not.toContain(
+        "Call report_subject exactly once",
+      );
+    },
+  );
+
+  it("rejects a selection transform that returns prose without a replacement artifact", async function () {
+    const { model } = strictStreamModel([
+      textStep("The result is now shorter."),
+    ]);
+
+    expect(
+      await captureError(
+        collect(
+          createGateway(model).stream(selectionTransformRequest("shorten")),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_TRANSFORM_RESULT_MISSING",
+      category: "schema",
+      retryable: false,
+    });
+  });
+
   it("interleaves free text and structured findings in one stream", async function () {
     const { model } = strictStreamModel([
       toolStep([
@@ -451,6 +559,79 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     expect(events[4]).toMatchObject({
       finding: { title: "Repeated wording" },
     });
+  });
+
+  it("records a private-safe validation reason and completes after a corrected tool call", async function () {
+    const manuscript = "PRIVATE_MALFORMED_FINDING_MANUSCRIPT_SENTINEL";
+    const invalidFinding = {
+      ...findingDraft({ message: manuscript }),
+      [manuscript]: true,
+    };
+    const { model, consumed } = strictStreamModel([
+      toolStep([
+        toolChunk("report_finding", invalidFinding, "invalid-finding-call"),
+      ]),
+      toolStep([
+        toolChunk("report_finding", findingDraft(), "valid-finding-call"),
+      ]),
+      textStep("Corrected."),
+    ]);
+    const previousDebugSetting = Settings.aiReviewer?.debugProviderErrors;
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      Settings.aiReviewer.debugProviderErrors = true;
+
+      const events = await collect(
+        createGateway(model).stream(documentRequest()),
+      );
+
+      expect(events.map((event) => event.type)).toEqual([
+        "started",
+        "finding",
+        "text.delta",
+        "completed",
+      ]);
+      expect(consumed()).toBe(3);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        {
+          provider: "fixture-provider",
+          model: "fixture-model",
+          toolName: "report_finding",
+          detail: expect.stringContaining("unrecognized_keys"),
+        },
+        "AI reviewer provider diagnostic",
+      );
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(manuscript);
+      expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+        "Invalid input for tool report_finding",
+      );
+    } finally {
+      Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
+      warn.mockRestore();
+    }
+  });
+
+  it("fails clearly when an invalid artifact call is never corrected", async function () {
+    const { model, consumed } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({ severity: "not-a-severity" }),
+        ),
+      ]),
+      textStep("I could not correct the finding."),
+    ]);
+
+    expect(
+      await captureError(
+        collect(createGateway(model).stream(documentRequest())),
+      ),
+    ).toMatchObject({
+      code: "AI_TOOL_INPUT_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+    expect(consumed()).toBe(2);
   });
 
   it("announces a tool by name and target without its arguments or result", async function () {
@@ -602,7 +783,128 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     });
   });
 
-  it("runs the project evidence callback for a reported finding", async function () {
+  it("resolves a whitespace-normalized excerpt to its captured project range", async function () {
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      range: { from: 10, to: 32 },
+      revision: 7,
+      textHash: contentHash,
+      text: firstSentence,
+    }));
+    const validateEvidence = vi.fn();
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk("read_project_file", {
+          path: "main.tex",
+          range: { from: 10, to: 32 },
+        }),
+      ]),
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [
+              {
+                path: "main.tex",
+                excerpt: "method  \n is unclear.",
+              },
+            ],
+          }),
+        ),
+      ]),
+      textStep("Reported."),
+    ]);
+    const gateway = createGateway(model, {
+      readProjectFile,
+      validateEvidence,
+    });
+
+    const events = await collect(gateway.stream(projectRequest()));
+    const { finding } = events.find((event) => event.type === "finding");
+
+    expect(finding.evidence).toEqual([
+      {
+        path: "main.tex",
+        range: { from: 14, to: 32 },
+        revision: 7,
+        textHash: contentHash,
+      },
+    ]);
+    expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(finding.evidence, {
+      request: projectRequest(),
+      signal: undefined,
+    });
+  });
+
+  it("rejects an excerpt absent from the captured scope with a specific reason", async function () {
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [
+              { path: "main.tex", excerpt: "A passage that is not present." },
+            ],
+          }),
+        ),
+      ]),
+      textStep("I could not correct the evidence."),
+    ]);
+
+    expect(
+      await captureError(
+        collect(createGateway(model).stream(documentRequest())),
+      ),
+    ).toMatchObject({
+      code: "AI_EVIDENCE_EXCERPT_NOT_FOUND",
+      category: "schema",
+      retryable: false,
+      message:
+        "The quoted evidence excerpt was not found in the captured scope text.",
+    });
+  });
+
+  it("rejects an excerpt that identifies more than one captured range", async function () {
+    const repeatedText = "Repeated point. Repeated point.";
+    const { model } = strictStreamModel([
+      toolStep([
+        toolChunk(
+          "report_finding",
+          findingDraft({
+            evidence: [{ path: "main.tex", excerpt: "Repeated point." }],
+          }),
+        ),
+      ]),
+      textStep("I could not disambiguate the evidence."),
+    ]);
+
+    expect(
+      await captureError(
+        collect(
+          createGateway(model).stream(
+            documentRequest({
+              scope: {
+                kind: "document",
+                documentId: "document-conversation-0001",
+                path: "main.tex",
+                baseRevision: 7,
+                baseTextHash: contentHash,
+                text: repeatedText,
+              },
+            }),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_EVIDENCE_EXCERPT_AMBIGUOUS",
+      category: "schema",
+      retryable: false,
+      message:
+        "The quoted evidence excerpt matches more than one location in the captured scope text.",
+    });
+  });
+
+  it("keeps accepting explicit evidence offsets", async function () {
     const validateEvidence = vi.fn();
     const { model } = strictStreamModel([
       toolStep([toolChunk("report_finding", findingDraft())]),
@@ -611,8 +913,10 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     const gateway = createGateway(model, { validateEvidence });
     const request = documentRequest();
 
-    await collect(gateway.stream(request));
+    const events = await collect(gateway.stream(request));
+    const { finding } = events.find((event) => event.type === "finding");
 
+    expect(finding.evidence).toEqual(findingDraft().evidence);
     expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(
       findingDraft().evidence,
       { request, signal: undefined },

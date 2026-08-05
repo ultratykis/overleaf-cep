@@ -127,8 +127,8 @@ export function createRequestScopeReader({
         });
       }
       const identity = requestIdentity(request);
-      // A document conversation reaches the same library a project review
-      // reaches; only the manuscript reads stay bound to the named document.
+      // A scoped review reaches the same library as a project review; its
+      // narrower boundary governs reported artifacts rather than research.
       const zoteroLinked =
         typeof searchZoteroItems === "function" &&
         typeof isZoteroLinked === "function" &&
@@ -138,13 +138,14 @@ export function createRequestScopeReader({
         typeof searchZoteroItems === "function" && zoteroLinked
           ? (input, { signal }) => searchZoteroItems(userId, input, { signal })
           : undefined;
-      const lower = scope.kind === "selection" ? scope.range.from : 0;
-      const upper =
-        scope.kind === "selection" ? scope.range.to : scope.text.length;
-      let modelInputCharacters = JSON.stringify(request).length;
-      if (modelInputCharacters > maxModelInputCharacters) {
+      if (JSON.stringify(request).length > maxModelInputCharacters) {
         throw rejected();
       }
+      const projectReadRequest = Object.freeze({
+        ...request,
+        scope: Object.freeze({ kind: "project" }),
+      });
+      let snapshotPromise;
 
       /**
        * @param {any} input
@@ -156,29 +157,28 @@ export function createRequestScopeReader({
             ? signal.reason
             : new AgentGatewayAbortError();
         }
-        const range = input?.range;
         if (
           requestIdentity(active) !== identity ||
-          input?.path !== scope.path ||
-          !Number.isSafeInteger(range?.from) ||
-          !Number.isSafeInteger(range?.to) ||
-          range.from < lower ||
-          range.to > upper ||
-          range.to < range.from
+          typeof loadProjectDocuments !== "function"
         ) {
           throw rejected();
         }
-        const result = Object.freeze({
-          path: scope.path,
-          range: Object.freeze({ from: range.from, to: range.to }),
-          text: scope.text.slice(range.from - lower, range.to - lower),
+        // The original scope remains the reporting authority. A project-shaped
+        // snapshot gives reads the project review's path, size, and budget
+        // protections without widening where artifacts may point.
+        snapshotPromise ??= Promise.resolve(
+          loadProjectDocuments(request.projectId, { signal }),
+        ).then((documents) =>
+          createProjectSnapshot(request.projectId, documents, {
+            contextLength,
+            request: projectReadRequest,
+          }),
+        );
+        const snapshot = await snapshotPromise;
+        return await snapshot.readProjectFile(input, {
+          request: projectReadRequest,
+          signal,
         });
-        const resultCharacters = JSON.stringify(result).length;
-        if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
-          throw rejected();
-        }
-        modelInputCharacters += resultCharacters;
-        return result;
       }
 
       return Object.freeze({

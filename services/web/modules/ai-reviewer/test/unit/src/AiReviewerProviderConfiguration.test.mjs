@@ -1923,7 +1923,7 @@ describe("AI reviewer provider configuration", function () {
     },
   );
 
-  it("uses the just-saved configuration for the next bounded selection stream", async function () {
+  it("uses the just-saved configuration for selection reads across the project", async function () {
     const { modelDependency, records } = inMemoryModel();
     const configStore = createAiReviewerProviderConfigStore({
       model: modelDependency,
@@ -1934,7 +1934,11 @@ describe("AI reviewer provider configuration", function () {
         async *stream(agentRequest, { signal }) {
           reads.push(
             await readProjectFile(
-              { path: "main.tex", range: { from: 5, to: 14 } },
+              { path: "main.tex", range: { from: 0, to: 4 } },
+              { request: agentRequest, signal },
+            ),
+            await readProjectFile(
+              { path: "other.tex" },
               { request: agentRequest, signal },
             ),
           );
@@ -1946,23 +1950,26 @@ describe("AI reviewer provider configuration", function () {
     const providerService = withModelListing(
       createOllamaProviderService({ transportFactory }),
     );
-    const requestScopeReader = createRequestScopeReader();
+    const loadProjectDocuments = vi.fn(async () => ({
+      "/main.tex": {
+        _id: "document-provider-0001",
+        version: 9,
+        lines: ["Full Synthetic document."],
+      },
+      "/other.tex": {
+        _id: "document-provider-0002",
+        version: 3,
+        lines: ["Appendix"],
+      },
+    }));
+    const requestScopeReader = createRequestScopeReader({
+      loadProjectDocuments,
+    });
     const boundedContext = await requestScopeReader.read(
       httpRequest({ body: selectionRequest() }),
       { contextLength },
     );
     expect(JSON.stringify(boundedContext)).not.toContain("Synthetic");
-    expect(
-      await captureError(
-        boundedContext.readProjectFile(
-          { path: "main.tex", range: { from: 5, to: 15 } },
-          {
-            request: selectionRequest(),
-            signal: new AbortController().signal,
-          },
-        ),
-      ),
-    ).toBeInstanceOf(AgentGatewayError);
     const providerController = createAiReviewerProviderController({
       configStore,
       providerService,
@@ -1998,8 +2005,17 @@ describe("AI reviewer provider configuration", function () {
     expect(reads).toEqual([
       {
         path: "main.tex",
-        range: { from: 5, to: 14 },
-        text: "Synthetic",
+        range: { from: 0, to: 4 },
+        revision: 9,
+        textHash: expect.any(String),
+        text: "Full",
+      },
+      {
+        path: "other.tex",
+        range: { from: 0, to: 8 },
+        revision: 3,
+        textHash: expect.any(String),
+        text: "Appendix",
       },
     ]);
     expect(parseNdjson(response)).toEqual(streamEvents());

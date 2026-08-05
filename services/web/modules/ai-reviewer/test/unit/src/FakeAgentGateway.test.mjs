@@ -425,19 +425,16 @@ describe("AI reviewer: deterministic fake gateway", function () {
     ["missing selection range", { path: "main.tex" }],
     ["range", { path: "main.tex", range: { from: 3, to: 8 } }],
   ])(
-    "rejects an out-of-scope tool call %s",
+    "allows a selection tool read with a wider %s",
     async function (_name, arguments_) {
       const gateway = new ScriptedFakeAgentGateway({
         events: [startedEvent("line-edit"), toolCallEvent(arguments_)],
       });
-      const caught = await captureError(
-        collect(gateway.stream(selectionRequest())),
-      );
+      const emitted = await collect(gateway.stream(selectionRequest()));
 
-      expect(caught).toMatchObject({
-        code: "AI_TOOL_SCOPE_MISMATCH",
-        category: "schema",
-        retryable: false,
+      expect(emitted.at(-1)).toMatchObject({
+        type: "tool.call",
+        call: { name: "read_project_file", arguments: arguments_ },
       });
     },
   );

@@ -51,6 +51,26 @@ function generateResult(overrides = {}) {
   };
 }
 
+function geminiStreamResponse({ parts, finishReason = "STOP" }) {
+  const chunk = {
+    candidates: [
+      {
+        content: { role: "model", parts },
+        finishReason,
+      },
+    ],
+    usageMetadata: {
+      promptTokenCount: 12,
+      candidatesTokenCount: 3,
+      totalTokenCount: 15,
+    },
+  };
+  return new Response(`data: ${JSON.stringify(chunk)}\n\n`, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 function nativeTransportFixture({ Transport, model: modelId, fetchImpl } = {}) {
   const model = {
     specificationVersion: "v3",
@@ -107,6 +127,135 @@ function agentGateway(transport, options = {}) {
 }
 
 describe("AI reviewer: native AI SDK provider transports", function () {
+  it("lets the Google SDK produce the Gemini finding declaration without strict mode", async function () {
+    let requestBody;
+    const fetchImpl = vi.fn(async (_input, init) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: 400,
+            message: "Synthetic rejection after request capture.",
+            status: "INVALID_ARGUMENT",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    });
+    const transport = new GeminiAiSdkTransport({
+      credential,
+      modelTag: "gemini-3.5-flash",
+      fetchImpl,
+    });
+    const gateway = agentGateway(transport);
+
+    await captureError(collect(gateway.stream(conversationRequest())));
+
+    const declarations = requestBody.tools[0].functionDeclarations;
+    for (const declaration of declarations) {
+      expect(declaration.parameters).toMatchObject({ type: "object" });
+    }
+    const findingParameters = declarations.find(
+      (declaration) => declaration.name === "report_finding",
+    ).parameters;
+    expect(findingParameters).toMatchObject({
+      type: "object",
+      properties: {
+        artifactKind: {
+          type: "string",
+          enum: ["finding", "citation-finding"],
+        },
+        category: { type: "string", minLength: 1 },
+        title: { type: "string", minLength: 1 },
+        message: { type: "string", minLength: 1 },
+        evidence: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", minLength: 1 },
+              excerpt: { type: "string", minLength: 1 },
+            },
+          },
+        },
+        proposedText: { type: "string", minLength: 1 },
+      },
+    });
+    expect(findingParameters).not.toHaveProperty("anyOf");
+    expect(findingParameters.required).not.toContain("proposedText");
+    expect(JSON.stringify(declarations)).not.toMatch(
+      /"(?:additionalProperties|maxItems|maxLength|maximum|minItems|minimum|pattern)":/u,
+    );
+    expect(requestBody.toolConfig).toEqual({
+      functionCallingConfig: { mode: "AUTO" },
+    });
+    expect(requestBody.systemInstruction).toMatchObject({
+      parts: [expect.objectContaining({ text: expect.any(String) })],
+    });
+    expect(requestBody.contents[0]).toMatchObject({ role: "user" });
+  });
+
+  it("returns provider metadata to Gemini for the next tool step", async function () {
+    const thoughtSignature = "PRIVATE_GEMINI_THOUGHT_SIGNATURE";
+    const requestBodies = [];
+    const fetchImpl = vi.fn(async (_input, init) => {
+      requestBodies.push(JSON.parse(init.body));
+      return requestBodies.length === 1
+        ? geminiStreamResponse({
+            parts: [
+              {
+                functionCall: {
+                  name: "read_project_file",
+                  args: { path: "main.tex" },
+                },
+                thoughtSignature,
+              },
+            ],
+          })
+        : geminiStreamResponse({ parts: [{ text: "Reviewed." }] });
+    });
+    const transport = new GeminiAiSdkTransport({
+      credential,
+      modelTag: "gemini-3.5-flash",
+      fetchImpl,
+    });
+    const gateway = agentGateway(transport);
+
+    const events = await collect(gateway.stream(conversationRequest()));
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(requestBodies[1].contents).toEqual([
+      expect.objectContaining({ role: "user" }),
+      {
+        role: "model",
+        parts: [
+          {
+            functionCall: {
+              name: "read_project_file",
+              args: { path: "main.tex" },
+            },
+            thoughtSignature,
+          },
+        ],
+      },
+      {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              name: "read_project_file",
+              response: {
+                name: "read_project_file",
+                content: { path: "main.tex", text: "Synthetic." },
+              },
+            },
+          },
+        ],
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(thoughtSignature);
+  });
+
   it.each(providers)(
     "constructs the real $name package without making a request",
     function ({ name, model: modelId, Transport }) {

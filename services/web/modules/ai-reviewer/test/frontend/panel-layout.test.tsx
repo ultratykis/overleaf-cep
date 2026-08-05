@@ -274,7 +274,7 @@ function renderReviewPanel(
   return renderPanel({
     captureSelectionSession: selectionCapture(),
     selectionPreview: {
-      fileType: "tex",
+      filename: "main.tex",
       fromLine: 1,
       toLine: 1,
       wordCount: 1,
@@ -317,15 +317,15 @@ describe("AI reviewer: panel layout", function () {
     const { container, rerender } = renderPanel({
       captureSelectionSession: sinon.stub(),
       selectionPreview: {
-        fileType: "tex",
+        filename: "main.tex",
         fromLine: 1,
-        toLine: 1,
-        wordCount: 3,
+        toLine: 117,
+        wordCount: 800,
       },
     });
 
     const transforms = screen.getByTestId("ai-reviewer-selection-transforms");
-    expect(within(transforms).getByText("tex: Line 1–Line 1 (3 words)")).to
+    expect(within(transforms).getByText("main.tex L1–117 (800 words)")).to
       .exist;
     expect(screen.getByRole("button", { name: "Rewrite selection" })).to.exist;
     expect(screen.getByRole("button", { name: "Shorten selection" })).to.exist;

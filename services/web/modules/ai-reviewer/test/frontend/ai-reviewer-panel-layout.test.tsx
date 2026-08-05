@@ -63,12 +63,15 @@ const failureLayoutSelectors = [
   ".ai-reviewer-panel-notice",
 ];
 const discussionLayoutSelectors = [
+  ".ai-reviewer-panel-header",
+  ".ai-reviewer-panel-body",
   ".ai-reviewer-discussion-thread",
   ".ai-reviewer-discussion-header",
   ".ai-reviewer-discussion-header-actions",
   ".ai-reviewer-discussion-turns",
   ".ai-reviewer-discussion-quote",
   ".ai-reviewer-panel-footer",
+  ".ai-reviewer-panel-mode-row",
   ".ai-reviewer-panel-composer",
   ".ai-reviewer-panel .btn",
 ];
@@ -474,9 +477,7 @@ describe("AI reviewer panel width", function () {
       "var(--bg-tertiary-themed)",
     );
 
-    const composer = declarationsFor(
-      ".ai-reviewer-panel-composer textarea",
-    );
+    const composer = declarationsFor(".ai-reviewer-panel-composer textarea");
     expect(composer.get("color")).to.equal("var(--content-primary-themed)");
     expect(composer.get("background")).to.equal("var(--bg-primary-themed)");
   });
@@ -535,7 +536,7 @@ describe("AI reviewer panel width", function () {
               throw new Error("The width test does not start a review.");
             }}
             selectionPreview={{
-              fileType: "tex",
+              filename: "main.tex",
               fromLine: 1,
               toLine: 32,
               wordCount: 1200,
@@ -602,7 +603,7 @@ describe("AI reviewer panel width", function () {
               },
             })}
             selectionPreview={{
-              fileType: "tex",
+              filename: "main.tex",
               fromLine: 1,
               toLine: 1,
               wordCount: 1,

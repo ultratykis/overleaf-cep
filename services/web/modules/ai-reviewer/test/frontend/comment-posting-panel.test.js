@@ -249,7 +249,7 @@ async function renderCompletedPanel({
       createRequestId: () => requestId,
       captureSelectionSession,
       selectionPreview: {
-        fileType: "tex",
+        filename: "main.tex",
         fromLine: 1,
         toLine: 1,
         wordCount: 3,

@@ -211,8 +211,12 @@ function storedSnapshot(record, scopeId, userId, projectId) {
 
 /**
  * @param {import("../../shared/contract-types").AiReviewerWorkspace} workspace
+ * @param {Set<string>} orphanedRequestIds
  */
-function dropEmptyUnboundRuns(workspace) {
+function dropEmptyRunsOrphanedByDeletedDiscussion(
+  workspace,
+  orphanedRequestIds,
+) {
   const boundRequestIds = new Set(
     workspace.discussions.flatMap((discussion) =>
       discussion.subject == null
@@ -222,6 +226,8 @@ function dropEmptyUnboundRuns(workspace) {
   );
   const runs = workspace.runs.filter(
     (run) =>
+      !orphanedRequestIds.has(run.request.requestId) ||
+      run.text.trim().length > 0 ||
       run.findings.length > 0 ||
       run.suggestions.length > 0 ||
       boundRequestIds.has(run.request.requestId),
@@ -271,7 +277,12 @@ export function clearResolvedWorkspace(workspace) {
       findings.length !== run.findings.length ||
       suggestions.length !== run.suggestions.length;
     const hasDiscussion = boundRequestIds.has(run.request.requestId);
-    if (findings.length === 0 && suggestions.length === 0 && !hasDiscussion) {
+    if (
+      run.text.trim().length === 0 &&
+      findings.length === 0 &&
+      suggestions.length === 0 &&
+      !hasDiscussion
+    ) {
       changed = true;
       continue;
     }
@@ -439,10 +450,22 @@ export function createAiReviewerWorkspaceStore({
         if (discussions.length === snapshot.workspace.discussions.length) {
           return snapshot;
         }
-        const withoutDiscussion = dropEmptyUnboundRuns({
-          ...snapshot.workspace,
-          discussions,
-        });
+        // Only runs bound to the removed discussion became orphaned here.
+        // Other empty runs remain eligible for the deliberate load-time sweep.
+        const orphanedRequestIds = new Set(
+          snapshot.workspace.discussions.flatMap((discussion) =>
+            discussion.id !== discussionId || discussion.subject == null
+              ? []
+              : [discussion.subject.sourceRequest.requestId],
+          ),
+        );
+        const withoutDiscussion = dropEmptyRunsOrphanedByDeletedDiscussion(
+          {
+            ...snapshot.workspace,
+            discussions,
+          },
+          orphanedRequestIds,
+        );
         const validated = parseWorkspace(withoutDiscussion, projectId);
         const persisted = await persist(userId, projectId, validated, {
           upsert: false,

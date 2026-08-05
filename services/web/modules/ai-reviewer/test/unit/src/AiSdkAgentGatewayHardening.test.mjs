@@ -184,6 +184,25 @@ function validSuggestion(overrides = {}) {
   };
 }
 
+function validFinding(overrides = {}) {
+  return {
+    artifactKind: "finding",
+    severity: "warning",
+    category: "clarity",
+    title: "Synthetic finding",
+    message: "Synthetic finding detail.",
+    evidence: [
+      {
+        path: "main.tex",
+        range: { from: 10, to: 14 },
+        revision: 7,
+        textHash: contentHash,
+      },
+    ],
+    ...overrides,
+  };
+}
+
 function validOutput(overrides = {}) {
   return {
     narrative: "Synthetic structured review.",
@@ -820,25 +839,80 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         range: { from: 0, to: 5 },
       },
     },
-  ])(
-    "rejects an out-of-scope $label read",
-    async function ({ request, toolInput }) {
-      const { model, consumed } = strictStreamModel([toolStep(toolInput)]);
-      const readProjectFile = vi.fn();
-      const gateway = createGateway(model, { readProjectFile });
+  ])("allows a wider $label read", async function ({ request, toolInput }) {
+    const { model, consumed } = strictStreamModel([
+      toolStep(toolInput),
+      outputStep(validOutput()),
+    ]);
+    const readProjectFile = vi.fn(async () => {
+      const range = toolInput.range ?? { from: 0, to: 20 };
+      return {
+        path: toolInput.path,
+        range,
+        text: "x".repeat(range.to - range.from),
+      };
+    });
+    const gateway = createGateway(model, { readProjectFile });
 
-      expect(
-        await captureError(collect(gateway.stream(request))),
-      ).toMatchObject({
-        code: "AI_TOOL_SCOPE_MISMATCH",
-        category: "schema",
-        retryable: false,
-      });
-      expect(readProjectFile).not.toHaveBeenCalled();
-      expect(consumed()).toBe(1);
-      expect(model.doStreamCalls).toHaveLength(1);
-    },
-  );
+    const events = await collect(gateway.stream(request));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
+    expect(readProjectFile).toHaveBeenCalledExactlyOnceWith(toolInput, {
+      request,
+      signal: undefined,
+    });
+    expect(consumed()).toBe(2);
+  });
+
+  it("lets a selection review read its whole document and another project file", async function () {
+    const firstRead = { path: "main.tex" };
+    const secondRead = {
+      path: "other.tex",
+      range: { from: 0, to: 4 },
+    };
+    const { model, consumed } = strictStreamModel([
+      toolStep(firstRead, "tool-call-selection-document-0001"),
+      toolStep(secondRead, "tool-call-selection-project-0001"),
+      outputStep(validOutput()),
+    ]);
+    const readProjectFile = vi.fn(async (input) =>
+      input.path === "main.tex"
+        ? {
+            path: "main.tex",
+            range: { from: 0, to: 20 },
+            text: "Whole document text.",
+          }
+        : {
+            path: "other.tex",
+            range: { from: 0, to: 4 },
+            text: "More",
+          },
+    );
+    const request = selectionRequest();
+    const gateway = createGateway(model, { readProjectFile });
+
+    const events = await collect(gateway.stream(request));
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "tool.call",
+      "tool.call",
+      "text.delta",
+      "completed",
+    ]);
+    expect(readProjectFile).toHaveBeenNthCalledWith(1, firstRead, {
+      request,
+      signal: undefined,
+    });
+    expect(readProjectFile).toHaveBeenNthCalledWith(2, secondRead, {
+      request,
+      signal: undefined,
+    });
+    expect(consumed()).toBe(3);
+  });
 
   it("rejects a provider-executed project read without trusting its result", async function () {
     const { model, consumed } = strictStreamModel([
@@ -928,6 +1002,42 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     },
   );
 
+  it("continues after a rejected suggestion and accepts its corrected range", async function () {
+    const { model, consumed } = strictStreamModel([
+      outputStep(
+        validOutput({
+          suggestions: [
+            validSuggestion({
+              range: { from: 9, to: 13 },
+              evidence: [
+                {
+                  path: "main.tex",
+                  range: { from: 10, to: 14 },
+                  revision: 7,
+                  textHash: contentHash,
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+      outputStep(validOutput({ suggestions: [validSuggestion()] })),
+      closingStep(),
+    ]);
+
+    const events = await collect(
+      createGateway(model).stream(selectionRequest()),
+    );
+
+    expect(events.filter((event) => event.type === "suggestion")).toHaveLength(
+      1,
+    );
+    expect(consumed()).toBe(3);
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The provider suggestion does not match the requested document state.",
+    );
+  });
+
   it("accepts a selection suggestion reported from the start of the selection", async function () {
     // The model only sees the selected substring, so it counts from 0 while
     // the stored positions are absolute. Selection spans 10..14 here.
@@ -994,9 +1104,183 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(suggestion?.evidence?.[0]?.range).toEqual({ from: 10, to: 14 });
   });
 
-  it("preserves a project callback allowlist rejection", async function () {
+  it("accepts wider finding evidence when the first entry anchors the selection", async function () {
+    const outsideHash = "b".repeat(64);
+    const outsideRead = {
+      path: "sections/support.tex",
+      range: { from: 0, to: 7 },
+    };
+    const { model } = strictStreamModel([
+      toolStep(outsideRead, "tool-call-finding-support-0001"),
+      outputStep(
+        validOutput({
+          findings: [
+            validFinding({
+              evidence: [
+                {
+                  path: "main.tex",
+                  range: { from: 10, to: 14 },
+                  revision: 7,
+                  textHash: contentHash,
+                },
+                {
+                  path: "sections/support.tex",
+                  excerpt: "Support",
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+      closingStep(),
+    ]);
+    const readProjectFile = vi.fn(async () => ({
+      ...outsideRead,
+      text: "Support",
+      revision: 9,
+      textHash: outsideHash,
+    }));
+    const validateEvidence = vi.fn();
+    const events = await collect(
+      createGateway(model, { readProjectFile, validateEvidence }).stream(
+        selectionRequest(),
+      ),
+    );
+    const finding = events.find((event) => event.type === "finding")?.finding;
+
+    expect(finding?.evidence).toEqual([
+      {
+        path: "main.tex",
+        range: { from: 10, to: 14 },
+        revision: 7,
+        textHash: contentHash,
+      },
+      {
+        path: "sections/support.tex",
+        range: { from: 0, to: 7 },
+        revision: 9,
+        textHash: outsideHash,
+      },
+    ]);
+    expect(validateEvidence).toHaveBeenCalledExactlyOnceWith(finding.evidence, {
+      request: selectionRequest(),
+      signal: undefined,
+    });
+  });
+
+  it("rejects a finding with no evidence anchor in the selected range", async function () {
+    const { model, consumed } = strictStreamModel([
+      outputStep(
+        validOutput({
+          findings: [
+            validFinding({
+              evidence: [
+                {
+                  path: "main.tex",
+                  range: { from: 9, to: 10 },
+                  revision: 7,
+                  textHash: contentHash,
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+      outputStep(validOutput()),
+    ]);
+
+    expect(
+      await captureError(
+        collect(createGateway(model).stream(selectionRequest())),
+      ),
+    ).toMatchObject({
+      code: "AI_EVIDENCE_SCOPE_MISMATCH",
+      category: "schema",
+      retryable: false,
+    });
+    expect(consumed()).toBe(2);
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The provider evidence range is outside the requested document state.",
+    );
+  });
+
+  it("continues after a rejected finding and accepts its corrected anchor", async function () {
+    const { model, consumed } = strictStreamModel([
+      outputStep(
+        validOutput({
+          findings: [
+            validFinding({
+              evidence: [
+                {
+                  path: "other.tex",
+                  range: { from: 0, to: 4 },
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+      outputStep(validOutput({ findings: [validFinding()] })),
+      closingStep(),
+    ]);
+
+    const events = await collect(
+      createGateway(model).stream(selectionRequest()),
+    );
+
+    expect(events.filter((event) => event.type === "finding")).toHaveLength(1);
+    expect(consumed()).toBe(3);
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The provider evidence is outside the requested document.",
+    );
+  });
+
+  it("rejects an unmatched evidence excerpt outside the selection", async function () {
+    const outsideRead = {
+      path: "sections/support.tex",
+      range: { from: 0, to: 7 },
+    };
+    const { model } = strictStreamModel([
+      toolStep(outsideRead, "tool-call-mismatched-support-0001"),
+      outputStep(
+        validOutput({
+          findings: [
+            validFinding({
+              evidence: [
+                validFinding().evidence[0],
+                {
+                  path: "sections/support.tex",
+                  excerpt: "Contradiction",
+                },
+              ],
+            }),
+          ],
+        }),
+      ),
+      outputStep(validOutput()),
+    ]);
+    const readProjectFile = vi.fn(async () => ({
+      ...outsideRead,
+      text: "Support",
+    }));
+
+    expect(
+      await captureError(
+        collect(
+          createGateway(model, { readProjectFile }).stream(selectionRequest()),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_EVIDENCE_EXCERPT_NOT_FOUND",
+      category: "schema",
+      retryable: false,
+    });
+  });
+
+  it("returns a refused project read to the model and continues the run", async function () {
     const { model } = strictStreamModel([
       toolStep({ path: "private.tex", range: { from: 0, to: 4 } }),
+      outputStep(validOutput()),
     ]);
     const rejection = new AgentGatewayError(
       "The requested project file is not allowlisted.",
@@ -1013,11 +1297,16 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     const request = projectRequest();
     const gateway = createGateway(model, { readProjectFile });
 
-    expect(
-      await captureError(
-        collect(gateway.stream(request, { signal: controller.signal })),
-      ),
-    ).toBe(rejection);
+    const events = await collect(
+      gateway.stream(request, { signal: controller.signal }),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "tool.call",
+      "text.delta",
+      "completed",
+    ]);
     expect(readProjectFile).toHaveBeenCalledOnce();
     expect(readProjectFile).toHaveBeenCalledWith(
       {
@@ -1030,6 +1319,10 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       },
     );
     expect(Object.isFrozen(rejection)).toBe(true);
+    expect(model.doStreamCalls).toHaveLength(2);
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The requested project file is not allowlisted.",
+    );
   });
 
   it("redacts a provider-owned error carried by an orphan tool result", async function () {
@@ -1454,7 +1747,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     await flushProviderPromiseObservation();
   });
 
-  it("observes provider metadata before dropping it from a text delta", async function () {
+  it("keeps text provider metadata inside the SDK boundary", async function () {
     const sentinel = "PROVIDER_TEXT_METADATA_PRIVATE";
     const rejected = Promise.reject(new Error(sentinel));
     let metadataReads = 0;
@@ -1485,7 +1778,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       type: "completed",
       finishReason: "stop",
     });
-    expect(metadataReads).toBe(1);
+    expect(metadataReads).toBeGreaterThan(0);
     expect(JSON.stringify(events)).not.toContain(sentinel);
   });
 
@@ -1700,25 +1993,23 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     await flushProviderPromiseObservation();
   });
 
-  it("observes and drops optional provider request and response result slots", async function () {
+  it("passes provider request and response result slots without exposing them", async function () {
     const requestSentinel = "PROVIDER_RESULT_REQUEST_PRIVATE";
     const responseSentinel = "PROVIDER_RESULT_RESPONSE_PRIVATE";
     const result = streamResult(outputChunks(validOutput()));
-    const rejectedRequest = Promise.reject(new Error(requestSentinel));
-    const rejectedResponse = Promise.reject(new Error(responseSentinel));
     let requestReads = 0;
     let responseReads = 0;
     Object.defineProperties(result, {
       request: {
         get() {
           requestReads += 1;
-          return rejectedRequest;
+          return { body: requestSentinel };
         },
       },
       response: {
         get() {
           responseReads += 1;
-          return rejectedResponse;
+          return { headers: { "x-provider-private": responseSentinel } };
         },
       },
     });
@@ -1730,11 +2021,10 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       type: "completed",
       finishReason: "stop",
     });
-    expect(requestReads).toBe(1);
-    expect(responseReads).toBe(1);
+    expect(requestReads).toBeGreaterThan(1);
+    expect(responseReads).toBeGreaterThan(1);
     expect(JSON.stringify(events)).not.toContain(requestSentinel);
     expect(JSON.stringify(events)).not.toContain(responseSentinel);
-    await flushProviderPromiseObservation();
   });
 
   it.each([
@@ -1749,39 +2039,28 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       property: "headers",
     },
   ])(
-    "observes and drops the provider $label without enumerating siblings",
+    "passes the provider $label without exposing nested result fields",
     async function ({ parent, property }) {
       const sentinel = "PROVIDER_RESULT_NESTED_SLOT_PRIVATE";
-      const rejected = Promise.reject(new Error(sentinel));
+      const siblingSentinel = "PROVIDER_RESULT_NESTED_PRIVATE";
       const nestedTarget = {};
       let knownReads = 0;
-      let privateReads = 0;
-      let ownKeysCalls = 0;
       Object.defineProperties(nestedTarget, {
         [property]: {
           get() {
             knownReads += 1;
-            return rejected;
+            return sentinel;
           },
         },
         privateRequest: {
           enumerable: true,
-          get() {
-            privateReads += 1;
-            return Promise.reject(new Error("PROVIDER_RESULT_NESTED_PRIVATE"));
-          },
-        },
-      });
-      const nested = new Proxy(nestedTarget, {
-        ownKeys(target) {
-          ownKeysCalls += 1;
-          return Reflect.ownKeys(target);
+          value: siblingSentinel,
         },
       });
       const result = streamResult(outputChunks(validOutput()));
       Object.defineProperty(result, parent, {
         get() {
-          return nested;
+          return nestedTarget;
         },
       });
       const { model } = strictStreamModel([result]);
@@ -1795,10 +2074,9 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         type: "completed",
         finishReason: "stop",
       });
-      expect(knownReads).toBe(1);
-      expect(privateReads).toBe(0);
-      expect(ownKeysCalls).toBe(0);
+      expect(knownReads).toBeGreaterThan(0);
       expect(JSON.stringify(events)).not.toContain(sentinel);
+      expect(JSON.stringify(events)).not.toContain(siblingSentinel);
     },
   );
 
@@ -1916,10 +2194,66 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       type: "completed",
       finishReason: "stop",
     });
-    expect(metadataReads).toBe(1);
+    expect(metadataReads).toBeGreaterThan(0);
     expect(JSON.stringify(events)).not.toContain(sentinel);
     expect(JSON.stringify(events)).not.toContain(metadataSentinel);
     await flushProviderPromiseObservation();
+  });
+
+  it("carries unknown reasoning metadata into the next model request", async function () {
+    const reasoningSentinel = "PROVIDER_REASONING_CONTINUATION_PRIVATE";
+    const metadataSentinel = "PROVIDER_FUTURE_METADATA_PRIVATE";
+    const providerMetadata = Object.freeze({
+      google: Object.freeze({
+        futureContinuationEnvelope: Object.freeze({
+          value: metadataSentinel,
+        }),
+      }),
+    });
+    const { model } = strictStreamModel([
+      streamResult([
+        {
+          type: "reasoning-start",
+          id: "reasoning-hardening-0001",
+          providerMetadata,
+        },
+        {
+          type: "reasoning-delta",
+          id: "reasoning-hardening-0001",
+          delta: reasoningSentinel,
+        },
+        { type: "reasoning-end", id: "reasoning-hardening-0001" },
+        {
+          type: "tool-call",
+          toolCallId: "tool-call-hardening-0001",
+          toolName: "read_project_file",
+          input: JSON.stringify({
+            path: "main.tex",
+            range: { from: 0, to: 4 },
+          }),
+        },
+        finish("tool-calls"),
+      ]),
+      outputStep(validOutput()),
+    ]);
+    const gateway = createGateway(model, {
+      readProjectFile: vi.fn(async () => ({
+        path: "main.tex",
+        text: "Synthetic tool result.",
+      })),
+    });
+
+    const events = await collect(gateway.stream(projectRequest()));
+    const assistantMessage = model.doStreamCalls[1].prompt.find(
+      (message) => message.role === "assistant",
+    );
+    const reasoningPart = assistantMessage.content.find(
+      (part) => part.type === "reasoning",
+    );
+
+    expect(reasoningPart.providerOptions).toBe(providerMetadata);
+    expect(JSON.stringify(events)).not.toContain(reasoningSentinel);
+    expect(JSON.stringify(events)).not.toContain(metadataSentinel);
   });
 
   it.each([
@@ -3134,7 +3468,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(String(error)).not.toContain("PROVIDER_MODEL_GETTER_ABORT_PRIVATE");
   });
 
-  it("limits a project review to three read-tool calls", async function () {
+  it("returns a fourth project read as a tool error without ending the run", async function () {
     const { model, consumed } = strictStreamModel([
       toolStep(
         { path: "main.tex", range: { from: 0, to: 4 } },
@@ -3152,6 +3486,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         { path: "results.tex", range: { from: 0, to: 4 } },
         "tool-call-hardening-0004",
       ),
+      outputStep(validOutput()),
     ]);
     const readProjectFile = vi.fn(async () => ({
       path: "main.tex",
@@ -3159,16 +3494,18 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     }));
     const gateway = createGateway(model, { readProjectFile });
 
-    expect(
-      await captureError(collect(gateway.stream(projectRequest()))),
-    ).toMatchObject({
-      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
-      category: "schema",
-      retryable: false,
+    const events = await collect(gateway.stream(projectRequest()));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
     });
     expect(readProjectFile).toHaveBeenCalledTimes(3);
-    expect(consumed()).toBe(4);
-    expect(model.doStreamCalls).toHaveLength(4);
+    expect(consumed()).toBe(5);
+    expect(model.doStreamCalls).toHaveLength(5);
+    expect(JSON.stringify(model.doStreamCalls[4].prompt)).toContain(
+      "The AI provider exceeded the read-tool call limit.",
+    );
   });
 
   it("stops after the structured second step without another model call", async function () {

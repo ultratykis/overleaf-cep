@@ -48,7 +48,7 @@ describe("AI reviewer: editor selection scope descriptor", function () {
     const { context, view } = selectionContext({ doc, from: 0, to });
 
     expect(readEditorSelectionScopeDescriptor(context)).to.deep.equal({
-      fileType: "tex",
+      filename: "main.tex",
       fromLine: 1,
       toLine: 2,
       wordCount: 4,
@@ -66,7 +66,7 @@ describe("AI reviewer: editor selection scope descriptor", function () {
 
     expect(countEditorSelectionWords(text)).to.equal(8);
     expect(readEditorSelectionScopeDescriptor(context)).to.deep.include({
-      fileType: "tex",
+      filename: "main.tex",
       fromLine: 1,
       toLine: 1,
       wordCount: 8,

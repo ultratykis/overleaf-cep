@@ -299,7 +299,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         projectId: projectId.toString(),
         action: "review",
         instruction:
-          "Return one short narrative review. Use empty findings and suggestions arrays.",
+          "Return one short review. Report each issue worth tracking with report_finding.",
         skill: "referee-review",
         scope: {
           kind: "document",
@@ -331,7 +331,7 @@ describe("AI reviewer: enabled server-ce acceptance", function () {
         projectId: projectId.toString(),
         action: "review",
         instruction:
-          "Return one short narrative based on the project manifest. Use empty findings and suggestions arrays.",
+          "Return one short review based on the project manifest. Report each issue worth tracking with report_finding.",
         skill: "referee-review",
         scope: { kind: "project" },
       }),

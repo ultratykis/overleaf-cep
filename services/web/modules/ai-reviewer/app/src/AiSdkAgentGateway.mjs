@@ -1,15 +1,27 @@
 // @ts-check
 
-import { jsonSchema, stepCountIs, streamText, tool } from "ai";
+import {
+  InvalidToolInputError,
+  jsonSchema,
+  NoSuchToolError,
+  stepCountIs,
+  streamText,
+  tool,
+  wrapLanguageModel,
+} from "ai";
 import { z } from "zod";
 
 import {
   AgentEventSchema,
   AgentRequestSchema,
   CitationFindingSchema,
+  EvidenceReferenceSchema,
   JsonValueSchema,
   OrdinaryFindingSchema,
+  ProjectRelativePathSchema,
   ReadProjectFileArgumentsSchema,
+  Sha256Schema,
+  TextRangeSchema,
   UnresolvedSuggestionSchema,
   ZoteroSearchArgumentsSchema,
 } from "../../shared/contracts.mjs";
@@ -23,8 +35,12 @@ import {
   AgentGatewayError,
   AgentGatewayTimeoutError,
   assertAgentEventForRequest,
+  assertSuggestionForRequest,
 } from "./AgentGateway.mjs";
-import { recordAiReviewerProviderDiagnostic } from "./AiReviewerFailureLogger.mjs";
+import {
+  recordAiReviewerCompletion,
+  recordAiReviewerProviderDiagnostic,
+} from "./AiReviewerFailureLogger.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
 /**
@@ -37,20 +53,68 @@ import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
  * } from '../../shared/contract-types'
  */
 
+const FindingEvidenceDraftSchema = z
+  .object({
+    path: ProjectRelativePathSchema,
+    range: TextRangeSchema.optional(),
+    excerpt: z
+      .string()
+      .min(1)
+      .max(1_000_000)
+      .refine((value) => /\S/u.test(value), {
+        message: "Evidence excerpt must include non-whitespace text",
+      })
+      .optional(),
+    revision: z.number().int().nonnegative().optional(),
+    textHash: Sha256Schema.optional(),
+  })
+  .strict()
+  .superRefine((evidence, context) => {
+    if (
+      evidence.range == null &&
+      evidence.excerpt == null &&
+      evidence.revision == null &&
+      evidence.textHash == null
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Evidence must include an excerpt, range, revision, or text hash",
+      });
+    }
+  });
+
 const FindingDraftSchema = z.discriminatedUnion("artifactKind", [
   OrdinaryFindingSchema.omit({
     id: true,
     requestId: true,
     projectId: true,
     suggestionIds: true,
-  }),
+  }).extend({ evidence: z.array(FindingEvidenceDraftSchema).min(1).max(100) }),
   CitationFindingSchema.omit({
     id: true,
     requestId: true,
     projectId: true,
     suggestionIds: true,
-  }),
+  }).extend({ evidence: z.array(FindingEvidenceDraftSchema).min(1).max(100) }),
 ]);
+
+// Gemini requires FunctionDeclaration parameters to be an object schema. Zod
+// emits a root anyOf for this discriminated union, so expose its shared object
+// shape to providers and preserve the exact variant check in local validation.
+const FindingProviderInputSchema = OrdinaryFindingSchema.omit({
+  id: true,
+  requestId: true,
+  projectId: true,
+  suggestionIds: true,
+  artifactKind: true,
+})
+  .extend({
+    evidence: z.array(FindingEvidenceDraftSchema).min(1).max(100),
+    artifactKind: z.enum(["finding", "citation-finding"]),
+    proposedText: CitationFindingSchema.shape.proposedText.optional(),
+  })
+  .strict();
 
 const SuggestionDraftSchema = UnresolvedSuggestionSchema.omit({
   id: true,
@@ -62,6 +126,22 @@ const SuggestionDraftSchema = UnresolvedSuggestionSchema.omit({
   createdAt: true,
   status: true,
 });
+
+const SelectionTransformDraftSchema = z
+  .object({
+    replacement: SuggestionDraftSchema.shape.replacement,
+    rationale: SuggestionDraftSchema.shape.rationale,
+  })
+  .strict();
+
+const CORRECTABLE_ARTIFACT_ERROR_CODES = new Set([
+  "AI_TOOL_INPUT_INVALID",
+  "AI_EVIDENCE_EXCERPT_NOT_FOUND",
+  "AI_EVIDENCE_EXCERPT_AMBIGUOUS",
+  "AI_EVIDENCE_SCOPE_MISMATCH",
+  "AI_EVENT_SCOPE_MISMATCH",
+  "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+]);
 
 const SubjectDraftSchema = z
   .object({
@@ -113,22 +193,25 @@ function providerCompatibleJsonSchema(value) {
 }
 
 /**
- * Ollama's grammar parser rejects some bounds emitted by Zod. Keep the provider
- * grammar structural and perform the complete validation locally.
+ * Ollama's grammar parser rejects some bounds emitted by Zod. Keep only that
+ * dialect structural; native provider SDKs own their schema conversion.
  *
  * @template {z.ZodType} Schema
  * @param {Schema} schema
+ * @param {string} provider
+ * @param {z.ZodType} [validationSchema]
  */
-function providerToolSchema(schema) {
+function providerToolSchema(schema, provider, validationSchema = schema) {
+  const generatedSchema = z.toJSONSchema(schema, { target: "draft-7" });
   return jsonSchema(
     /** @type {import("json-schema").JSONSchema7} */ (
-      providerCompatibleJsonSchema(
-        z.toJSONSchema(schema, { target: "draft-7" }),
-      )
+      provider === "openai-compatible"
+        ? providerCompatibleJsonSchema(generatedSchema)
+        : generatedSchema
     ),
     {
       validate(value) {
-        const result = schema.safeParse(value);
+        const result = validationSchema.safeParse(value);
         return result.success
           ? { success: true, value: result.data }
           : { success: false, error: result.error };
@@ -136,10 +219,6 @@ function providerToolSchema(schema) {
     },
   );
 }
-
-const FindingProviderSchema = providerToolSchema(FindingDraftSchema);
-const SuggestionProviderSchema = providerToolSchema(SuggestionDraftSchema);
-const SubjectProviderSchema = providerToolSchema(SubjectDraftSchema);
 
 // The base instruction owns the tool and evidence boundaries for every path;
 // mode instructions can change the conversation without replacing them.
@@ -150,15 +229,24 @@ const SYSTEM_INSTRUCTION = [
   "Use only the declared tools.",
   "Use read_project_file before making claims about project file content.",
   "Use search_zotero only to investigate a citation issue.",
-  "Call report_subject exactly once with a short subject that names what this response is about.",
   "When report_finding is available, call it once per issue worth tracking.",
-  "Every finding must include at least one project-file evidence reference with an exact path and range; otherwise report no finding.",
-  "Evidence ranges are character offsets, not line numbers. For a selection scope, count offsets from the start of the selected text.",
+  "For each finding, copy the exact cited project-file passage into evidence.excerpt and include its project-relative path; the server locates the passage.",
+  "If you already know exact character offsets, evidence.range is also accepted, but do not calculate offsets instead of quoting the passage.",
   "Preserve deterministic project citationAudit issues and their evidence.",
   'For those issues, use artifactKind "citation-finding" and preserve the text-only proposal as proposedText.',
   'For every other finding, use artifactKind "finding" and omit proposedText.',
   "Call propose_suggestion only for a concrete edit that is fully supported by the active scope.",
   "Do not restate a reported finding or suggestion in prose; describe only what the user still needs to know.",
+].join(" ");
+
+const REVIEW_RESULT_INSTRUCTION =
+  "Call report_subject exactly once with a short subject that names what this response is about.";
+
+const SELECTION_TRANSFORM_INSTRUCTION = [
+  "This is a selection transform, not a review.",
+  "Call propose_suggestion exactly once and do not call another tool or return the replacement as free text.",
+  "Provide the complete replacement for the selected text and a concise rationale.",
+  "Do not invent document identifiers, revisions, hashes, ranges, original text, or evidence; the server binds the proposal to the captured selection.",
 ].join(" ");
 
 const SHARED_LANGUAGE_INSTRUCTION = [
@@ -350,10 +438,11 @@ function skillErrorResult(error, name, referencePath) {
 }
 
 /**
- * @param {AgentRequest["skill"]} skill
+ * @param {AgentRequest} request
  * @param {ReturnType<typeof boundedStoredSkills>} skills
  */
-function systemInstructionForSkill(skill, skills) {
+function systemInstructionForRequest(request, skills) {
+  const skill = request.skill;
   const modeInstruction =
     skill != null && Object.hasOwn(BUILT_IN_MODE_INSTRUCTIONS, skill)
       ? (BUILT_IN_MODE_INSTRUCTIONS[
@@ -362,12 +451,60 @@ function systemInstructionForSkill(skill, skills) {
       : null;
   return [
     SYSTEM_INSTRUCTION,
+    isSelectionTransformRequest(request)
+      ? SELECTION_TRANSFORM_INSTRUCTION
+      : REVIEW_RESULT_INSTRUCTION,
     modeInstruction,
     storedSkillInstruction(skill, skills),
     SHARED_LANGUAGE_INSTRUCTION,
   ]
     .filter((instruction) => instruction != null)
     .join("\n\n");
+}
+
+/** @param {AgentRequest} request */
+function isSelectionTransformRequest(request) {
+  return (
+    request.scope?.kind === "selection" &&
+    (request.action === "rewrite" || request.action === "shorten")
+  );
+}
+
+/**
+ * Selection identity comes from the captured editor state. Asking the model to
+ * repeat it makes an otherwise valid replacement fail on fields it cannot
+ * observe and would let model output compete with the server-owned target.
+ *
+ * @param {AgentRequest} request
+ * @param {unknown} input
+ */
+function parseSuggestionDraft(request, input) {
+  if (!isSelectionTransformRequest(request)) {
+    return SuggestionDraftSchema.safeParse(input);
+  }
+  const parsed = SelectionTransformDraftSchema.safeParse(input);
+  if (!parsed.success) {
+    return parsed;
+  }
+  const scope = request.scope;
+  return SuggestionDraftSchema.safeParse({
+    documentId: scope.documentId,
+    path: scope.path,
+    baseRevision: scope.baseRevision,
+    baseTextHash: scope.baseTextHash,
+    range: { ...scope.range },
+    original: scope.text,
+    replacement: parsed.data.replacement,
+    rationale: parsed.data.rationale,
+    evidence: [
+      {
+        path: scope.path,
+        range: { ...scope.range },
+        revision: scope.baseRevision,
+        textHash: scope.baseTextHash,
+      },
+    ],
+  });
 }
 
 /**
@@ -599,130 +736,114 @@ export function assertNoGlobalTelemetryIntegration() {
  * @param {object} model
  */
 function withoutProviderWarnings(model) {
-  const doStreamResult = readSdkProperty(model, "doStream");
-  if (!doStreamResult.ok) {
-    throw providerFailedError();
-  }
-  const doStream = doStreamResult.value;
-  if (typeof doStream !== "function") {
-    throw new TypeError(
-      "AiSdkAgentGateway requires a model with a doStream method.",
-    );
-  }
-
-  /** @param {unknown} options */
-  const safeDoStream = async (options) => {
-    const abortSignalResult = readSdkProperty(options, "abortSignal");
-    const abortSignal = /** @type {AbortSignal | undefined} */ (
-      abortSignalResult.ok ? abortSignalResult.value : undefined
-    );
-    throwIfSdkSignalAborted(abortSignal);
-    let providerWork;
-    try {
-      providerWork = Reflect.apply(doStream, model, [options]);
-    } catch (error) {
-      observeSdkValue(error);
-      throwIfSdkSignalAborted(abortSignal);
-      throw error;
-    }
-    observeSdkValue(providerWork);
-    throwIfSdkSignalAborted(abortSignal);
-    const settledProviderWork = await waitForSdkProviderWork(
-      providerWork,
-      abortSignal,
-    );
-    const result = settledProviderWork.value;
-    throwIfSdkSignalAborted(abortSignal);
-    observeSdkValue(result);
-    throwIfSdkSignalAborted(abortSignal);
-    if (!isObjectLike(result)) {
-      throw providerFailedError();
-    }
-    const resultSlots = readSdkSlots(
-      result,
-      ["stream", "request", "response"],
-      abortSignal,
-    );
-    const requestBodyOk = observeSdkNestedSlot(
-      resultSlots.values.request,
-      "body",
-      abortSignal,
-    );
-    const responseHeadersOk = observeSdkNestedSlot(
-      resultSlots.values.response,
-      "headers",
-      abortSignal,
-    );
-    throwIfSdkSignalAborted(abortSignal);
-    if (
-      !resultSlots.ok ||
-      !requestBodyOk ||
-      !responseHeadersOk ||
-      !isObjectLike(resultSlots.values.stream)
-    ) {
-      throw providerFailedError();
-    }
-    const stream = resultSlots.values.stream;
-    const pipeThroughResult = readSdkProperty(stream, "pipeThrough");
-    throwIfSdkSignalAborted(abortSignal);
-    if (
-      !pipeThroughResult.ok ||
-      typeof pipeThroughResult.value !== "function"
-    ) {
-      throw providerFailedError();
-    }
-    const sanitizerState = createSdkStreamSanitizerState();
-    const filteredStream = Reflect.apply(pipeThroughResult.value, stream, [
-      new TransformStream({
-        transform(part, controller) {
-          const sanitized = sanitizeSdkStreamPart(
-            part,
-            abortSignal,
-            sanitizerState,
-          );
+  return wrapLanguageModel({
+    model,
+    middleware: {
+      specificationVersion: "v3",
+      async wrapStream({ doStream, params }) {
+        const abortSignalResult = readSdkProperty(params, "abortSignal");
+        const abortSignal = /** @type {AbortSignal | undefined} */ (
+          abortSignalResult.ok ? abortSignalResult.value : undefined
+        );
+        throwIfSdkSignalAborted(abortSignal);
+        let providerWork;
+        try {
+          providerWork = doStream();
+        } catch (error) {
+          observeSdkValue(error);
           throwIfSdkSignalAborted(abortSignal);
-          controller.enqueue(sanitized);
-        },
-        flush() {
-          throwIfSdkSignalAborted(abortSignal);
-          assertSdkStreamComplete(sanitizerState);
-        },
-      }),
-    ]);
-    throwIfSdkSignalAborted(abortSignal);
-    observeSdkValue(filteredStream);
-    throwIfSdkSignalAborted(abortSignal);
-    const filteredPipeThrough = readSdkProperty(filteredStream, "pipeThrough");
-    throwIfSdkSignalAborted(abortSignal);
-    if (
-      !filteredPipeThrough.ok ||
-      typeof filteredPipeThrough.value !== "function"
-    ) {
-      throw providerFailedError();
-    }
-    return Object.freeze({
-      stream: createSdkStreamFacade(
-        filteredStream,
-        filteredPipeThrough.value,
-        abortSignal,
-      ),
-    });
-  };
-
-  return new Proxy(model, {
-    get(target, property) {
-      if (property === "doStream") {
-        return safeDoStream;
-      }
-      const value = Reflect.get(target, property, target);
-      observeSdkValue(value);
-      if (typeof value !== "function") {
-        return value;
-      }
-      /** @param {unknown[]} args */
-      const callWithModelReceiver = (...args) =>
-        Reflect.apply(value, target, args);
-      return callWithModelReceiver;
+          throw error;
+        }
+        observeSdkValue(providerWork);
+        const settledProviderWork = await waitForSdkProviderWork(
+          providerWork,
+          abortSignal,
+        );
+        const result = settledProviderWork.value;
+        throwIfSdkSignalAborted(abortSignal);
+        observeSdkValue(result);
+        if (!isObjectLike(result)) {
+          throw providerFailedError();
+        }
+        const resultSlots = readSdkSlots(
+          result,
+          ["stream", "request", "response"],
+          abortSignal,
+        );
+        const requestBodyOk = observeSdkNestedSlot(
+          resultSlots.values.request,
+          "body",
+          abortSignal,
+        );
+        const responseHeadersOk = observeSdkNestedSlot(
+          resultSlots.values.response,
+          "headers",
+          abortSignal,
+        );
+        throwIfSdkSignalAborted(abortSignal);
+        if (
+          !resultSlots.ok ||
+          !requestBodyOk ||
+          !responseHeadersOk ||
+          !isObjectLike(resultSlots.values.stream)
+        ) {
+          throw providerFailedError();
+        }
+        const stream = resultSlots.values.stream;
+        const pipeThroughResult = readSdkProperty(stream, "pipeThrough");
+        throwIfSdkSignalAborted(abortSignal);
+        if (
+          !pipeThroughResult.ok ||
+          typeof pipeThroughResult.value !== "function"
+        ) {
+          throw providerFailedError();
+        }
+        const streamState = createSdkStreamInspectionState();
+        const filteredStream = Reflect.apply(pipeThroughResult.value, stream, [
+          new TransformStream({
+            transform(part, controller) {
+              const inspected = inspectSdkStreamPart(
+                part,
+                abortSignal,
+                streamState,
+              );
+              throwIfSdkSignalAborted(abortSignal);
+              controller.enqueue(inspected);
+            },
+            flush() {
+              throwIfSdkSignalAborted(abortSignal);
+              assertSdkStreamComplete(streamState);
+            },
+          }),
+        ]);
+        throwIfSdkSignalAborted(abortSignal);
+        observeSdkValue(filteredStream);
+        const filteredPipeThrough = readSdkProperty(
+          filteredStream,
+          "pipeThrough",
+        );
+        throwIfSdkSignalAborted(abortSignal);
+        if (
+          !filteredPipeThrough.ok ||
+          typeof filteredPipeThrough.value !== "function"
+        ) {
+          throw providerFailedError();
+        }
+        const safeStream = createSdkStreamFacade(
+          filteredStream,
+          filteredPipeThrough.value,
+          abortSignal,
+        );
+        // Provider results are continuation carriers. Overlay only the stream
+        // boundary so fields added by the SDK remain available to the SDK.
+        return new Proxy(result, {
+          get(target, property) {
+            return property === "stream"
+              ? safeStream
+              : Reflect.get(target, property, target);
+          },
+        });
+      },
     },
   });
 }
@@ -981,7 +1102,7 @@ function isOptionalTokenCount(value) {
   );
 }
 
-function createSdkStreamSanitizerState() {
+function createSdkStreamInspectionState() {
   return {
     activeTextIds: new Set(),
     activeReasoningIds: new Set(),
@@ -1004,7 +1125,7 @@ function isSdkStreamBlockId(value) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  */
 function assertSdkStreamOpen(state) {
   if (state.finished) {
@@ -1013,7 +1134,7 @@ function assertSdkStreamOpen(state) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  * @param {Set<unknown>} activeIds
  * @param {unknown} id
  */
@@ -1031,7 +1152,7 @@ function startSdkStreamBlock(state, activeIds, id) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  * @param {Set<unknown>} activeIds
  * @param {unknown} id
  */
@@ -1043,7 +1164,7 @@ function assertSdkStreamBlockActive(state, activeIds, id) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  * @param {Set<unknown>} activeIds
  * @param {unknown} id
  */
@@ -1053,7 +1174,7 @@ function endSdkStreamBlock(state, activeIds, id) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  * @param {string} value
  */
 function addSdkStreamCharacters(state, value) {
@@ -1067,7 +1188,7 @@ function addSdkStreamCharacters(state, value) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  */
 function finishSdkStream(state) {
   assertSdkStreamOpen(state);
@@ -1082,7 +1203,7 @@ function finishSdkStream(state) {
 }
 
 /**
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  */
 function assertSdkStreamComplete(state) {
   if (
@@ -1093,18 +1214,6 @@ function assertSdkStreamComplete(state) {
   ) {
     throw providerFailedError();
   }
-}
-
-/**
- * @param {Record<PropertyKey, unknown>} values
- */
-function optionalBooleanFields(values) {
-  return Object.freeze({
-    ...(values.providerExecuted === undefined
-      ? {}
-      : { providerExecuted: values.providerExecuted }),
-    ...(values.dynamic === undefined ? {} : { dynamic: values.dynamic }),
-  });
 }
 
 /**
@@ -1157,9 +1266,9 @@ function observeSdkWarningEntries(warnings, signal) {
 /**
  * @param {unknown} part
  * @param {AbortSignal | undefined} signal
- * @param {ReturnType<typeof createSdkStreamSanitizerState>} state
+ * @param {ReturnType<typeof createSdkStreamInspectionState>} state
  */
-function sanitizeSdkStreamPart(part, signal, state) {
+function inspectSdkStreamPart(part, signal, state) {
   throwIfSdkSignalAborted(signal);
   observeSdkValue(part);
   throwIfSdkSignalAborted(signal);
@@ -1177,9 +1286,14 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     assertSdkStreamOpen(state);
-    return Object.freeze({
-      type: "stream-start",
-      warnings: Object.freeze([]),
+    // Warnings may contain provider request data. Hide only that property;
+    // copying the part would discard fields introduced by a newer SDK.
+    return new Proxy(part, {
+      get(target, property) {
+        return property === "warnings"
+          ? Object.freeze([])
+          : Reflect.get(target, property, target);
+      },
     });
   }
 
@@ -1197,7 +1311,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     assertSdkStreamOpen(state);
-    return Object.freeze({ type: "response-metadata" });
+    return part;
   }
 
   if (type === "text-start") {
@@ -1206,10 +1320,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     startSdkStreamBlock(state, state.activeTextIds, slots.values.id);
-    return Object.freeze({
-      type: "text-start",
-      id: slots.values.id,
-    });
+    return part;
   }
 
   if (type === "text-end") {
@@ -1218,10 +1329,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     endSdkStreamBlock(state, state.activeTextIds, slots.values.id);
-    return Object.freeze({
-      type: "text-end",
-      id: slots.values.id,
-    });
+    return part;
   }
 
   if (type === "text-delta") {
@@ -1239,11 +1347,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
     }
     assertSdkStreamBlockActive(state, state.activeTextIds, slots.values.id);
     addSdkStreamCharacters(state, slots.values.delta);
-    return Object.freeze({
-      type: "text-delta",
-      id: slots.values.id,
-      delta: slots.values.delta,
-    });
+    return part;
   }
 
   if (type === "reasoning-start") {
@@ -1252,10 +1356,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     startSdkStreamBlock(state, state.activeReasoningIds, slots.values.id);
-    return Object.freeze({
-      type: "reasoning-start",
-      id: slots.values.id,
-    });
+    return part;
   }
 
   if (type === "reasoning-end") {
@@ -1264,10 +1365,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     endSdkStreamBlock(state, state.activeReasoningIds, slots.values.id);
-    return Object.freeze({
-      type: "reasoning-end",
-      id: slots.values.id,
-    });
+    return part;
   }
 
   if (type === "reasoning-delta") {
@@ -1289,11 +1387,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       slots.values.id,
     );
     addSdkStreamCharacters(state, slots.values.delta);
-    return Object.freeze({
-      type: "reasoning-delta",
-      id: slots.values.id,
-      delta: slots.values.delta,
-    });
+    return part;
   }
 
   if (type === "tool-input-start") {
@@ -1321,13 +1415,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     startSdkStreamBlock(state, state.activeToolInputIds, id);
-    return Object.freeze({
-      type: "tool-input-start",
-      id,
-      toolName,
-      ...optionalBooleanFields(slots.values),
-      ...(title === undefined ? {} : { title }),
-    });
+    return part;
   }
 
   if (type === "tool-input-delta") {
@@ -1349,11 +1437,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       slots.values.id,
     );
     addSdkStreamCharacters(state, slots.values.delta);
-    return Object.freeze({
-      type: "tool-input-delta",
-      id: slots.values.id,
-      delta: slots.values.delta,
-    });
+    return part;
   }
 
   if (type === "tool-input-end") {
@@ -1362,10 +1446,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     endSdkStreamBlock(state, state.activeToolInputIds, slots.values.id);
-    return Object.freeze({
-      type: "tool-input-end",
-      id: slots.values.id,
-    });
+    return part;
   }
 
   if (type === "tool-call") {
@@ -1394,13 +1475,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     assertSdkStreamOpen(state);
-    return Object.freeze({
-      type: "tool-call",
-      toolCallId,
-      toolName,
-      input,
-      ...optionalBooleanFields(slots.values),
-    });
+    return part;
   }
 
   if (type === "finish") {
@@ -1458,23 +1533,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
       throw providerFailedError();
     }
     finishSdkStream(state);
-    return Object.freeze({
-      type: "finish",
-      finishReason: Object.freeze({ unified, raw }),
-      usage: Object.freeze({
-        inputTokens: Object.freeze({
-          total,
-          noCache,
-          cacheRead,
-          cacheWrite,
-        }),
-        outputTokens: Object.freeze({
-          total: outputTotal,
-          text,
-          reasoning,
-        }),
-      }),
-    });
+    return part;
   }
 
   if (type === "error") {
@@ -1487,7 +1546,7 @@ function sanitizeSdkStreamPart(part, signal, state) {
   }
 
   /** @type {Record<string, readonly PropertyKey[]>} */
-  const unsupportedFields = {
+  const additionalPartFields = {
     "tool-approval-request": ["approvalId", "toolCallId", "providerMetadata"],
     "tool-result": [
       "result",
@@ -1510,12 +1569,17 @@ function sanitizeSdkStreamPart(part, signal, state) {
     ],
     raw: ["rawValue"],
   };
-  if (Object.hasOwn(unsupportedFields, type)) {
-    readSdkSlots(
+  if (Object.hasOwn(additionalPartFields, type)) {
+    const slots = readSdkSlots(
       part,
-      /** @type {readonly PropertyKey[]} */ (unsupportedFields[type]),
+      /** @type {readonly PropertyKey[]} */ (additionalPartFields[type]),
       signal,
     );
+    if (!slots.ok) {
+      throw providerFailedError();
+    }
+    assertSdkStreamOpen(state);
+    return part;
   }
   assertSdkStreamOpen(state);
   throw providerFailedError();
@@ -1901,6 +1965,138 @@ export function classifySdkError(error, signal) {
   return classifySdkErrorInternal(error, signal, new Set(), 0);
 }
 
+const WHITESPACE_CHARACTER = /\s/u;
+
+/**
+ * Whitespace-only differences are common when a model quotes TeX across line
+ * wrapping. Collapsing each run for comparison keeps the chosen range tied to
+ * the original source offsets without tolerating any word or punctuation edit.
+ *
+ * @param {string} text
+ */
+function normalizeWhitespaceForEvidence(text) {
+  let normalized = "";
+  /** @type {number[]} */
+  const starts = [];
+  /** @type {number[]} */
+  const ends = [];
+  let offset = 0;
+  while (offset < text.length) {
+    const start = offset;
+    if (WHITESPACE_CHARACTER.test(text[offset])) {
+      offset += 1;
+      while (offset < text.length && WHITESPACE_CHARACTER.test(text[offset])) {
+        offset += 1;
+      }
+      normalized += " ";
+      starts.push(start);
+      ends.push(offset);
+    } else {
+      normalized += text[offset];
+      starts.push(start);
+      offset += 1;
+      ends.push(offset);
+    }
+  }
+  return { normalized, starts, ends };
+}
+
+/**
+ * @param {string} text
+ * @param {string} excerpt
+ */
+function findEvidenceExcerptRanges(text, excerpt) {
+  const source = normalizeWhitespaceForEvidence(text);
+  const needle = normalizeWhitespaceForEvidence(excerpt).normalized;
+  /** @type {{ from: number, to: number }[]} */
+  const ranges = [];
+  let cursor = 0;
+  while (cursor <= source.normalized.length - needle.length) {
+    const match = source.normalized.indexOf(needle, cursor);
+    if (match === -1) {
+      break;
+    }
+    ranges.push({
+      from: source.starts[match],
+      to: source.ends[match + needle.length - 1],
+    });
+    if (ranges.length > 1) {
+      break;
+    }
+    cursor = match + 1;
+  }
+  return ranges;
+}
+
+/**
+ * @typedef {{
+ *   path: string,
+ *   range: { from: number, to: number },
+ *   text: string,
+ *   revision?: number,
+ *   textHash?: string,
+ * }} CapturedEvidenceScope
+ */
+
+/**
+ * @param {z.infer<typeof FindingEvidenceDraftSchema>[]} evidence
+ * @param {CapturedEvidenceScope[]} capturedScopes
+ * @returns {EvidenceReference[]}
+ */
+function resolveFindingEvidence(evidence, capturedScopes) {
+  return evidence.map((reference) => {
+    if (reference.excerpt == null) {
+      return EvidenceReferenceSchema.parse(reference);
+    }
+
+    const matches = new Map();
+    for (const captured of capturedScopes) {
+      if (captured.path !== reference.path) {
+        continue;
+      }
+      for (const localRange of findEvidenceExcerptRanges(
+        captured.text,
+        reference.excerpt,
+      )) {
+        const range = {
+          from: captured.range.from + localRange.from,
+          to: captured.range.from + localRange.to,
+        };
+        matches.set(`${range.from}:${range.to}`, { captured, range });
+      }
+    }
+
+    if (matches.size === 0) {
+      throw gatewayError(
+        "The quoted evidence excerpt was not found in the captured scope text.",
+        {
+          code: "AI_EVIDENCE_EXCERPT_NOT_FOUND",
+          category: "schema",
+          retryable: false,
+        },
+      );
+    }
+    if (matches.size > 1) {
+      throw gatewayError(
+        "The quoted evidence excerpt matches more than one location in the captured scope text.",
+        {
+          code: "AI_EVIDENCE_EXCERPT_AMBIGUOUS",
+          category: "schema",
+          retryable: false,
+        },
+      );
+    }
+
+    const { captured, range } = matches.values().next().value;
+    return EvidenceReferenceSchema.parse({
+      path: reference.path,
+      range,
+      revision: captured.revision ?? reference.revision,
+      textHash: captured.textHash ?? reference.textHash,
+    });
+  });
+}
+
 /**
  * A selection review only shows the model the selected substring, so the model
  * reports positions from the start of that substring. The document positions
@@ -1939,6 +2135,26 @@ function normalizeSelectionEvidence(request, evidence) {
 }
 
 /**
+ * @param {AgentRequest} request
+ * @param {EvidenceReference[]} evidence
+ */
+function normalizeSelectionFindingAnchor(request, evidence) {
+  const scope = request.scope;
+  const anchor = evidence[0];
+  if (
+    scope == null ||
+    scope.kind !== "selection" ||
+    anchor?.path !== scope.path
+  ) {
+    return;
+  }
+  // Only the first entry stands in for the finding target. Later entries may
+  // use absolute positions from wider reads and must not be shifted back into
+  // the selected passage merely because their offsets are numerically small.
+  shiftSelectionRange(scope, anchor.range);
+}
+
+/**
  * The replaced span of a suggestion is reported in the same frame as the
  * evidence, so it needs the same shift before the document-state check.
  *
@@ -1959,40 +2175,63 @@ function normalizeSelectionSuggestion(request, draft) {
 
 /**
  * @param {AgentRequest} request
- * @param {EvidenceReference[]} evidence
+ * @param {EvidenceReference} reference
  */
-function assertEvidenceWithinRequest(request, evidence) {
+function assertEvidenceReferenceWithinRequest(request, reference) {
   if (request.scope == null || request.scope.kind === "project") {
     return;
   }
   const scope = request.scope;
-  for (const reference of evidence) {
-    if (reference.path !== scope.path) {
-      throw gatewayError(
-        "The provider evidence is outside the requested document.",
-        {
-          code: "AI_EVIDENCE_SCOPE_MISMATCH",
-          category: "schema",
-          retryable: false,
-        },
-      );
+  if (reference.path !== scope.path) {
+    throw gatewayError(
+      "The provider evidence is outside the requested document.",
+      {
+        code: "AI_EVIDENCE_SCOPE_MISMATCH",
+        category: "schema",
+        retryable: false,
+      },
+    );
+  }
+  if (reference.range == null) {
+    if (scope.kind !== "selection") {
+      return;
     }
-    if (reference.range == null) {
-      continue;
-    }
+  } else {
     const lowerBound = scope.kind === "selection" ? scope.range.from : 0;
     const upperBound =
       scope.kind === "selection" ? scope.range.to : scope.text.length;
-    if (reference.range.from < lowerBound || reference.range.to > upperBound) {
-      throw gatewayError(
-        "The provider evidence range is outside the requested document state.",
-        {
-          code: "AI_EVIDENCE_SCOPE_MISMATCH",
-          category: "schema",
-          retryable: false,
-        },
-      );
+    if (
+      reference.range.from >= lowerBound &&
+      reference.range.to <= upperBound
+    ) {
+      return;
     }
+  }
+  throw gatewayError(
+    "The provider evidence range is outside the requested document state.",
+    {
+      code: "AI_EVIDENCE_SCOPE_MISMATCH",
+      category: "schema",
+      retryable: false,
+    },
+  );
+}
+
+/**
+ * @param {AgentRequest} request
+ * @param {EvidenceReference[]} evidence
+ */
+function assertFindingEvidenceWithinRequest(request, evidence) {
+  assertEvidenceReferenceWithinRequest(request, evidence[0]);
+}
+
+/**
+ * @param {AgentRequest} request
+ * @param {EvidenceReference[]} evidence
+ */
+function assertSuggestionEvidenceWithinRequest(request, evidence) {
+  for (const reference of evidence) {
+    assertEvidenceReferenceWithinRequest(request, reference);
   }
 }
 
@@ -2012,53 +2251,6 @@ async function validateProjectEvidence(validateEvidence, evidence, context) {
       throw localGatewayError(error);
     }
     throw error;
-  }
-}
-
-/**
- * @param {AgentRequest} request
- * @param {z.infer<typeof ReadProjectFileArgumentsSchema>} input
- */
-function assertReadWithinRequest(request, input) {
-  if (request.scope == null || request.scope.kind === "project") {
-    return;
-  }
-  const scope = request.scope;
-  if (input.path !== scope.path) {
-    throw gatewayError(
-      "The read tool requested a file outside the active scope.",
-      {
-        code: "AI_TOOL_SCOPE_MISMATCH",
-        category: "schema",
-        retryable: false,
-      },
-    );
-  }
-  if (input.range == null) {
-    if (scope.kind === "selection") {
-      throw gatewayError(
-        "A selection-scoped read requires an explicit bounded range.",
-        {
-          code: "AI_TOOL_SCOPE_MISMATCH",
-          category: "schema",
-          retryable: false,
-        },
-      );
-    }
-    return;
-  }
-  const lowerBound = scope.kind === "selection" ? scope.range.from : 0;
-  const upperBound =
-    scope.kind === "selection" ? scope.range.to : scope.text.length;
-  if (input.range.from < lowerBound || input.range.to > upperBound) {
-    throw gatewayError(
-      "The read tool requested a range outside the active scope.",
-      {
-        code: "AI_TOOL_SCOPE_MISMATCH",
-        category: "schema",
-        retryable: false,
-      },
-    );
   }
 }
 
@@ -2126,6 +2318,15 @@ export class AiSdkAgentGateway {
         "AiSdkAgentGateway requires a concrete LanguageModel object.",
       );
     }
+    const doStreamResult = readSdkProperty(model, "doStream");
+    if (!doStreamResult.ok) {
+      throw providerFailedError();
+    }
+    if (typeof doStreamResult.value !== "function") {
+      throw new TypeError(
+        "AiSdkAgentGateway requires a model with a doStream method.",
+      );
+    }
     if (typeof provider !== "string" || provider.length === 0) {
       throw new TypeError("provider must be a non-empty string.");
     }
@@ -2153,7 +2354,7 @@ export class AiSdkAgentGateway {
     ) {
       throw new TypeError("validateEvidence must be a function.");
     }
-    this.model = withoutProviderWarnings(model);
+    this.model = model;
     this.provider = provider;
     this.modelId = modelId;
     this.providerOptions = providerOptions;
@@ -2188,6 +2389,27 @@ export class AiSdkAgentGateway {
     }
     const request = parsedRequest.data;
     const scope = request.scope ?? null;
+    const selectionTransform = isSelectionTransformRequest(request);
+    const findingProviderSchema = providerToolSchema(
+      FindingProviderInputSchema,
+      this.provider,
+      FindingDraftSchema,
+    );
+    const suggestionProviderSchema = providerToolSchema(
+      SuggestionDraftSchema,
+      this.provider,
+    );
+    const selectionTransformProviderSchema = providerToolSchema(
+      SelectionTransformDraftSchema,
+      this.provider,
+    );
+    const subjectProviderSchema = providerToolSchema(
+      SubjectDraftSchema,
+      this.provider,
+    );
+    // Google applies strictness to the whole request through VALIDATED mode,
+    // while these declarations intentionally leave full validation local.
+    const strictProviderTools = this.provider !== "gemini";
     // A request that names no document is about the project as a whole, so it
     // receives the project index and the wider read budget a project review
     // already receives.
@@ -2234,7 +2456,12 @@ export class AiSdkAgentGateway {
     let zoteroSearchCallCount = 0;
     let reportedArtifactCount = 0;
     let reportedSubjectCount = 0;
-    const readToolCallLimit = projectWide ? 3 : 1;
+    /** @type {Set<string>} */
+    const observedToolCallIds = new Set();
+    // Reporting stays bound to the requested passage below, while reading uses
+    // the same finite allowance regardless of how narrowly that passage was
+    // selected.
+    const readToolCallLimit = 3;
     const zoteroSearchAllowed = this.searchZotero != null;
     const storedSkills = USER_SKILL_MODES.has(request.skill ?? "")
       ? this.skills
@@ -2245,17 +2472,20 @@ export class AiSdkAgentGateway {
     const readSkillAllowed = storedSkills.length > 0;
     // Brainstorming stays conversational even if a caller supplies a scope;
     // review artifacts would turn the visible premise into a hidden review.
-    const findingsAllowed = request.skill !== "brainstorm";
+    const artifactToolsAllowed = request.skill !== "brainstorm";
+    const findingsAllowed = artifactToolsAllowed && !selectionTransform;
     // An edit is only checkable against one known document state, and the
     // artifact contract files it under the skill the user chose, so a
     // suggestion needs both before the model may propose one.
     const suggestionAllowed =
-      findingsAllowed &&
+      artifactToolsAllowed &&
       scope != null &&
       scope.kind !== "project" &&
       request.skill != null;
     /** @type {Map<string, AgentGatewayError>} */
     const deferredToolErrors = new Map();
+    /** @type {Set<string>} */
+    const recoverableSdkToolErrorIds = new Set();
     // A reported artifact waits for its own tool result to reach the stream, so
     // findings, suggestions, and prose leave this generator in the order the
     // model produced them.
@@ -2263,11 +2493,46 @@ export class AiSdkAgentGateway {
     const reportedArtifacts = new Map();
     /** @type {Map<string, string>} */
     const reportedSubjects = new Map();
+    /** @type {CapturedEvidenceScope[]} */
+    const capturedEvidenceScopes = [];
+    if (scope != null && scope.kind !== "project") {
+      capturedEvidenceScopes.push({
+        path: scope.path,
+        range:
+          scope.kind === "selection"
+            ? { ...scope.range }
+            : { from: 0, to: scope.text.length },
+        text: scope.text,
+        revision: scope.baseRevision,
+        textHash: scope.baseTextHash,
+      });
+    }
     /** @type {AgentGatewayError | null} */
     let streamFailure = null;
     /** @type {AgentGatewayError | null} */
     let terminalToolPolicyError = null;
+    /** @type {Map<string, AgentGatewayError>} */
+    const uncorrectedSdkToolErrors = new Map();
     let terminalToolExecutionFailed = false;
+
+    /**
+     * @param {string} toolCallId
+     * @param {"report_finding" | "propose_suggestion"} toolName
+     * @param {AgentGatewayError} error
+     */
+    const artifactToolError = (toolCallId, toolName, error) => {
+      const localError = localGatewayError(error);
+      if (!CORRECTABLE_ARTIFACT_ERROR_CODES.has(localError.code)) {
+        terminalToolExecutionFailed = true;
+        terminalToolPolicyError ??= localError;
+        return localError;
+      }
+      // The SDK returns a correctable rejection to the model without admitting
+      // the candidate. A successful call of the same tool clears this record.
+      recoverableSdkToolErrorIds.add(toolCallId);
+      uncorrectedSdkToolErrors.set(toolName, localError);
+      return localError;
+    };
 
     /**
      * Name the missing precondition rather than reporting an undeclared tool,
@@ -2309,6 +2574,16 @@ export class AiSdkAgentGateway {
      * @param {{ type: 'finding', finding: unknown } | { type: 'suggestion', suggestion: unknown }} artifact
      */
     const recordArtifact = (toolCallId, artifact) => {
+      if (selectionTransform && reportedArtifactCount > 0) {
+        throw gatewayError(
+          "The AI provider reported more than one selection transform.",
+          {
+            code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
+            category: "schema",
+            retryable: false,
+          },
+        );
+      }
       reportedArtifactCount += 1;
       if (reportedArtifactCount > MAX_REPORTED_ARTIFACTS) {
         throw gatewayError(
@@ -2333,12 +2608,49 @@ export class AiSdkAgentGateway {
      *   toolName: string,
      *   input: unknown,
      *   providerExecuted?: boolean,
+     *   invalid?: boolean,
+     *   error?: unknown,
      * }} toolCall
      */
     const inspectToolCall = (toolCall) => {
+      observedToolCallIds.add(toolCall.toolCallId);
       const existing = deferredToolErrors.get(toolCall.toolCallId);
       if (existing != null) {
         return existing;
+      }
+      if (
+        toolCall.invalid === true &&
+        (InvalidToolInputError.isInstance(toolCall.error) ||
+          NoSuchToolError.isInstance(toolCall.error))
+      ) {
+        if (!recoverableSdkToolErrorIds.has(toolCall.toolCallId)) {
+          recoverableSdkToolErrorIds.add(toolCall.toolCallId);
+          recordAiReviewerProviderDiagnostic({
+            provider: this.provider,
+            model: this.modelId,
+            detail: toolCall.error,
+            ...(InvalidToolInputError.isInstance(toolCall.error)
+              ? { diagnosticKind: "invalid-tool-input" }
+              : {}),
+          });
+          uncorrectedSdkToolErrors.set(
+            toolCall.toolName,
+            InvalidToolInputError.isInstance(toolCall.error)
+              ? gatewayError("The AI provider returned invalid tool input.", {
+                  code: "AI_TOOL_INPUT_INVALID",
+                  category: "schema",
+                  retryable: false,
+                })
+              : gatewayError("The AI provider requested an undeclared tool.", {
+                  code: "AI_TOOL_NOT_ALLOWED",
+                  category: "schema",
+                  retryable: false,
+                }),
+          );
+        }
+        // The SDK turns this into a tool-error result for the next model step.
+        // Keeping it non-terminal lets that bounded continuation self-correct.
+        return null;
       }
       let error = null;
       if (toolCall.providerExecuted === true) {
@@ -2360,16 +2672,6 @@ export class AiSdkAgentGateway {
               retryable: false,
             },
           );
-        } else {
-          try {
-            assertReadWithinRequest(request, parsedToolInput.data);
-          } catch (cause) {
-            if (cause instanceof AgentGatewayError) {
-              error = localGatewayError(cause);
-            } else {
-              throw cause;
-            }
-          }
         }
       } else if (toolCall.toolName === "read_skill" && readSkillAllowed) {
         if (!ReadSkillArgumentsSchema.safeParse(toolCall.input).success) {
@@ -2412,7 +2714,7 @@ export class AiSdkAgentGateway {
       } else if (toolCall.toolName === "propose_suggestion") {
         if (!suggestionAllowed) {
           error = suggestionNotAllowedError();
-        } else if (!SuggestionDraftSchema.safeParse(toolCall.input).success) {
+        } else if (!parseSuggestionDraft(request, toolCall.input).success) {
           error = gatewayError(
             "The AI provider returned an invalid suggestion.",
             {
@@ -2477,34 +2779,47 @@ export class AiSdkAgentGateway {
 
     let result;
     try {
-      const requestModel = createSdkRequestModel(this.model, signal);
+      const requestModel = withoutProviderWarnings(
+        createSdkRequestModel(this.model, signal),
+      );
       assertNoGlobalTelemetryIntegration();
       result = streamText({
         model: /** @type {never} */ (requestModel),
-        system: systemInstructionForSkill(request.skill, storedSkills),
+        system: systemInstructionForRequest(request, storedSkills),
         prompt,
         abortSignal: signal,
         maxRetries: 0,
         providerOptions: /** @type {never} */ (this.providerOptions),
         stopWhen: [
           stepCountIs(MAX_AGENT_STEPS),
+          () => selectionTransform && reportedArtifactCount > 0,
           () => terminalToolPolicyError != null || terminalToolExecutionFailed,
         ],
-        activeTools: [
-          "read_project_file",
-          ...(readSkillAllowed ? ["read_skill"] : []),
-          ...(zoteroSearchAllowed ? ["search_zotero"] : []),
-          "report_subject",
-          ...(findingsAllowed ? ["report_finding"] : []),
-          ...(suggestionAllowed ? ["propose_suggestion"] : []),
-        ],
+        activeTools: selectionTransform
+          ? ["propose_suggestion"]
+          : [
+              "read_project_file",
+              ...(readSkillAllowed ? ["read_skill"] : []),
+              ...(zoteroSearchAllowed ? ["search_zotero"] : []),
+              "report_subject",
+              ...(findingsAllowed ? ["report_finding"] : []),
+              ...(suggestionAllowed ? ["propose_suggestion"] : []),
+            ],
+        ...(selectionTransform
+          ? {
+              toolChoice: {
+                type: "tool",
+                toolName: "propose_suggestion",
+              },
+            }
+          : {}),
         tools: {
           read_project_file: tool({
             description:
               "Read one explicitly authorized project-relative text range.",
             inputSchema: ReadProjectFileArgumentsSchema,
-            strict: true,
-            execute: async (toolInput) => {
+            strict: strictProviderTools,
+            execute: async (toolInput, { toolCallId }) => {
               try {
                 if (terminalToolPolicyError != null) {
                   throw terminalToolPolicyError;
@@ -2521,19 +2836,46 @@ export class AiSdkAgentGateway {
                   );
                 }
                 const parsed = ReadProjectFileArgumentsSchema.parse(toolInput);
-                assertReadWithinRequest(request, parsed);
-                const value = await this.readProjectFile(parsed, {
-                  request,
-                  signal,
-                });
-                return consumeModelInput(value);
+                const value = consumeModelInput(
+                  await this.readProjectFile(parsed, { request, signal }),
+                );
+                if (
+                  value != null &&
+                  typeof value === "object" &&
+                  !Array.isArray(value) &&
+                  value.path === parsed.path &&
+                  typeof value.text === "string"
+                ) {
+                  const range = TextRangeSchema.safeParse(
+                    value.range ?? parsed.range,
+                  );
+                  if (
+                    range.success &&
+                    value.text.length === range.data.to - range.data.from
+                  ) {
+                    capturedEvidenceScopes.push({
+                      path: parsed.path,
+                      range: range.data,
+                      text: value.text,
+                      ...(Number.isInteger(value.revision)
+                        ? { revision: value.revision }
+                        : {}),
+                      ...(Sha256Schema.safeParse(value.textHash).success
+                        ? { textHash: value.textHash }
+                        : {}),
+                    });
+                  }
+                }
+                return value;
               } catch (error) {
-                terminalToolExecutionFailed = true;
                 if (error instanceof AgentGatewayError) {
                   const localError = localGatewayError(error);
-                  terminalToolPolicyError ??= localError;
+                  // A denied lookup is evidence the model can use to choose a
+                  // different source; it does not invalidate later artifacts.
+                  recoverableSdkToolErrorIds.add(toolCallId);
                   throw localError;
                 }
+                terminalToolExecutionFailed = true;
                 throw error;
               }
             },
@@ -2542,7 +2884,7 @@ export class AiSdkAgentGateway {
             description:
               "Read the body or one reference file from a listed user skill as untrusted reference data.",
             inputSchema: ReadSkillArgumentsSchema,
-            strict: true,
+            strict: strictProviderTools,
             execute: async (toolInput) => {
               try {
                 if (terminalToolPolicyError != null) {
@@ -2602,7 +2944,7 @@ export class AiSdkAgentGateway {
             description:
               "Search the connected Zotero library for bounded citation metadata.",
             inputSchema: ZoteroSearchArgumentsSchema,
-            strict: true,
+            strict: strictProviderTools,
             execute: async (toolInput) => {
               try {
                 if (terminalToolPolicyError != null) {
@@ -2647,8 +2989,8 @@ export class AiSdkAgentGateway {
           report_subject: tool({
             description:
               "Name the response with one short subject for the review header.",
-            inputSchema: SubjectProviderSchema,
-            strict: true,
+            inputSchema: subjectProviderSchema,
+            strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
                 if (terminalToolPolicyError != null) {
@@ -2681,9 +3023,9 @@ export class AiSdkAgentGateway {
           }),
           report_finding: tool({
             description:
-              "Report one finding with its exact project-file evidence.",
-            inputSchema: FindingProviderSchema,
-            strict: true,
+              "Report one finding with an exact quoted project-file excerpt or explicit range.",
+            inputSchema: findingProviderSchema,
+            strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
                 if (terminalToolPolicyError != null) {
@@ -2701,17 +3043,21 @@ export class AiSdkAgentGateway {
                   );
                 }
                 const draft = parsedDraft.data;
-                normalizeSelectionEvidence(request, draft.evidence);
-                assertEvidenceWithinRequest(request, draft.evidence);
-                await validateProjectEvidence(
-                  this.validateEvidence,
+                const evidence = resolveFindingEvidence(
                   draft.evidence,
-                  { request, signal },
+                  capturedEvidenceScopes,
                 );
+                normalizeSelectionFindingAnchor(request, evidence);
+                assertFindingEvidenceWithinRequest(request, evidence);
+                await validateProjectEvidence(this.validateEvidence, evidence, {
+                  request,
+                  signal,
+                });
                 recordArtifact(toolCallId, {
                   type: "finding",
                   finding: {
                     ...draft,
+                    evidence,
                     id: this.createId("finding"),
                     requestId: request.requestId,
                     projectId: request.projectId,
@@ -2720,12 +3066,10 @@ export class AiSdkAgentGateway {
                 });
                 return { recorded: true };
               } catch (error) {
-                terminalToolExecutionFailed = true;
                 if (error instanceof AgentGatewayError) {
-                  const localError = localGatewayError(error);
-                  terminalToolPolicyError ??= localError;
-                  throw localError;
+                  throw artifactToolError(toolCallId, "report_finding", error);
                 }
+                terminalToolExecutionFailed = true;
                 throw error;
               }
             },
@@ -2733,8 +3077,10 @@ export class AiSdkAgentGateway {
           propose_suggestion: tool({
             description:
               "Propose one exact replacement within the active document scope.",
-            inputSchema: SuggestionProviderSchema,
-            strict: true,
+            inputSchema: selectionTransform
+              ? selectionTransformProviderSchema
+              : suggestionProviderSchema,
+            strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {
                 if (terminalToolPolicyError != null) {
@@ -2743,7 +3089,7 @@ export class AiSdkAgentGateway {
                 if (!suggestionAllowed) {
                   throw suggestionNotAllowedError();
                 }
-                const parsedDraft = SuggestionDraftSchema.safeParse(toolInput);
+                const parsedDraft = parseSuggestionDraft(request, toolInput);
                 if (!parsedDraft.success) {
                   throw gatewayError(
                     "The AI provider returned an invalid suggestion.",
@@ -2757,34 +3103,38 @@ export class AiSdkAgentGateway {
                 const draft = parsedDraft.data;
                 normalizeSelectionSuggestion(request, draft);
                 normalizeSelectionEvidence(request, draft.evidence);
-                assertEvidenceWithinRequest(request, draft.evidence);
+                assertSuggestionEvidenceWithinRequest(request, draft.evidence);
                 await validateProjectEvidence(
                   this.validateEvidence,
                   draft.evidence,
                   { request, signal },
                 );
+                const suggestion = {
+                  ...draft,
+                  id: this.createId("suggestion"),
+                  requestId: request.requestId,
+                  projectId: request.projectId,
+                  provider: this.provider,
+                  model: this.modelId,
+                  skill: request.skill,
+                  createdAt: this.now(),
+                  status: /** @type {const} */ ("unresolved"),
+                };
+                assertSuggestionForRequest(request, suggestion);
                 recordArtifact(toolCallId, {
                   type: "suggestion",
-                  suggestion: {
-                    ...draft,
-                    id: this.createId("suggestion"),
-                    requestId: request.requestId,
-                    projectId: request.projectId,
-                    provider: this.provider,
-                    model: this.modelId,
-                    skill: request.skill,
-                    createdAt: this.now(),
-                    status: "unresolved",
-                  },
+                  suggestion,
                 });
                 return { recorded: true };
               } catch (error) {
-                terminalToolExecutionFailed = true;
                 if (error instanceof AgentGatewayError) {
-                  const localError = localGatewayError(error);
-                  terminalToolPolicyError ??= localError;
-                  throw localError;
+                  throw artifactToolError(
+                    toolCallId,
+                    "propose_suggestion",
+                    error,
+                  );
                 }
+                terminalToolExecutionFailed = true;
                 throw error;
               }
             },
@@ -2856,6 +3206,9 @@ export class AiSdkAgentGateway {
           });
           throwIfSdkSignalAborted(signal);
         } else if (part.type === "tool-error") {
+          if (recoverableSdkToolErrorIds.delete(part.toolCallId)) {
+            continue;
+          }
           const deferredError = deferredToolErrors.get(part.toolCallId);
           if (deferredError != null) {
             deferredToolErrors.delete(part.toolCallId);
@@ -2875,6 +3228,7 @@ export class AiSdkAgentGateway {
             streamFailure ??= deferredError;
             continue;
           }
+          uncorrectedSdkToolErrors.delete(part.toolName);
           const subject = reportedSubjects.get(part.toolCallId);
           if (subject != null && streamFailure == null) {
             reportedSubjects.delete(part.toolCallId);
@@ -2924,6 +3278,19 @@ export class AiSdkAgentGateway {
       if (streamFailure != null) {
         throw streamFailure;
       }
+      if (uncorrectedSdkToolErrors.size > 0 && reportedArtifactCount === 0) {
+        throw uncorrectedSdkToolErrors.values().next().value;
+      }
+      if (selectionTransform && reportedArtifactCount === 0) {
+        throw gatewayError(
+          "The AI provider did not return a selection transform.",
+          {
+            code: "AI_TRANSFORM_RESULT_MISSING",
+            category: "schema",
+            retryable: false,
+          },
+        );
+      }
 
       const usage = await result.totalUsage;
       throwIfSdkSignalAborted(signal);
@@ -2936,7 +3303,7 @@ export class AiSdkAgentGateway {
           retryable: false,
         });
       }
-      yield parseEvent({
+      const completedEvent = parseEvent({
         type: "completed",
         eventId: this.createId("event"),
         requestId: request.requestId,
@@ -2952,6 +3319,16 @@ export class AiSdkAgentGateway {
               }
             : undefined,
       });
+      recordAiReviewerCompletion({
+        requestId: request.requestId,
+        provider: this.provider,
+        model: this.modelId,
+        scopeKind: scope?.kind ?? "none",
+        findingToolOffered: findingsAllowed,
+        toolCallCount: observedToolCallIds.size,
+        pendingValidatedArtifactCount: reportedArtifacts.size,
+      });
+      yield completedEvent;
     } catch (error) {
       if (isLocalGatewayError(error)) {
         throw error;

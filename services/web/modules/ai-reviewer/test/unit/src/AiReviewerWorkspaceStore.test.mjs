@@ -168,6 +168,7 @@ function workspaceRun({
   requestId,
   generation,
   createdOrder,
+  text = `Stored summary for ${requestId}.`,
   findingStatus,
   suggestionStatus,
 }) {
@@ -176,7 +177,7 @@ function workspaceRun({
     generation,
     createdOrder,
     request: sourceRequest,
-    text: `Stored summary for ${requestId}.`,
+    text,
     findings:
       findingStatus == null
         ? []
@@ -365,6 +366,7 @@ describe("AI reviewer workspace persistence", function () {
           requestId: "request-resolved",
           generation: 1,
           createdOrder: 1,
+          text: " \n ",
           findingStatus: "discarded",
         }),
       ],
@@ -433,7 +435,7 @@ describe("AI reviewer workspace persistence", function () {
     ).toBeInstanceOf(AiReviewerWorkspaceValidationError);
   });
 
-  it("keeps resolved artifacts on save, then clears them and empty unbound runs on load", async function () {
+  it("keeps review text on load while clearing resolved artifacts and truly empty runs", async function () {
     const unresolvedRun = workspaceRun({
       requestId: "request-unresolved",
       generation: 1,
@@ -441,7 +443,7 @@ describe("AI reviewer workspace persistence", function () {
       findingStatus: "unresolved",
       suggestionStatus: "applied",
     });
-    const emptyAfterClearRun = workspaceRun({
+    const proseAfterClearRun = workspaceRun({
       requestId: "request-discarded",
       generation: 2,
       createdOrder: 2,
@@ -451,6 +453,7 @@ describe("AI reviewer workspace persistence", function () {
       requestId: "request-posted",
       generation: 3,
       createdOrder: 3,
+      text: " \n\t ",
       findingStatus: "posted",
       suggestionStatus: "posted",
     });
@@ -465,7 +468,7 @@ describe("AI reviewer workspace persistence", function () {
       suggestionStatus: "applied",
     });
     const input = {
-      runs: [unresolvedRun, emptyAfterClearRun, postedRun, discussionRun],
+      runs: [unresolvedRun, proseAfterClearRun, postedRun, discussionRun],
       discussions: [discussion],
     };
     const { model, records } = inMemoryModel();
@@ -495,12 +498,16 @@ describe("AI reviewer workspace persistence", function () {
     expect(loaded.revision).toBe(2);
     expect(loaded.workspace.runs.map((run) => run.request.requestId)).toEqual([
       "request-unresolved",
+      "request-discarded",
       "request-discussion",
     ]);
     expect(loaded.workspace.runs[0].findings).toHaveLength(1);
     expect(loaded.workspace.runs[0].suggestions).toEqual([]);
     expect(loaded.workspace.runs[1].findings).toEqual([]);
     expect(loaded.workspace.runs[1].suggestions).toEqual([]);
+    expect(loaded.workspace.runs[1].text).toBe(proseAfterClearRun.text);
+    expect(loaded.workspace.runs[2].findings).toEqual([]);
+    expect(loaded.workspace.runs[2].suggestions).toEqual([]);
     expect(loaded.workspace.discussions).toEqual([
       {
         ...discussion,
@@ -666,11 +673,12 @@ describe("AI reviewer workspace persistence", function () {
     expect(model.findOneAndUpdate).not.toHaveBeenCalled();
   });
 
-  it("deletes one discussion without clearing other resolved artifacts", async function () {
+  it("collects a truly empty run without clearing other artifacts", async function () {
     const removedRun = workspaceRun({
       requestId: "request-removed",
       generation: 1,
       createdOrder: 1,
+      text: " \n ",
     });
     const retainedRun = workspaceRun({
       requestId: "request-retained",
@@ -728,11 +736,89 @@ describe("AI reviewer workspace persistence", function () {
     expect(reloaded.workspace.runs[0].findings).toEqual(retainedRun.findings);
   });
 
+  it("keeps a prose-only review through discussion deletion and reload", async function () {
+    const proseRun = workspaceRun({
+      requestId: "request-prose-only",
+      generation: 1,
+      createdOrder: 1,
+      text: "A complete prose review with no structured artifacts.",
+    });
+    const removedDiscussion = workspaceDiscussion(proseRun, {
+      id: "discussion-prose-only",
+      createdOrder: 2,
+    });
+    const { model } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+    await store.save(
+      userId,
+      projectId,
+      {
+        runs: [proseRun],
+        discussions: [removedDiscussion],
+      },
+      0,
+    );
+
+    const result = await store.deleteDiscussion(
+      userId,
+      projectId,
+      removedDiscussion.id,
+    );
+
+    expect(result.workspace).toEqual({
+      runs: [proseRun],
+      discussions: [],
+    });
+    const reloaded = await store.load(userId, projectId);
+    expect(reloaded.workspace.runs).toEqual([proseRun]);
+    expect(reloaded.workspace.runs[0].text).toBe(proseRun.text);
+  });
+
+  it("collects only the truly empty run orphaned by a discussion delete", async function () {
+    const orphanedRun = workspaceRun({
+      requestId: "request-orphaned-empty",
+      generation: 1,
+      createdOrder: 1,
+      text: " \n ",
+    });
+    const unrelatedEmptyRun = workspaceRun({
+      requestId: "request-unrelated-empty",
+      generation: 2,
+      createdOrder: 2,
+      text: "",
+    });
+    const removedDiscussion = workspaceDiscussion(orphanedRun, {
+      id: "discussion-orphaning-empty-run",
+      createdOrder: 3,
+    });
+    const { model } = inMemoryModel();
+    const store = createAiReviewerWorkspaceStore({ model });
+    await store.save(
+      userId,
+      projectId,
+      {
+        runs: [orphanedRun, unrelatedEmptyRun],
+        discussions: [removedDiscussion],
+      },
+      0,
+    );
+
+    const result = await store.deleteDiscussion(
+      userId,
+      projectId,
+      removedDiscussion.id,
+    );
+
+    expect(result.workspace.discussions).toEqual([]);
+    expect(result.workspace.runs).toEqual([unrelatedEmptyRun]);
+  });
+
   it("retries clear-on-load instead of overwriting a concurrent save", async function () {
     const resolvedRun = workspaceRun({
       requestId: "request-resolved-before-load",
       generation: 1,
       createdOrder: 1,
+      text: " \n ",
       suggestionStatus: "applied",
     });
     const concurrentRun = workspaceRun({
@@ -789,6 +875,7 @@ describe("AI reviewer workspace persistence", function () {
       requestId: "request-delete-race",
       generation: 1,
       createdOrder: 1,
+      text: " \n ",
     });
     const removedDiscussion = workspaceDiscussion(removedRun, {
       id: "discussion-delete-race",

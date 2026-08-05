@@ -167,7 +167,7 @@ describe("AI reviewer: module shell", function () {
         createRequestId: () => "request-0001",
         captureSelectionSession,
         selectionPreview: {
-          fileType: "tex",
+          filename: "main.tex",
           fromLine: 1,
           toLine: 1,
           wordCount: 1,
@@ -202,7 +202,7 @@ describe("AI reviewer: module shell", function () {
         createRequestId: () => "request-0001",
         captureSelectionSession,
         selectionPreview: {
-          fileType: "tex",
+          filename: "main.tex",
           fromLine: 1,
           toLine: 1,
           wordCount: 1,
