@@ -11,13 +11,3 @@ node_modules/
 .yarn/cache/
 .yarn/install-state.gz
 
-# Loop engineering infrastructure
-!.loop/
-!.loop/**
-.loop/runs/**
-!.loop/runs/.gitkeep
-
-# Local Goal bootstrap
-!.github/
-!.github/prompts/
-!.github/prompts/overleaf-ai-reviewer-goal.prompt.md

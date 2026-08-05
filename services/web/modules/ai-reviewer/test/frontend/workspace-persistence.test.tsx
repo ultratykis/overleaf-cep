@@ -431,6 +431,11 @@ function confirmDeleteAll() {
   fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 }
 
+function confirmDeleteDiscussion() {
+  expect(screen.getByText("Delete this discussion?")).to.exist;
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+}
+
 describe("AI reviewer: persisted review workspace", function () {
   it("hydrates and preserves a generated run subject", async function () {
     const projectId = "subject-persistence-project";
@@ -604,6 +609,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
 
     await waitFor(() => {
       expect(deleteDiscussion.calledOnce).to.equal(true);
@@ -636,6 +642,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
 
     await waitFor(() => {
       expect(deleteDiscussion.calledOnce).to.equal(true);
@@ -644,6 +651,91 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(screen.getByText("Persisted unresolved finding")).to.exist;
     expect(screen.queryByRole("article", { name: "Discussion summary" })).not.to
       .exist;
+  });
+
+  it("confirms one discussion deletion and preserves the other saved work after reload", async function () {
+    const projectId = "isolated-discussion-deletion-project";
+    const stored = workspaceWithFinding({
+      projectId,
+      includeDiscussion: true,
+    });
+    stored.discussions.push({
+      id: "surviving-discussion",
+      createdOrder: 3,
+      subjectKey: null,
+      subject: null,
+      sourceGeneration: null,
+      turns: [
+        {
+          role: "user",
+          text: "Keep this other discussion.",
+        },
+        {
+          role: "assistant",
+          text: "This other discussion remains saved.",
+        },
+      ],
+      suggestions: [],
+      updatedAt: createdAt,
+    });
+    const persistence = new MemoryWorkspacePersistence({});
+    const save = sinon.spy(persistence, "save");
+    await persistence.save(
+      projectId,
+      AiReviewerWorkspaceSchema.parse(stored),
+      0,
+      new AbortController().signal,
+    );
+    const deleteDiscussion = sinon.spy(persistence, "deleteDiscussion");
+    const openPanel = () => panel(projectId, persistence);
+
+    const first = render(openPanel());
+    await screen.findByText("Persisted unresolved finding");
+    const summaries = screen.getAllByRole("article", {
+      name: "Discussion summary",
+    });
+    expect(summaries).to.have.length(2);
+    fireEvent.click(
+      within(summaries[0]).getByRole("button", {
+        name: "Finding: Persisted unresolved finding",
+      }),
+    );
+    const activeDiscussion = screen.getByRole("article", {
+      name: "AI reviewer discussion",
+    });
+    fireEvent.click(
+      within(activeDiscussion).getByRole("button", {
+        name: "Delete discussion",
+      }),
+    );
+
+    expect(deleteDiscussion.called).to.equal(false);
+    expect(await screen.findByText("Delete this discussion?")).to.exist;
+    confirmDeleteDiscussion();
+
+    await waitFor(() => {
+      expect(deleteDiscussion.calledOnce).to.equal(true);
+      expect(
+        persistence.read(projectId).discussions.map(({ id }) => id),
+      ).to.deep.equal(["surviving-discussion"]);
+      expect(persistence.read(projectId).runs).to.have.length(1);
+      expect(persistence.read(projectId).runs[0].findings).to.have.length(1);
+      expect(screen.getByText("Persisted unresolved finding")).to.exist;
+      expect(screen.getByRole("article", { name: "Discussion summary" })).to
+        .exist;
+    });
+    first.unmount();
+
+    render(openPanel());
+    await screen.findByText("Persisted unresolved finding");
+    const survivingSummary = screen.getByRole("article", {
+      name: "Discussion summary",
+    });
+    expect(within(survivingSummary).getByRole("button", { name: "No subject" }))
+      .to.exist;
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    expect(save.calledOnce).to.equal(true);
+    expect(deleteDiscussion.calledOnce).to.equal(true);
   });
 
   it("returns to the review list when the active discussion is deleted", async function () {
@@ -675,6 +767,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
 
     await act(async () => {
       pendingDelete.resolve();
@@ -755,6 +848,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
     fireEvent.click(
       screen.getByRole("button", {
         name: "Discard finding",
@@ -984,6 +1078,7 @@ describe("AI reviewer: persisted review workspace", function () {
             name: deletionName,
           }),
         );
+        confirmDeleteDiscussion();
       }
 
       await act(async () => {
@@ -1031,6 +1126,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
     fireEvent.click(
       screen.getByRole("button", {
         name: "Discard suggestion",
@@ -1088,6 +1184,7 @@ describe("AI reviewer: persisted review workspace", function () {
         name: "Delete discussion",
       }),
     );
+    confirmDeleteDiscussion();
     fireEvent.click(
       screen.getByRole("button", {
         name: "Discard suggestion",

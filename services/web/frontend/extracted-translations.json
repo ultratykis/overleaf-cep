@@ -175,6 +175,8 @@
   "ai_reviewer_delete_all_confirmation_title": "",
   "ai_reviewer_delete_all_saved_review_work": "",
   "ai_reviewer_delete_discussion": "",
+  "ai_reviewer_delete_discussion_confirmation_message": "",
+  "ai_reviewer_delete_discussion_confirmation_title": "",
   "ai_reviewer_detached_suggestion_diff": "",
   "ai_reviewer_discard_citation_finding": "",
   "ai_reviewer_discard_finding": "",

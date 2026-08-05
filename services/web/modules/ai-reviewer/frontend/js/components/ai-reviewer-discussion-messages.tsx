@@ -1,11 +1,17 @@
 import MessageGroup from "@/features/chat/components/message-group";
 import { ChatContext } from "@/features/chat/context/chat-context";
 import { SplitTestContext } from "@/shared/context/split-test-context";
+import firstCharacter from "@/shared/utils/first-character";
+import {
+  getBackgroundColorForUserId,
+  hslStringToLuminance,
+} from "@/shared/utils/colors";
 import { Fragment, type ContextType } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DiscussionTurn } from "../../../shared/contract-types";
 import type { User, UserId } from "../../../../../types/user";
+import { AiReviewerMarkdown } from "./ai-reviewer-markdown";
 
 type ChatContextValue = NonNullable<ContextType<typeof ChatContext>>;
 
@@ -54,6 +60,52 @@ export type AiReviewerToolLine = {
   label: string;
 };
 
+function AiReviewerAssistantMessage({
+  author,
+  text,
+}: {
+  author: User;
+  text: string;
+}) {
+  const backgroundColor = getBackgroundColorForUserId(author.id);
+  const avatarStyle = {
+    borderColor: backgroundColor,
+    backgroundColor,
+    color:
+      hslStringToLuminance(backgroundColor) < 0.5
+        ? "var(--content-primary-dark)"
+        : "var(--content-primary)",
+  };
+
+  return (
+    <div className="chat-message">
+      <div className="message-row">
+        <div className="message-avatar-placeholder" />
+        <div className="message-author">
+          <span>{author.first_name || author.email}</span>
+        </div>
+      </div>
+      <div className="message-row">
+        <div className="message-avatar">
+          <div className="avatar" style={avatarStyle}>
+            {firstCharacter(author.first_name || author.email)}
+          </div>
+        </div>
+        <div className="message-container first-row-in-message last-row-in-message">
+          <div />
+          <div className="message-content">
+            <AiReviewerMarkdown
+              className="ai-reviewer-panel-prose"
+              content={text}
+              translate="no"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AiReviewerDiscussionMessages({
   turns,
   toolLines = [],
@@ -86,22 +138,27 @@ export function AiReviewerDiscussionMessages({
     <SplitTestContext.Provider value={inertSplitTestContext}>
       <ChatContext.Provider value={inertChatContext}>
         {linesAt(0)}
-        {turns.map((turn, index) => (
-          <Fragment key={`${turn.role}:${index}`}>
-            <MessageGroup
-              fromSelf={turn.role === "user"}
-              user={turn.role === "user" ? undefined : author}
-              messages={[
-                {
-                  id: `${index}`,
-                  timestamp: index,
-                  content: turn.text,
-                },
-              ]}
-            />
-            {linesAt(index + 1)}
-          </Fragment>
-        ))}
+        {turns.map((turn, index) => {
+          return (
+            <Fragment key={`${turn.role}:${index}`}>
+              {turn.role === "assistant" ? (
+                <AiReviewerAssistantMessage author={author} text={turn.text} />
+              ) : (
+                <MessageGroup
+                  fromSelf
+                  messages={[
+                    {
+                      id: `${index}`,
+                      timestamp: index,
+                      content: turn.text,
+                    },
+                  ]}
+                />
+              )}
+              {linesAt(index + 1)}
+            </Fragment>
+          );
+        })}
       </ChatContext.Provider>
     </SplitTestContext.Provider>
   );

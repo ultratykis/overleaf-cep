@@ -125,7 +125,10 @@ function sourceRequest(
   };
 }
 
-function sourceFinding(request: AgentRequest): Finding {
+function sourceFinding(
+  request: AgentRequest,
+  message = "The selected phrase needs a more precise explanation.",
+): Finding {
   return {
     id: "context-layout-finding",
     requestId: request.requestId,
@@ -134,7 +137,7 @@ function sourceFinding(request: AgentRequest): Finding {
     severity: "warning",
     category: "clarity",
     title: "Ambiguous phrase",
-    message: "The selected phrase needs a more precise explanation.",
+    message,
     evidence: [
       {
         path,
@@ -180,7 +183,10 @@ function captureSelectionSession() {
  * One endpoint now answers both a review and a message. An editor action
  * carries its captured scope, while a typed message stays scope-free.
  */
-function unifiedStream(answer = "A precise explanation.") {
+function unifiedStream(
+  answer = "A precise explanation.",
+  findingMessage?: string,
+) {
   return sinon.stub().callsFake(async (call: ReviewStreamCall) => {
     const { requestId, skill } = call.request;
     const reviewing = call.request.scope != null;
@@ -201,7 +207,10 @@ function unifiedStream(answer = "A precise explanation.") {
       skill,
     });
     if (reviewing) {
-      emit({ type: "finding", finding: sourceFinding(call.request) });
+      emit({
+        type: "finding",
+        finding: sourceFinding(call.request, findingMessage),
+      });
     } else {
       emit({ type: "text.delta", delta: answer });
     }
@@ -417,6 +426,22 @@ describe("AI reviewer: context-driven panel", function () {
 
     expect(screen.getByTestId("ai-reviewer-findings").textContent).to.contain(
       "Ambiguous phrase",
+    );
+  });
+
+  it("renders markdown in review findings", async function () {
+    const streamRequest = unifiedStream(
+      undefined,
+      "A **clear finding** with `inline evidence`.",
+    );
+    const { container } = await reviewedSelection({ streamRequest });
+    const finding = container.querySelector(".ai-reviewer-artifact");
+
+    expect(finding?.querySelector("strong")?.textContent).to.equal(
+      "clear finding",
+    );
+    expect(finding?.querySelector("code")?.textContent).to.equal(
+      "inline evidence",
     );
   });
 
@@ -719,7 +744,7 @@ describe("AI reviewer: context-driven panel", function () {
     });
   });
 
-  it("renders turns through the host message group and splits them by author", async function () {
+  it("keeps host chat bubble structure while splitting turns by author", async function () {
     const { container } = await reviewedSelection();
     fireEvent.click(screen.getByRole("button", { name: "Discuss finding" }));
     typeConversationMessage("Why is it ambiguous?");

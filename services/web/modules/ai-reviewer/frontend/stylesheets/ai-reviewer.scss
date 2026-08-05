@@ -103,7 +103,7 @@
 
   .ai-reviewer-skill-row {
     display: flex;
-    align-items: start;
+    align-items: flex-start;
     gap: var(--spacing-02);
   }
 
@@ -365,7 +365,7 @@
 .ai-reviewer-run-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: flex-start;
   width: 100%;
   max-width: 100%;
   gap: var(--spacing-02);
@@ -380,7 +380,7 @@
 }
 
 .ai-reviewer-run-header-action {
-  align-self: start;
+  align-self: flex-start;
 
   .btn,
   .button-content {
@@ -450,6 +450,41 @@
   line-height: var(--line-height-02);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.ai-reviewer-markdown {
+  white-space: normal;
+
+  > :first-child {
+    margin-block-start: 0;
+  }
+
+  > :last-child {
+    margin-block-end: 0;
+  }
+
+  blockquote {
+    margin-inline: 0;
+    padding-inline-start: var(--spacing-03);
+    border-inline-start: 3px solid var(--border-divider-themed);
+    color: var(--content-secondary-themed);
+  }
+
+  pre {
+    max-width: 100%;
+    padding: var(--spacing-02);
+    background: var(--bg-tertiary-themed);
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  code {
+    font-family: "DM Mono", monospace;
+  }
+
+  a {
+    overflow-wrap: anywhere;
+  }
 }
 
 .ai-reviewer-panel-quoted-source,
@@ -565,6 +600,19 @@
   width: 100%;
   max-width: 100%;
   gap: var(--spacing-03);
+}
+
+// Host chat bubbles use light-only backgrounds, but reviewer turns also live
+// in the dark editor theme, so their text and surfaces must switch together.
+.ai-reviewer-discussion-turns .chat-message {
+  .message-content {
+    color: var(--content-primary-themed);
+    background-color: var(--bg-secondary-themed);
+  }
+
+  .message-container.message-from-self .message-content {
+    background-color: var(--bg-tertiary-themed);
+  }
 }
 
 .ai-reviewer-panel-composer {

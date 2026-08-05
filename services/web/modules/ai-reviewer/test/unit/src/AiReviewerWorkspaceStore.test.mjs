@@ -676,6 +676,7 @@ describe("AI reviewer workspace persistence", function () {
       requestId: "request-retained",
       generation: 2,
       createdOrder: 2,
+      findingStatus: "unresolved",
       suggestionStatus: "applied",
     });
     const removedDiscussion = workspaceDiscussion(removedRun, {
@@ -721,6 +722,10 @@ describe("AI reviewer workspace persistence", function () {
       },
       expect.objectContaining({ upsert: false }),
     );
+    const reloaded = await store.load(userId, projectId);
+    expect(reloaded.workspace.discussions).toEqual([retainedDiscussion]);
+    expect(reloaded.workspace.runs).toHaveLength(1);
+    expect(reloaded.workspace.runs[0].findings).toEqual(retainedRun.findings);
   });
 
   it("retries clear-on-load instead of overwriting a concurrent save", async function () {

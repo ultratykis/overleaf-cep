@@ -61,6 +61,7 @@ import {
   AiReviewerDiscussionMessages,
   type AiReviewerToolLine,
 } from "./ai-reviewer-discussion-messages";
+import { AiReviewerExpandableMarkdown } from "./ai-reviewer-markdown";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
   useEditorSelectionPreview,
@@ -1197,6 +1198,10 @@ export function AiReviewerPanelView({
   activeDiscussionIdRef.current = activeDiscussionId;
   const [showDeleteWorkspaceConfirmation, setShowDeleteWorkspaceConfirmation] =
     useState(false);
+  const [discussionPendingDeletion, setDiscussionPendingDeletion] = useState<{
+    projectId: string;
+    discussionId: string;
+  } | null>(null);
   const [activeSuggestionPreview, setActiveSuggestionPreview] =
     useState<ActiveSuggestionPreview | null>(null);
   const [evidenceNavigationNotice, setEvidenceNavigationNotice] =
@@ -3485,6 +3490,20 @@ export function AiReviewerPanelView({
     ],
   );
 
+  const confirmDiscussionDeletion = useCallback(() => {
+    const discussion =
+      discussionPendingDeletion?.projectId === projectId
+        ? discussionsRef.current.find(
+            (candidate) =>
+              candidate.id === discussionPendingDeletion.discussionId,
+          )
+        : null;
+    setDiscussionPendingDeletion(null);
+    if (discussion != null) {
+      deleteDiscussion(discussion);
+    }
+  }, [deleteDiscussion, discussionPendingDeletion, projectId]);
+
   const finishWorkspaceDeletion = useCallback(() => {
     const emptyWorkspace: AiReviewerWorkspace = {
       runs: [],
@@ -3761,7 +3780,7 @@ export function AiReviewerPanelView({
       finding.title,
       status,
       <>
-        <ExpandableContent
+        <AiReviewerExpandableMarkdown
           className="ai-reviewer-panel-prose"
           content={finding.message}
           contentLimit={240}
@@ -3857,7 +3876,7 @@ export function AiReviewerPanelView({
       finding.title,
       status,
       <>
-        <ExpandableContent
+        <AiReviewerExpandableMarkdown
           className="ai-reviewer-panel-prose"
           content={finding.message}
           contentLimit={240}
@@ -4177,7 +4196,7 @@ export function AiReviewerPanelView({
       )}
       {renderToolLines(runState.toolCalls, `run:${runState.generation}`)}
       {runState.text !== "" && (
-        <ExpandableContent
+        <AiReviewerExpandableMarkdown
           className="ai-reviewer-panel-prose"
           content={runState.text}
           contentLimit={320}
@@ -4384,7 +4403,12 @@ export function AiReviewerPanelView({
             disabled={
               busy || persistenceSaveFailed || discussion.status === "streaming"
             }
-            onClick={() => deleteDiscussion(discussion)}
+            onClick={() =>
+              setDiscussionPendingDeletion({
+                projectId,
+                discussionId: discussion.id,
+              })
+            }
           >
             {t("ai_reviewer_delete_discussion")}
           </OLButton>
@@ -4442,7 +4466,12 @@ export function AiReviewerPanelView({
                 persistenceSaveFailed ||
                 discussion.status === "streaming"
               }
-              onClick={() => deleteDiscussion(discussion)}
+              onClick={() =>
+                setDiscussionPendingDeletion({
+                  projectId,
+                  discussionId: discussion.id,
+                })
+              }
             >
               {t("ai_reviewer_delete_discussion")}
             </OLButton>
@@ -4795,6 +4824,17 @@ export function AiReviewerPanelView({
             setShowDeleteWorkspaceConfirmation(false);
             deleteWorkspace();
           }}
+        />
+      )}
+      {discussionPendingDeletion != null && (
+        <GenericConfirmModal
+          show
+          title={t("ai_reviewer_delete_discussion_confirmation_title")}
+          message={t("ai_reviewer_delete_discussion_confirmation_message")}
+          confirmLabel={t("delete")}
+          primaryVariant="danger"
+          onHide={() => setDiscussionPendingDeletion(null)}
+          onConfirm={confirmDiscussionDeletion}
         />
       )}
     </section>

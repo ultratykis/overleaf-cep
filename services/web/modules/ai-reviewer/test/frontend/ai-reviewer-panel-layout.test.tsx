@@ -456,6 +456,31 @@ describe("AI reviewer panel width", function () {
     panelStyles.remove();
   });
 
+  it("keeps discussion bubbles and the composer on themed color pairs", function () {
+    const discussionBubble = declarationsFor(
+      ".ai-reviewer-discussion-turns .chat-message .message-content",
+    );
+    expect(discussionBubble.get("color")).to.equal(
+      "var(--content-primary-themed)",
+    );
+    expect(discussionBubble.get("background-color")).to.equal(
+      "var(--bg-secondary-themed)",
+    );
+
+    const ownBubble = declarationsFor(
+      ".ai-reviewer-discussion-turns .chat-message .message-container.message-from-self .message-content",
+    );
+    expect(ownBubble.get("background-color")).to.equal(
+      "var(--bg-tertiary-themed)",
+    );
+
+    const composer = declarationsFor(
+      ".ai-reviewer-panel-composer textarea",
+    );
+    expect(composer.get("color")).to.equal("var(--content-primary-themed)");
+    expect(composer.get("background")).to.equal("var(--bg-primary-themed)");
+  });
+
   for (const width of widths) {
     it(`keeps provider settings within ${width}px with recognisable option labels`, async function () {
       render(
