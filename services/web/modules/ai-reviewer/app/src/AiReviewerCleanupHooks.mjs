@@ -1,5 +1,7 @@
 // @ts-check
 
+import logger from "@overleaf/logger";
+
 const workspaceStorePath = "./AiReviewerWorkspaceStore.mjs";
 /** @type {Promise<ReturnType<import("./AiReviewerWorkspaceStore.mjs").createAiReviewerWorkspaceStore>> | null} */
 let workspaceCleanupStorePromise = null;
@@ -41,6 +43,19 @@ function getProviderConfigCleanupStore() {
   return providerConfigCleanupStorePromise;
 }
 
+const skillStorePath = "./AiReviewerSkillStore.mjs";
+/** @type {Promise<ReturnType<import("./AiReviewerSkillStore.mjs").createAiReviewerSkillStore>> | null} */
+let skillCleanupStorePromise = null;
+
+function getSkillCleanupStore() {
+  if (skillCleanupStorePromise == null) {
+    skillCleanupStorePromise = import(skillStorePath).then(
+      ({ createAiReviewerSkillStore }) => createAiReviewerSkillStore(),
+    );
+  }
+  return skillCleanupStorePromise;
+}
+
 /**
  * Remove everything this module stores for one user. Provider configuration
  * carries the encrypted credential, so it is deleted alongside the workspace
@@ -49,14 +64,22 @@ function getProviderConfigCleanupStore() {
  * @param {string} userId
  */
 async function deleteUserData(userId) {
-  const [workspaceStore, providerConfigStore] = await Promise.all([
-    getWorkspaceCleanupStore(),
-    getProviderConfigCleanupStore(),
+  const outcomes = await Promise.allSettled([
+    getWorkspaceCleanupStore().then((store) => store.deleteUser(userId)),
+    getProviderConfigCleanupStore().then((store) => store.deleteUser(userId)),
+    getSkillCleanupStore().then((store) => store.deleteUser(userId)),
   ]);
-  await Promise.all([
-    workspaceStore.deleteUser(userId),
-    providerConfigStore.deleteUser(userId),
-  ]);
+  const dataKinds = ["workspace", "provider configuration", "skills"];
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === "rejected") {
+      // A module cleanup failure must not prevent the host from deleting the
+      // user or the other independent records from being removed.
+      logger.warn(
+        { err: outcome.reason, userId, dataKind: dataKinds[index] },
+        "failed to remove AI reviewer data while deleting user",
+      );
+    }
+  }
 }
 
 const AiReviewerCleanupHooks = {

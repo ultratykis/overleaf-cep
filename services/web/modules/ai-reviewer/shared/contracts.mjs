@@ -139,6 +139,9 @@ export const AgentRequestSchema = z
     ]),
     instruction: z.string().min(1).max(20_000),
     skill: IdentifierSchema.nullable(),
+    // Editor state is context only; review authority remains exclusively in
+    // `scope` so this path cannot widen artifact or suggestion permissions.
+    currentDocumentPath: ProjectRelativePathSchema.optional(),
     // The client sends both together: choosing a model in the unified list
     // also chooses the connection it came from. Both stay optional so a user
     // with a single connection offering a single model need not choose.
@@ -586,8 +589,23 @@ export const AgentErrorSchema = z
     ]),
     message: ShortTextSchema,
     retryable: z.boolean(),
+    contextLength: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional(),
+    contextLengthSource: z
+      .enum(["derived", "detected", "default", "override"])
+      .optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (error) =>
+      Object.hasOwn(error, "contextLength") ===
+      Object.hasOwn(error, "contextLengthSource"),
+    "Context length errors must include both the value and its source.",
+  );
 
 /** @type {z.ZodType<JsonValue>} */
 export const JsonValueSchema = z.lazy(() =>

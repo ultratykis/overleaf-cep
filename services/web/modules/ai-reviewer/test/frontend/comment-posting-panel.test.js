@@ -227,6 +227,8 @@ async function renderCompletedPanel({
     status: "navigated",
   },
   postingError,
+  mountSuggestionPreview,
+  applySelectionSuggestion,
 } = {}) {
   const sourceRequest = request();
   const capture = deferred();
@@ -258,6 +260,8 @@ async function renderCompletedPanel({
       getSelectionContext: selectionContext,
       navigateEvidence,
       postEditorComment,
+      mountSuggestionPreview,
+      applySelectionSuggestion,
     }),
   );
 
@@ -372,6 +376,111 @@ describe("AI reviewer comment-posting panel", function () {
       }),
     ).to.equal(true);
     expect(within(suggestions).getByText("Status: Posted")).to.exist;
+  });
+
+  it("releases a suggestion comment draft when the suggestion is applied", async function () {
+    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
+      options.onSelectionChange(["hunk-comment-posting"]);
+      return {
+        hunkIds: Object.freeze(["hunk-comment-posting"]),
+        destroy: sinon.stub(),
+      };
+    });
+    const applySelectionSuggestion = sinon.stub().resolves({
+      status: "applied",
+    });
+    await renderCompletedPanel({
+      mountSuggestionPreview,
+      applySelectionSuggestion,
+    });
+    const suggestions = screen.getByRole("region", {
+      name: "Review suggestions",
+    });
+
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Post suggestion as comment",
+      }),
+    );
+    expect(within(suggestions).getByRole("textbox", { name: "Comment body" }))
+      .to.exist;
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+    await within(suggestions).findByText("Suggestion preview ready");
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Apply selected changes",
+      }),
+    );
+
+    await waitFor(
+      () =>
+        expect(
+          within(suggestions).queryByRole("textbox", { name: "Comment body" }),
+        ).not.to.exist,
+    );
+    const findings = screen.getByRole("region", {
+      name: "Review findings",
+    });
+    const postFinding = within(findings).getByRole("button", {
+      name: "Post finding as comment",
+    });
+    expect(postFinding.disabled).to.equal(false);
+    fireEvent.click(postFinding);
+    expect(within(findings).getByRole("textbox", { name: "Comment body" })).to
+      .exist;
+  });
+
+  it("keeps an edited suggestion comment draft when applying conflicts", async function () {
+    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
+      options.onSelectionChange(["hunk-comment-conflict"]);
+      return {
+        hunkIds: Object.freeze(["hunk-comment-conflict"]),
+        destroy: sinon.stub(),
+      };
+    });
+    const applySelectionSuggestion = sinon.stub().resolves({
+      status: "conflict",
+      code: "AI_EDITOR_DIVERGED",
+    });
+    await renderCompletedPanel({
+      mountSuggestionPreview,
+      applySelectionSuggestion,
+    });
+    const suggestions = screen.getByRole("region", {
+      name: "Review suggestions",
+    });
+
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Post suggestion as comment",
+      }),
+    );
+    const body = within(suggestions).getByRole("textbox", {
+      name: "Comment body",
+    });
+    fireEvent.change(body, {
+      target: { value: "Keep this carefully edited draft." },
+    });
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Preview diff 1",
+      }),
+    );
+    await within(suggestions).findByText("Suggestion preview ready");
+    fireEvent.click(
+      within(suggestions).getByRole("button", {
+        name: "Apply selected changes",
+      }),
+    );
+
+    await within(suggestions).findByText("Status: Conflict");
+    expect(
+      within(suggestions).getByRole("textbox", { name: "Comment body" }).value,
+    ).to.equal("Keep this carefully edited draft.");
   });
 
   it("does not offer a posting action for a citation finding", async function () {

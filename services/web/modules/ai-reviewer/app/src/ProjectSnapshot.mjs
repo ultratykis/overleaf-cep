@@ -12,6 +12,7 @@ import {
   ReadProjectFileArgumentsSchema,
 } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
+import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
 import { extractLatexProjectRelations } from "./LatexProjectRelations.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 
@@ -53,6 +54,23 @@ function unavailable() {
       code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
       category: "configuration",
       retryable: false,
+    },
+  );
+}
+
+/**
+ * @param {unknown} contextLength
+ * @param {unknown} contextLengthSource
+ */
+function modelContextTooSmall(contextLength, contextLengthSource) {
+  return new AgentGatewayError(
+    "The request does not fit the selected model context.",
+    {
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      category: "configuration",
+      retryable: false,
+      contextLength,
+      contextLengthSource,
     },
   );
 }
@@ -112,6 +130,15 @@ function assertProjectRequest(request, projectId) {
     // reads the project the same way an explicit project review does.
     (parsed.data.scope != null && parsed.data.scope.kind !== "project")
   ) {
+    throw unavailable();
+  }
+  return parsed.data;
+}
+
+/** @param {unknown} request @param {string} projectId */
+function assertModelRequest(request, projectId) {
+  const parsed = AgentRequestSchema.safeParse(request);
+  if (!parsed.success || parsed.data.projectId !== projectId) {
     throw unavailable();
   }
   return parsed.data;
@@ -256,12 +283,17 @@ function buildCitationAudit(documents, relationships) {
 /**
  * @param {string} projectId
  * @param {unknown} input
- * @param {{ contextLength?: unknown, request?: unknown }} [options]
+ * @param {{
+ *   contextLength?: unknown,
+ *   contextLengthSource?: unknown,
+ *   request?: unknown,
+ *   modelRequest?: unknown,
+ * }} [options]
  */
 export function createProjectSnapshot(
   projectId,
   input,
-  { contextLength, request } = {},
+  { contextLength, contextLengthSource, request, modelRequest } = {},
 ) {
   if (
     typeof projectId !== "string" ||
@@ -273,6 +305,11 @@ export function createProjectSnapshot(
     throw unavailable();
   }
   const projectRequest = assertProjectRequest(request, projectId);
+  const promptRequest = assertModelRequest(
+    modelRequest ?? projectRequest,
+    projectId,
+  );
+  const { currentDocumentPath } = projectRequest;
   let maxModelInputCharacters;
   try {
     maxModelInputCharacters = modelInputCharacterBudget(contextLength);
@@ -317,6 +354,11 @@ export function createProjectSnapshot(
       textHash: createHash("sha256").update(text).digest("hex"),
     });
   }
+
+  const currentDocument =
+    currentDocumentPath != null && documents.has(currentDocumentPath)
+      ? Object.freeze({ path: currentDocumentPath })
+      : null;
 
   const manifest = [...documents.values()]
     .sort((left, right) => left.path.localeCompare(right.path))
@@ -397,19 +439,30 @@ export function createProjectSnapshot(
         relationshipsTruncated,
       }),
       files: frozenContextFiles,
+      // A stale editor fact must not discard an otherwise valid review.
+      ...(currentDocument == null ? {} : { currentDocument }),
       relationships: Object.freeze([...relationships]),
       relationshipExclusions: frozenRelationshipExclusions,
       citationAudit,
     });
-    modelInputCharacters = JSON.stringify({
-      request: projectRequest,
-      project: context,
-    }).length;
+    // The authorization request may be project-shaped even when the visible
+    // request is scoped. Budget the exact prompt the gateway will send, and add
+    // project context only on the paths where the gateway exposes it.
+    const modelProjectContext =
+      promptRequest.scope == null || promptRequest.scope.kind === "project"
+        ? context
+        : null;
+    modelInputCharacters = formatAgentPrompt(
+      promptRequest,
+      modelProjectContext,
+    ).length;
     if (modelInputCharacters <= maxModelInputCharacters) {
       break;
     }
     if (relationships.length === 0) {
-      throw unavailable();
+      // The snapshot is valid, but even its irreducible metadata cannot fit
+      // the selected model. Keep this distinct from malformed project data.
+      throw modelContextTooSmall(contextLength, contextLengthSource);
     }
     relationships.pop();
     relationshipsTruncated = true;
@@ -451,7 +504,7 @@ export function createProjectSnapshot(
       const resultCharacters = JSON.stringify(result).length;
       if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
         modelInputBudgetFailureCount += 1;
-        throw unavailable();
+        throw modelContextTooSmall(contextLength, contextLengthSource);
       }
       modelInputCharacters += resultCharacters;
       successfulReadCount += 1;

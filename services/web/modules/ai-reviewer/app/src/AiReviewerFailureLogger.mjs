@@ -127,12 +127,6 @@ const PROVIDER_AUTHOR_CONTENT_FIELDS = new Set([
   "messages",
   "prompt",
 ]);
-const PROVIDER_NON_AUTHOR_ROLES = new Set([
-  "assistant",
-  "developer",
-  "model",
-  "system",
-]);
 const PROVIDER_AUTHOR_CONTENT_REDACTION = "[REDACTED: author content]";
 const PROVIDER_CREDENTIAL_PATTERNS = Object.freeze([
   /(\b(?:api[_ -]?key|x-goog-api-key|authorization|access[_ -]?token|key)\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^,"'\s}\]]+)/giu,
@@ -190,17 +184,8 @@ function collectAuthorStringLeaves(value, output, depth) {
   } catch {
     return;
   }
-  const role = descriptors.role;
-  // Repository instructions can be top-level system fields or role-tagged
-  // messages. They are safe diagnostic context and must not hide schema paths.
-  if (
-    role != null &&
-    Object.hasOwn(role, "value") &&
-    typeof role.value === "string" &&
-    PROVIDER_NON_AUTHOR_ROLES.has(role.value)
-  ) {
-    return;
-  }
+  // Every request role may now contain user-supplied Skill metadata or model
+  // output, so role tags never exempt a subtree from echo redaction.
   for (const descriptor of Object.values(descriptors)) {
     if (Object.hasOwn(descriptor, "value")) {
       collectAuthorStringLeaves(descriptor.value, output, depth + 1);
@@ -208,27 +193,37 @@ function collectAuthorStringLeaves(value, output, depth) {
   }
 }
 
-/** @param {unknown} detail @param {string} responseBody */
-function redactAuthorContentEchoes(detail, responseBody) {
+/**
+ * @param {unknown} detail
+ * @param {string} responseBody
+ * @param {unknown} systemInstructionAuthorContent
+ */
+function redactAuthorContentEchoes(
+  detail,
+  responseBody,
+  systemInstructionAuthorContent,
+) {
   const requestBody = ownValue(detail, "requestBodyValues");
-  if (requestBody == null || typeof requestBody !== "object") {
-    return responseBody;
-  }
-  let descriptors;
-  try {
-    descriptors = Object.getOwnPropertyDescriptors(requestBody);
-  } catch {
-    return responseBody;
-  }
   const content = [];
-  for (const [key, descriptor] of Object.entries(descriptors)) {
-    if (
-      PROVIDER_AUTHOR_CONTENT_FIELDS.has(key) &&
-      Object.hasOwn(descriptor, "value")
-    ) {
-      collectAuthorStringLeaves(descriptor.value, content, 0);
+  if (requestBody != null && typeof requestBody === "object") {
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(requestBody);
+    } catch {
+      descriptors = {};
+    }
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (
+        PROVIDER_AUTHOR_CONTENT_FIELDS.has(key) &&
+        Object.hasOwn(descriptor, "value")
+      ) {
+        collectAuthorStringLeaves(descriptor.value, content, 0);
+      }
     }
   }
+  // Fixed system instructions name tools that provider schema errors must name
+  // in turn. Only the separately supplied user Skill metadata is author text.
+  collectAuthorStringLeaves(systemInstructionAuthorContent, content, 0);
   const responseFragments = new Map();
   for (
     let index = 0;
@@ -348,8 +343,11 @@ function invalidToolInputDiagnostic(detail) {
   };
 }
 
-/** @param {unknown} detail */
-function providerClientErrorResponse(detail) {
+/**
+ * @param {unknown} detail
+ * @param {unknown} systemInstructionAuthorContent
+ */
+function providerClientErrorResponse(detail, systemInstructionAuthorContent) {
   const statusCode = ownValue(detail, "statusCode");
   const responseBody = ownValue(detail, "responseBody");
   if (
@@ -364,7 +362,11 @@ function providerClientErrorResponse(detail) {
     0,
     PROVIDER_DIAGNOSTIC_MAX_LENGTH,
   );
-  return redactAuthorContentEchoes(detail, redactedBody);
+  return redactAuthorContentEchoes(
+    detail,
+    redactedBody,
+    systemInstructionAuthorContent,
+  );
 }
 
 /**
@@ -380,6 +382,7 @@ function providerClientErrorResponse(detail) {
  *   model: string | null,
  *   detail: unknown,
  *   diagnosticKind?: 'invalid-tool-input',
+ *   systemInstructionAuthorContent?: readonly string[],
  * }} record
  */
 export function recordAiReviewerProviderDiagnostic(record) {
@@ -402,7 +405,10 @@ export function recordAiReviewerProviderDiagnostic(record) {
     );
     return;
   }
-  const detail = providerClientErrorResponse(record.detail);
+  const detail = providerClientErrorResponse(
+    record.detail,
+    record.systemInstructionAuthorContent,
+  );
   if (detail == null) {
     return;
   }

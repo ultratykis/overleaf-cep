@@ -68,7 +68,9 @@ const categoryFailureGuidance = {
     "AI Reviewer could not complete the request. Try again; if it keeps failing, check the AI Reviewer settings.",
 } as const;
 const projectContentFailureGuidance =
-  "AI Reviewer could not read all required manuscript content because the model context was insufficient. The review may be incomplete; use a model with a larger context length or narrow the scope.";
+  "AI Reviewer could not read the required project content. Check that the project files are available, then try again.";
+const modelContextTooSmallGuidance =
+  "The request does not fit this model's context length (4,096 tokens; default because the model value could not be determined). Narrow the scope, choose a model with a larger context length, or set the context length in Connection settings.";
 const streamFailureGuidance =
   "AI Reviewer could not complete the request or read its response. Check your network connection and AI Reviewer settings, then try again.";
 const requestFailureGuidance =
@@ -217,12 +219,20 @@ function catalogModel(
   connection: AiProviderConnection,
   id: string,
   displayName: string,
+  contextLength = 4_096,
+  contextLengthSource:
+    | "derived"
+    | "detected"
+    | "default"
+    | "override" = "default",
 ) {
   return {
     id,
     displayName,
     connectionId: connection.id,
     connectionLabel: connection.label,
+    contextLength,
+    contextLengthSource,
   };
 }
 
@@ -403,7 +413,7 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
     fireEvent.click(
       screen.getByRole("menuitem", {
-        name: `Alternate reviewer (${localConnection.label})`,
+        name: `Alternate reviewer (${localConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
       }),
     );
     runSelectionReview();
@@ -457,15 +467,15 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("combobox", { name: "Connection" })).not.to.exist;
     // The same model id from two connections stays two distinguishable options.
     expect(modelOptions()).to.deep.equal([
-      `Shared model (${localConnection.label})`,
-      `Shared model (${claudeConnection.label})`,
-      `Claude Sonnet (${claudeConnection.label})`,
+      `Shared model (${localConnection.label})· 4,096 tokens · default`,
+      `Shared model (${claudeConnection.label})· 4,096 tokens · default`,
+      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · default`,
     ]);
     expect(loadProviderModels.firstCall.args[0]).to.equal(projectId);
 
     fireEvent.click(
       screen.getAllByRole("menuitem", {
-        name: `Shared model (${claudeConnection.label})`,
+        name: `Shared model (${claudeConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
       })[0],
     );
     runSelectionReview();
@@ -499,7 +509,7 @@ describe("AI reviewer: panel layout", function () {
 
     fireEvent.click(
       screen.getByRole("menuitem", {
-        name: `Portal model (${localConnection.label})`,
+        name: `Portal model (${localConnection.label}) · 4,096 tokens · default because the model value could not be determined`,
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "More options" }));
@@ -537,7 +547,7 @@ describe("AI reviewer: panel layout", function () {
 
     await openModelChip();
     expect(modelOptions()).to.deep.equal([
-      `Claude Sonnet (${claudeConnection.label})`,
+      `Claude Sonnet (${claudeConnection.label})· 4,096 tokens · default`,
     ]);
     const failures = screen.getByTestId("ai-reviewer-model-failures");
     expect(failures.textContent).to.equal(
@@ -703,6 +713,35 @@ describe("AI reviewer: panel layout", function () {
       expect(screen.getByRole("heading", { name: "Response Failed" })).to.exist;
     });
   }
+
+  it("shows the context value, fallback source, and settings link when the model budget is too small", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "error",
+        eventId: "panel-model-context-too-small",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        error: {
+          code: "AI_MODEL_CONTEXT_TOO_SMALL",
+          category: "configuration",
+          message: "Bounded server wording that the panel must not display.",
+          retryable: false,
+          contextLength: 4_096,
+          contextLengthSource: "default",
+        },
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    runSelectionReview();
+    const alert = await screen.findByRole("alert");
+
+    expect(alert.textContent).to.include(modelContextTooSmallGuidance);
+    expect(
+      within(alert).getByRole("button", { name: "Open connection settings" }),
+    ).to.exist;
+  });
 
   it("uses category guidance for an unrecognised code", async function () {
     const boundedMessage = "Future wording that the panel must not match.";

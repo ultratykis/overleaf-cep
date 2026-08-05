@@ -474,15 +474,27 @@ export function createAiReviewerProviderController(dependencies) {
       const listings = await Promise.all(
         connections.map(async (/** @type {any} */ connection) => {
           try {
+            const listedModels = await providerService.listModels(connection, {
+              signal,
+              cacheKey: aiReviewerModelCacheKey(
+                authenticatedUserId,
+                connection.id,
+              ),
+            });
             return {
               connection,
-              models: await providerService.listModels(connection, {
-                signal,
-                cacheKey: aiReviewerModelCacheKey(
-                  authenticatedUserId,
-                  connection.id,
-                ),
-              }),
+              // Context length belongs to the selected model rather than its
+              // connection. Resolve every listed pair here with the same
+              // policy a run applies, so the picker can expose the decision.
+              models: await Promise.all(
+                listedModels.map(async (/** @type {any} */ model) => ({
+                  ...model,
+                  ...(await providerService.resolveContextLength(
+                    connection,
+                    model.id,
+                  )),
+                })),
+              ),
             };
           } catch (error) {
             return { connection, error };
@@ -516,6 +528,8 @@ export function createAiReviewerProviderController(dependencies) {
             displayName: model.displayName,
             connectionId: listing.connection.id,
             connectionLabel: listing.connection.label,
+            contextLength: model.contextLength,
+            contextLengthSource: model.contextLengthSource,
           });
         }
       }

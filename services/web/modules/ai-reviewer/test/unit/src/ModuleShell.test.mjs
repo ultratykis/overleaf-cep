@@ -67,6 +67,7 @@ describe("AI reviewer: module shell", function () {
       workspaceDeleteUser: vi.fn(),
       provenanceDeleteProject: vi.fn(),
       providerConfigDeleteUser: vi.fn(),
+      skillDeleteUser: vi.fn(),
     };
     const createAiReviewerWorkspaceStore = vi.fn(() => ({
       deleteProject: stores.workspaceDeleteProject,
@@ -86,6 +87,11 @@ describe("AI reviewer: module shell", function () {
     vi.doMock("../../../app/src/AiReviewerProviderConfigStore.mjs", () => ({
       createAiReviewerProviderConfigStore: vi.fn(() => ({
         deleteUser: stores.providerConfigDeleteUser,
+      })),
+    }));
+    vi.doMock("../../../app/src/AiReviewerSkillStore.mjs", () => ({
+      createAiReviewerSkillStore: vi.fn(() => ({
+        deleteUser: stores.skillDeleteUser,
       })),
     }));
     return { ...stores, createAiReviewerWorkspaceStore };
@@ -121,6 +127,7 @@ describe("AI reviewer: module shell", function () {
     expect(stores.providerConfigDeleteUser).toHaveBeenCalledExactlyOnceWith(
       "user-0001",
     );
+    expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0001");
   });
 
   it("expires a deleted user through the same removal path", async function () {
@@ -135,6 +142,7 @@ describe("AI reviewer: module shell", function () {
     expect(stores.providerConfigDeleteUser).toHaveBeenCalledExactlyOnceWith(
       "user-0002",
     );
+    expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0002");
   });
 
   it("still deletes project and user data while the feature is disabled", async function () {
@@ -156,5 +164,6 @@ describe("AI reviewer: module shell", function () {
     expect(stores.providerConfigDeleteUser).toHaveBeenCalledExactlyOnceWith(
       "user-0003",
     );
+    expect(stores.skillDeleteUser).toHaveBeenCalledExactlyOnceWith("user-0003");
   });
 });

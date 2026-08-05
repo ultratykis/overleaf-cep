@@ -1,4 +1,6 @@
 .ai-reviewer-panel {
+  --bs-code-color: var(--content-secondary-themed);
+
   container-type: inline-size;
   display: flex;
   flex-direction: column;
@@ -47,6 +49,8 @@
 }
 
 .ai-reviewer-provider-settings {
+  --bs-code-color: var(--content-secondary-themed);
+
   min-width: 0;
   box-sizing: border-box;
 
@@ -914,7 +918,10 @@
   }
 
   .ai-reviewer-artifact-status {
-    flex: none;
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 }
@@ -1361,6 +1368,33 @@
     white-space: normal;
     overflow-wrap: anywhere;
   }
+
+  // Context metadata lengthens provider-supplied model names. Keep each choice
+  // on one scannable row while preserving the budget at the trailing edge; the
+  // full source explanation remains in the title and accessible name.
+  .ai-reviewer-panel-model-option {
+    display: flex;
+    gap: var(--spacing-04);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .ai-reviewer-panel-model-option-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ai-reviewer-panel-model-option-context {
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+}
+
+.ai-reviewer-context-settings-link {
+  display: block;
+  margin-top: var(--spacing-02);
+  color: var(--content-primary-themed);
 }
 
 /*

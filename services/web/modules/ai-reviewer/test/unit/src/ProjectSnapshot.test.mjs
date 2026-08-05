@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
 import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
 
@@ -56,6 +57,7 @@ function createSnapshot(
 ) {
   return createProjectSnapshot(projectId, input, {
     contextLength: configuredContextLength,
+    contextLengthSource: "override",
     request: request(),
   });
 }
@@ -128,6 +130,30 @@ describe("AI reviewer project snapshot", function () {
     expect(JSON.stringify(snapshot.context)).not.toContain(
       "PRIVATE_MANUSCRIPT_SENTINEL",
     );
+  });
+
+  it("adds only an existing current document to project context", async function () {
+    const current = createProjectSnapshot(projectId, documents(), {
+      contextLength,
+      contextLengthSource: "override",
+      request: { ...request(), currentDocumentPath: "sections/method.tex" },
+    });
+    const stale = createProjectSnapshot(projectId, documents(), {
+      contextLength,
+      contextLengthSource: "override",
+      request: { ...request(), currentDocumentPath: "missing.tex" },
+    });
+
+    expect(current.context.currentDocument).toEqual({
+      path: "sections/method.tex",
+    });
+    expect(stale.context).not.toHaveProperty("currentDocument");
+    expect(
+      await stale.readProjectFile(
+        { path: "main.tex", range: { from: 0, to: 4 } },
+        { request: { ...request(), currentDocumentPath: "missing.tex" } },
+      ),
+    ).toMatchObject({ path: "main.tex", text: mainText.slice(0, 4) });
   });
 
   it("supports bounded project-relative reads", async function () {
@@ -318,7 +344,7 @@ describe("AI reviewer project snapshot", function () {
     expect(snapshot.context.relationships.length).toBeLessThan(100);
     expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
     expect(
-      JSON.stringify({ request: request(), project: snapshot.context }).length,
+      formatAgentPrompt(request(), snapshot.context).length,
     ).toBeLessThanOrEqual(modelInputCharacterBudget(contextLength));
   });
 
@@ -340,7 +366,11 @@ describe("AI reviewer project snapshot", function () {
 
     expect(
       await captureError(small.readProjectFile(read, { request: request() })),
-    ).toBeInstanceOf(AgentGatewayError);
+    ).toMatchObject({
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      contextLength: 2_048,
+      contextLengthSource: "override",
+    });
     expect(
       await large.readProjectFile(read, { request: request() }),
     ).toMatchObject({
@@ -373,6 +403,10 @@ describe("AI reviewer project snapshot", function () {
       await captureError(
         snapshot.readProjectFile(read, { request: request() }),
       ),
-    ).toBeInstanceOf(AgentGatewayError);
+    ).toMatchObject({
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      contextLength: 4_096,
+      contextLengthSource: "override",
+    });
   });
 });

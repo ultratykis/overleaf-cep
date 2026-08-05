@@ -532,6 +532,10 @@ function providerControllerFixture({
     listModels: vi.fn(async () => [
       { id: model, displayName: "Configured model" },
     ]),
+    resolveContextLength: vi.fn(async () => ({
+      contextLength,
+      contextLengthSource: "override",
+    })),
     testConnection: vi.fn(async () => ({
       ok: true,
       provider: "openai-compatible",
@@ -1730,6 +1734,16 @@ describe("AI reviewer provider configuration", function () {
       contextLengthSource: "override",
     });
     expect(contextLengthDetector).toHaveBeenCalledOnce();
+
+    // Azure exposes no data-plane context metadata. Keep its user-named
+    // deployment on the conservative default without probing for a model name.
+    expect(
+      await service.resolveContextLength(azureConnectionWrite, azureDeployment),
+    ).toEqual({
+      contextLength: 4_096,
+      contextLengthSource: "default",
+    });
+    expect(contextLengthDetector).toHaveBeenCalledOnce();
   });
 
   it("passes the credential only into transport construction", async function () {
@@ -1769,6 +1783,7 @@ describe("AI reviewer provider configuration", function () {
     }
     expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
+      contextLengthSource: undefined,
       skills,
       readProjectFile,
       projectContext: undefined,
@@ -2094,6 +2109,9 @@ describe("AI reviewer provider configuration", function () {
         cacheKey: `${userId}\u0000${storedConnectionId}`,
       },
     );
+    expect(
+      available.providerService.resolveContextLength,
+    ).toHaveBeenCalledExactlyOnceWith({ ...otherConnection, baseUrl }, model);
     expect(response.body).toEqual({
       models: [
         {
@@ -2101,6 +2119,8 @@ describe("AI reviewer provider configuration", function () {
           displayName: "Configured model",
           connectionId: storedConnectionId,
           connectionLabel: "localhost:11434",
+          contextLength,
+          contextLengthSource: "override",
         },
       ],
       failures: [],
@@ -2467,6 +2487,53 @@ describe("AI reviewer provider configuration", function () {
     expect(parseNdjson(response)).toEqual(streamEvents());
   });
 
+  it("keeps current-document context outside scoped read identity", async function () {
+    const sourceRequest = {
+      ...selectionRequest(),
+      currentDocumentPath: "other.tex",
+    };
+    const requestScopeReader = createRequestScopeReader({
+      loadProjectDocuments: vi.fn(async () => ({
+        "/main.tex": {
+          _id: "document-provider-0001",
+          version: 9,
+          lines: ["Main"],
+        },
+        "/other.tex": {
+          _id: "document-provider-0002",
+          version: 3,
+          lines: ["Other"],
+        },
+      })),
+    });
+    const scope = await requestScopeReader.read(
+      httpRequest({ body: sourceRequest }),
+      { contextLength },
+    );
+
+    expect(
+      await scope.readProjectFile(
+        { path: "main.tex" },
+        {
+          request: { ...sourceRequest, currentDocumentPath: "main.tex" },
+        },
+      ),
+    ).toMatchObject({ path: "main.tex", text: "Main" });
+    expect(
+      await captureError(
+        scope.readProjectFile(
+          { path: "main.tex" },
+          {
+            request: {
+              ...sourceRequest,
+              scope: { ...sourceRequest.scope, baseRevision: 10 },
+            },
+          },
+        ),
+      ),
+    ).toMatchObject({ code: "AI_PROJECT_CONTENT_NOT_AVAILABLE" });
+  });
+
   it("offers the connected Zotero library to a selection conversation", async function () {
     const searchZoteroItems = vi.fn(async () => [
       { itemKey: "ITEM1", title: "Synthetic result" },
@@ -2651,6 +2718,7 @@ describe("AI reviewer provider configuration", function () {
     expect(requestScopeReader.read).toHaveBeenCalledOnce();
     expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
+      contextLengthSource: "override",
       skills: [],
       readProjectFile,
       projectContext: undefined,
@@ -2883,6 +2951,11 @@ Cite \cite{missing}`;
     });
 
     expect(readFailure).toBeInstanceOf(AgentGatewayError);
+    expect(readFailure).toMatchObject({
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      contextLength: 4_096,
+      contextLengthSource: "override",
+    });
     expect(events.at(-1)).toMatchObject({
       type: "completed",
       contextTruncated: true,
@@ -2890,6 +2963,30 @@ Cite \cite{missing}`;
     expect(
       englishMessages.ai_reviewer_error_guidance_project_content,
     ).not.toMatch(/\d/u);
+  });
+
+  it("keeps a handled all-read budget failure distinct at completion", async function () {
+    const events = await projectCoverageStream({
+      text: "x".repeat(5_000),
+      configuredContextLength: 4_096,
+      async performReads(readProjectFile, request, signal) {
+        await captureError(
+          readProjectFile(
+            { path: "main.tex", range: { from: 0, to: 5_000 } },
+            { request, signal },
+          ),
+        );
+      },
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      error: {
+        code: "AI_MODEL_CONTEXT_TOO_SMALL",
+        contextLength: 4_096,
+        contextLengthSource: "override",
+      },
+    });
   });
 
   it("streams project events before the completion coverage check", async function () {
@@ -3050,11 +3147,12 @@ Cite \cite{missing}`;
         sequence: 0,
         createdAt,
         error: {
-          code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+          code: "AI_MODEL_CONTEXT_TOO_SMALL",
           category: "configuration",
-          message:
-            "AI Reviewer could not read the project content. Try narrowing the review scope or check that the project files are available.",
+          message: "The request does not fit the selected model context.",
           retryable: false,
+          contextLength: 4_096,
+          contextLengthSource: "override",
         },
       },
     ]);
@@ -3065,7 +3163,7 @@ Cite \cite{missing}`;
       model: otherModel,
       scopeKind: "project",
       failureCategory: "configuration",
-      failureCode: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      failureCode: "AI_MODEL_CONTEXT_TOO_SMALL",
       providerStatusCode: null,
       providerErrorType: null,
       elapsedMs: 19,
@@ -3073,6 +3171,68 @@ Cite \cite{missing}`;
     expect(JSON.stringify(failureRecorder.mock.calls)).not.toContain(
       privateTitle,
     );
+  });
+
+  it("reports the resolved context value and source when conversation history exceeds the model budget", async function () {
+    const failureRecorder = vi.fn();
+    const providerService = {
+      listModels: vi.fn(async () => [
+        { id: otherModel, displayName: otherModel },
+      ]),
+      resolveContextLength: vi.fn(async () => ({
+        contextLength: 4_096,
+        contextLengthSource: "default",
+      })),
+      createAgentGateway: vi.fn(() => {
+        throw new Error("The provider must not be reached.");
+      }),
+    };
+    const controller = createConfiguredAiReviewerController({
+      configStore: { get: vi.fn(async () => otherConnection) },
+      providerService,
+      requestScopeReader: createRequestScopeReader(),
+      now: () => createdAt,
+      eventId: () => "event-model-context-too-small",
+      elapsedNow: vi.fn().mockReturnValueOnce(400).mockReturnValue(407.2),
+      failureRecorder,
+    });
+    const response = new FakeResponse();
+    const body = {
+      ...selectionRequest(),
+      turns: [{ role: "user", text: "x".repeat(2_000) }],
+    };
+
+    await controller.stream(httpRequest({ body }), response);
+
+    expect(parseNdjson(response)).toEqual([
+      {
+        type: "error",
+        eventId: "event-model-context-too-small",
+        requestId: selectionRequest().requestId,
+        sequence: 0,
+        createdAt,
+        error: {
+          code: "AI_MODEL_CONTEXT_TOO_SMALL",
+          category: "configuration",
+          message: "The request does not fit the selected model context.",
+          retryable: false,
+          contextLength: 4_096,
+          contextLengthSource: "default",
+        },
+      },
+    ]);
+    expect(providerService.createAgentGateway).not.toHaveBeenCalled();
+    expect(failureRecorder).toHaveBeenCalledExactlyOnceWith({
+      requestId: selectionRequest().requestId,
+      provider: otherConfiguration.provider,
+      model: otherModel,
+      scopeKind: "selection",
+      failureCategory: "configuration",
+      failureCode: "AI_MODEL_CONTEXT_TOO_SMALL",
+      providerStatusCode: null,
+      providerErrorType: null,
+      elapsedMs: 7,
+    });
   });
 
   it("selects, validates, and re-budgets an explicit run model", async function () {

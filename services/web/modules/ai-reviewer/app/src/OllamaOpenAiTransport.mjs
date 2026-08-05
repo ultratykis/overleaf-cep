@@ -3280,6 +3280,7 @@ export class HardenedAiSdkProviderTransport {
   /**
    * @param {{
    *   contextLength: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLength"],
+   *   contextLengthSource?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["contextLengthSource"],
    *   skills?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["skills"],
    *   readProjectFile: ConstructorParameters<typeof AiSdkAgentGateway>[0]["readProjectFile"],
    *   projectContext?: ConstructorParameters<typeof AiSdkAgentGateway>[0]["projectContext"],
@@ -3291,6 +3292,7 @@ export class HardenedAiSdkProviderTransport {
    */
   createAgentGateway({
     contextLength,
+    contextLengthSource,
     skills,
     readProjectFile,
     projectContext,
@@ -3305,6 +3307,7 @@ export class HardenedAiSdkProviderTransport {
       modelId: this.#modelTag,
       providerOptions: this.#gatewayProviderOptions,
       contextLength,
+      contextLengthSource,
       skills,
       readProjectFile,
       projectContext,
@@ -3486,9 +3489,16 @@ export class AzureAiSdkTransport extends HardenedAiSdkProviderTransport {
  * @param {{
  *   baseUrl: string,
  *   fetchImpl: typeof fetch,
+ *   lookupAll?: typeof dnsLookup,
+ *   dispatcherFactory?: typeof createPinnedOpenAiCompatibleDispatcher,
  * }} options
  */
-function createNativeProviderFetch({ baseUrl, fetchImpl }) {
+export function createNativeProviderFetch({
+  baseUrl,
+  fetchImpl,
+  lookupAll = dnsLookup,
+  dispatcherFactory = createPinnedOpenAiCompatibleDispatcher,
+}) {
   if (typeof fetchImpl !== "function") {
     throw new TypeError("fetchImpl must be a function.");
   }
@@ -3517,13 +3527,24 @@ function createNativeProviderFetch({ baseUrl, fetchImpl }) {
       throw nativeProviderRequestUrlNotAllowed();
     }
 
+    /** @type {import("undici").Dispatcher | undefined} */
+    let dispatcher;
     let response;
     try {
-      response = await fetchImpl(input, {
-        ...init,
-        redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
+      dispatcher = dispatcherFactory({
+        hostname: fixedEndpoint.hostname,
+        lookupAll,
       });
+      response = await fetchImpl(
+        input,
+        /** @type {RequestInit & { dispatcher: import("undici").Dispatcher }} */ ({
+          ...init,
+          redirect: OPENAI_COMPATIBLE_FETCH_REDIRECT,
+          dispatcher,
+        }),
+      );
     } catch (error) {
+      closePinnedDispatcher(dispatcher);
       observeInvalidNativePromise(error);
       const signal =
         init?.signal ??
@@ -3541,6 +3562,7 @@ function createNativeProviderFetch({ baseUrl, fetchImpl }) {
         }),
       );
     }
+    closePinnedDispatcher(dispatcher);
     if (response.status >= 300 && response.status <= 399) {
       throw redirectRejected();
     }

@@ -237,6 +237,48 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     }
   });
 
+  it("keeps findings when an extra subject is rejected", async function () {
+    const duplicateSubjectStep = streamResult([
+      {
+        type: "tool-call",
+        toolCallId: "report-subject-first",
+        toolName: "report_subject",
+        input: JSON.stringify({ subject: "First subject" }),
+      },
+      {
+        type: "tool-call",
+        toolCallId: "report-subject-extra",
+        toolName: "report_subject",
+        input: JSON.stringify({ subject: "Extra subject" }),
+      },
+      finish("tool-calls"),
+    ]);
+    const { model } = strictStreamModel([
+      duplicateSubjectStep,
+      reviewStep(structuredOutput(), "text-after-extra-subject"),
+      closingStep(),
+    ]);
+    const gateway = createGateway(model, {
+      validateEvidence: vi.fn(),
+    });
+
+    const events = await collect(gateway.stream(request()));
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "subject", subject: "First subject" }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "finding",
+        finding: expect.objectContaining({ title: "Synthetic finding" }),
+      }),
+    );
+    expect(events.at(-1)).toMatchObject({ type: "completed" });
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The AI provider reported more than one subject.",
+    );
+  });
+
   it("maps one read-only tool call and structured result into local events", async function () {
     const toolStep = streamResult([
       {
@@ -266,6 +308,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       projectContext: {
         summary: { fileCount: 1 },
         files: [{ path: "main.tex", textLength: 4 }],
+        currentDocument: { path: "main.tex" },
       },
       validateEvidence,
     });
@@ -341,6 +384,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       JSON.stringify({
         summary: { fileCount: 1 },
         files: [{ path: "main.tex", textLength: 4 }],
+        currentDocument: { path: "main.tex" },
       }),
     );
     expect(userPrompt).toContain("## Conversation");
@@ -453,7 +497,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     expect(validateEvidence).toHaveBeenCalledOnce();
   });
 
-  it("rejects a second Zotero search in the same review", async function () {
+  it("returns a second Zotero search as a tool error and keeps later findings", async function () {
     const toolStep = streamResult([
       {
         type: "tool-call",
@@ -469,18 +513,30 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       },
       finish("tool-calls"),
     ]);
-    const { model } = strictStreamModel([toolStep]);
+    const { model } = strictStreamModel([
+      toolStep,
+      reviewStep(structuredOutput(), "text-after-zotero-limit"),
+      closingStep(),
+    ]);
     const searchZotero = vi.fn(async () => []);
-    const gateway = createGateway(model, { searchZotero });
-
-    expect(
-      await captureError(collect(gateway.stream(request()))),
-    ).toMatchObject({
-      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
-      category: "schema",
-      retryable: false,
+    const gateway = createGateway(model, {
+      searchZotero,
+      validateEvidence: vi.fn(),
     });
+
+    const events = await collect(gateway.stream(request()));
+
+    expect(events.at(-1)).toMatchObject({ type: "completed" });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "finding",
+        finding: expect.objectContaining({ title: "Synthetic finding" }),
+      }),
+    );
     expect(searchZotero).toHaveBeenCalledOnce();
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
+      "The AI provider exceeded the Zotero search limit.",
+    );
   });
 
   it("rejects a string model identifier instead of using the default gateway", function () {

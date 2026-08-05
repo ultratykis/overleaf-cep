@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createGuardedOpenAiCompatibleFetch,
+  createNativeProviderFetch,
   createPinnedOpenAiCompatibleDispatcher,
 } from "../../../app/src/OllamaOpenAiTransport.mjs";
 import { OpenAiCompatibleEndpointPolicyError } from "../../../app/src/OllamaEndpointPolicy.mjs";
@@ -189,6 +190,96 @@ describe("AI reviewer pinned OpenAI-compatible dispatcher", function () {
     });
     expect(dispatcher.close).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    [
+      "Gemini",
+      "https://generativelanguage.googleapis.com/v1beta",
+      "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent",
+      "generativelanguage.googleapis.com",
+    ],
+    [
+      "Claude",
+      "https://api.anthropic.com/v1",
+      "https://api.anthropic.com/v1/messages",
+      "api.anthropic.com",
+    ],
+  ])(
+    "injects the same pinned dispatcher into the $name native fetch",
+    async function (_name, baseUrl, requestUrl, hostname) {
+      const dispatcher = { close: vi.fn(async () => {}) };
+      const dispatcherFactory = vi.fn(() => dispatcher);
+      const lookupAll = vi.fn();
+      const fetchImpl = vi.fn(async () => new Response("{}"));
+      const nativeFetch = createNativeProviderFetch({
+        baseUrl,
+        fetchImpl,
+        lookupAll,
+        dispatcherFactory,
+      });
+
+      await nativeFetch(requestUrl);
+
+      expect(dispatcherFactory).toHaveBeenCalledExactlyOnceWith({
+        hostname,
+        lookupAll,
+      });
+      expect(fetchImpl).toHaveBeenCalledExactlyOnceWith(requestUrl, {
+        redirect: "error",
+        dispatcher,
+      });
+      expect(dispatcher.close).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    [
+      "Gemini",
+      "generativelanguage.googleapis.com",
+      "https://generativelanguage.googleapis.com/v1beta",
+      "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent",
+    ],
+    [
+      "Claude",
+      "api.anthropic.com",
+      "https://api.anthropic.com/v1",
+      "https://api.anthropic.com/v1/messages",
+    ],
+  ])(
+    "rejects a re-bound $name peer after native DNS pinning",
+    async function (_name, hostname, baseUrl, requestUrl) {
+      const fixture = pinnedFixture({
+        hostname,
+        addresses: [{ address: "93.184.216.34", family: 4 }],
+        peerAddress: "93.184.216.35",
+      });
+      const nativeFetch = createNativeProviderFetch({
+        baseUrl,
+        fetchImpl: vi.fn(async () => {
+          const { error } = await fixture.connect();
+          throw new TypeError("fetch failed", { cause: error });
+        }),
+        dispatcherFactory: () => fixture.dispatcher,
+      });
+
+      let error;
+      try {
+        await nativeFetch(requestUrl);
+      } catch (cause) {
+        error = cause;
+      }
+
+      expect(error).toMatchObject({
+        code: "AI_PROVIDER_NETWORK_FAILED",
+        category: "network",
+        retryable: true,
+      });
+      expect(fixture.lookupAll).toHaveBeenCalledOnce();
+      expect(fixture.socket.destroy).toHaveBeenCalledOnce();
+      expect(String(error)).not.toContain("93.184.216.34");
+      expect(String(error)).not.toContain("93.184.216.35");
+    },
+  );
 
   it("returns the public policy error for a peer mismatch without disclosing either address", async function () {
     const fixture = pinnedFixture({

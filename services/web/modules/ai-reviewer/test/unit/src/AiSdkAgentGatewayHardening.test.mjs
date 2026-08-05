@@ -12,6 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
+import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
+import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
 const contentHash = "a".repeat(64);
@@ -291,6 +293,7 @@ function createGateway(model, overrides = {}) {
     provider: "fixture-provider",
     modelId: "fixture-model",
     contextLength: 8_192,
+    contextLengthSource: "override",
     readProjectFile: async () => ({
       path: "main.tex",
       text: "Synthetic tool result.",
@@ -2468,9 +2471,11 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
         ),
       ),
     ).toMatchObject({
-      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
       category: "configuration",
       retryable: false,
+      contextLength: 4_096,
+      contextLengthSource: "override",
     });
     expect(smallModel.doStreamCalls).toHaveLength(0);
 
@@ -2484,6 +2489,117 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
       finishReason: "stop",
     });
     expect(largeModel.doStreamCalls).toHaveLength(1);
+  });
+
+  it("sends an instruction-bearing project prompt after snapshot budget shrinking", async function () {
+    const contextLength = 8_192;
+    const request = projectRequest();
+    const relationshipLines = Array.from(
+      { length: 80 },
+      (_, index) => String.raw`\section{Section ${index}}`,
+    );
+    const snapshot = createProjectSnapshot(
+      request.projectId,
+      {
+        "/main.tex": {
+          _id: "document-snapshot-gateway-budget",
+          version: 1,
+          lines: relationshipLines,
+        },
+      },
+      {
+        contextLength,
+        contextLengthSource: "override",
+        request,
+        modelRequest: request,
+      },
+    );
+    const { model } = strictStreamModel([outputStep(validOutput())]);
+
+    const events = await collect(
+      createGateway(model, {
+        contextLength,
+        projectContext: snapshot.context,
+        readProjectFile: snapshot.readProjectFile,
+      }).stream(request),
+    );
+
+    expect(snapshot.context.relationships.length).toBeGreaterThan(0);
+    expect(snapshot.context.relationships.length).toBeLessThan(80);
+    expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
+    const systemInstruction = model.doStreamCalls[0].prompt[0].content;
+    const readablePrompt = model.doStreamCalls[0].prompt[1].content[0].text;
+    const promptBudget = modelInputCharacterBudget(contextLength);
+    expect(systemInstruction.length).toBeGreaterThan(0);
+    expect(readablePrompt.length).toBeLessThanOrEqual(promptBudget);
+    expect(systemInstruction.length).toBeLessThanOrEqual(promptBudget);
+    // This is the former regression boundary: the two reserved partitions may
+    // legitimately total more than the manuscript-only half.
+    expect(systemInstruction.length + readablePrompt.length).toBeGreaterThan(
+      promptBudget,
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
+  });
+
+  it("delivers a snapshot-accepted read instead of counting a gateway rejection as success", async function () {
+    const contextLength = 8_192;
+    const request = projectRequest();
+    const readText = `SNAPSHOT_ACCEPTED_READ_${"x".repeat(1_400)}`;
+    const snapshot = createProjectSnapshot(
+      request.projectId,
+      {
+        "/main.tex": {
+          _id: "document-snapshot-accepted-read",
+          version: 1,
+          lines: [readText],
+        },
+      },
+      {
+        contextLength,
+        contextLengthSource: "override",
+        request,
+        modelRequest: request,
+      },
+    );
+    const read = {
+      path: "main.tex",
+      range: { from: 0, to: readText.length },
+    };
+    const { model } = strictStreamModel([
+      toolStep(read, "tool-call-snapshot-accepted-read"),
+      outputStep(validOutput()),
+    ]);
+
+    const events = await collect(
+      createGateway(model, {
+        contextLength,
+        projectContext: snapshot.context,
+        readProjectFile: snapshot.readProjectFile,
+      }).stream(request),
+    );
+
+    const systemInstruction = model.doStreamCalls[0].prompt[0].content;
+    const readablePrompt = model.doStreamCalls[0].prompt[1].content[0].text;
+    const promptBudget = modelInputCharacterBudget(contextLength);
+    expect(systemInstruction.length + readablePrompt.length).toBeLessThan(
+      promptBudget,
+    );
+    expect(
+      systemInstruction.length + readablePrompt.length + readText.length,
+    ).toBeGreaterThan(promptBudget);
+    expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(readText);
+    expect(snapshot.readProjectFile.reviewCoverage()).toEqual({
+      successfulReadCount: 1,
+      modelInputBudgetFailureCount: 0,
+      relationshipsTruncated: false,
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
   });
 
   it.each([

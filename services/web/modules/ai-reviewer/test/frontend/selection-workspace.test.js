@@ -1102,7 +1102,19 @@ describe("AI reviewer: single document selection workspace", function () {
         .getAllByRole("button")
         .map((button) => button.textContent),
     ).to.deep.equal(["Discuss suggestion", "Discard suggestion"]);
-    expect(within(suggestionsSection).getByText("Status: Conflict")).to.exist;
+    const conflictStatus =
+      within(suggestionsSection).getByText("Status: Conflict");
+    const conflictCard = conflictStatus.closest(".ai-reviewer-artifact");
+    expect(conflictCard).not.to.equal(null);
+    expect(
+      conflictCard.classList.contains("ai-reviewer-artifact-resolved"),
+    ).to.equal(false);
+    expect(conflictCard.querySelector("details")).to.equal(null);
+    expect(
+      within(conflictCard)
+        .getByRole("button", { name: "Discard suggestion" })
+        .closest("details"),
+    ).to.equal(null);
   });
   it("synchronously aborts and destroys an applying preview before a new run", async function () {
     const sessionA = selectionSession({

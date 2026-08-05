@@ -765,6 +765,10 @@ describe("AI reviewer unified model list", function () {
     const providerService = {
       listModels:
         listModels ?? vi.fn(async (connection) => connectionModels(connection)),
+      resolveContextLength: vi.fn(async () => ({
+        contextLength,
+        contextLengthSource: "default",
+      })),
     };
     return {
       store,
@@ -794,18 +798,24 @@ describe("AI reviewer unified model list", function () {
           displayName: "Gemini 2.5 Pro",
           connectionId: gemini.id,
           connectionLabel: "Google Gemini",
+          contextLength,
+          contextLengthSource: "default",
         },
         {
           id: sharedModel,
           displayName: sharedModel,
           connectionId: gemini.id,
           connectionLabel: "Google Gemini",
+          contextLength,
+          contextLengthSource: "default",
         },
         {
           id: localModel,
           displayName: localModel,
           connectionId: local.id,
           connectionLabel: "Lab GPU box",
+          contextLength,
+          contextLengthSource: "default",
         },
         {
           // The same model id reachable through two connections stays two
@@ -814,6 +824,8 @@ describe("AI reviewer unified model list", function () {
           displayName: sharedModel,
           connectionId: local.id,
           connectionLabel: "Lab GPU box",
+          contextLength,
+          contextLengthSource: "default",
         },
       ],
       failures: [],
@@ -1131,6 +1143,9 @@ describe("AI reviewer connection deletion lifecycle", function () {
     await store.create(otherUserId, localConnection);
     vi.doMock("../../../app/src/AiReviewerWorkspaceStore.mjs", () => ({
       createAiReviewerWorkspaceStore: vi.fn(() => ({ deleteUser: vi.fn() })),
+    }));
+    vi.doMock("../../../app/src/AiReviewerSkillStore.mjs", () => ({
+      createAiReviewerSkillStore: vi.fn(() => ({ deleteUser: vi.fn() })),
     }));
     vi.doMock("../../../app/src/AiReviewerProviderConfigStore.mjs", () => ({
       createAiReviewerProviderConfigStore: vi.fn(() => store),

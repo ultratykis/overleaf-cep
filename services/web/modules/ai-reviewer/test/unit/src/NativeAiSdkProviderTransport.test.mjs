@@ -1,4 +1,5 @@
 import { APICallError, simulateReadableStream } from "ai";
+import { Agent } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
@@ -20,13 +21,38 @@ const providers = [
     name: "gemini",
     model: "gemini-2.5-pro",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    requestPath: "/models/gemini-2.5-pro:generateContent",
     Transport: GeminiAiSdkTransport,
+    successResponse: {
+      candidates: [
+        {
+          content: { role: "model", parts: [{ text: "COMPAT_OK" }] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 12,
+        candidatesTokenCount: 3,
+        totalTokenCount: 15,
+      },
+    },
   },
   {
     name: "claude",
     model: "claude-sonnet-4-20250514",
     baseUrl: "https://api.anthropic.com/v1",
+    requestPath: "/messages",
     Transport: ClaudeAiSdkTransport,
+    successResponse: {
+      id: "msg_synthetic_0001",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-4-20250514",
+      content: [{ type: "text", text: "COMPAT_OK" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 12, output_tokens: 3 },
+    },
   },
 ];
 
@@ -414,6 +440,42 @@ describe("AI reviewer: native AI SDK provider transports", function () {
         providerOptions: {},
       });
       expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(providers)(
+    "keeps successful $name generation on the DNS-pinned fetch path",
+    async function ({
+      model: modelId,
+      baseUrl,
+      requestPath,
+      successResponse,
+      Transport,
+    }) {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response(JSON.stringify(successResponse), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+      const transport = new Transport({
+        credential,
+        modelTag: modelId,
+        fetchImpl,
+      });
+
+      expect(
+        await transport.generateChat({ prompt: "Return COMPAT_OK." }),
+      ).toMatchObject({ type: "completed", text: "COMPAT_OK" });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      const [request, init] = fetchImpl.mock.calls[0];
+      expect(String(request)).toBe(`${baseUrl}${requestPath}`);
+      expect(init).toMatchObject({
+        method: "POST",
+        redirect: "error",
+        dispatcher: expect.any(Agent),
+      });
     },
   );
 

@@ -87,6 +87,8 @@ export type AiProviderModel = {
   displayName: string;
   connectionId: string;
   connectionLabel: string;
+  contextLength: number;
+  contextLengthSource: "derived" | "detected" | "default" | "override";
 };
 
 /**

@@ -663,6 +663,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
       }
       return createTransport(config).createAgentGateway({
         contextLength: config.contextLength,
+        contextLengthSource: config.contextLengthSource,
         ...(skills === undefined ? {} : { skills }),
         readProjectFile,
         projectContext,

@@ -386,12 +386,23 @@ describe("AI reviewer: runtime contracts", function () {
     ).toBe(false);
   });
 
-  it("accepts a request that names no scope and no history", function () {
-    const request = conversationRequest();
+  it("accepts a current-document fact without making it scope", function () {
+    const request = conversationRequest({
+      currentDocumentPath: "chapters/introduction.tex",
+    });
 
     expect(AgentRequestSchema.parse(request)).toEqual(request);
+    expect(request.currentDocumentPath).toBe("chapters/introduction.tex");
     expect(request).not.toHaveProperty("scope");
     expect(request).not.toHaveProperty("turns");
+  });
+
+  it("rejects an unsafe current-document fact", function () {
+    expect(
+      AgentRequestSchema.safeParse(
+        conversationRequest({ currentDocumentPath: "../secret.tex" }),
+      ).success,
+    ).toBe(false);
   });
 
   it("keeps editor-action fields on the same request", function () {

@@ -28,6 +28,12 @@ const PROVIDER_ERROR_TYPES = new Set([
   "AI_RetryError",
   "AI_TypeValidationError",
 ]);
+const MODEL_CONTEXT_LENGTH_SOURCES = new Set([
+  "derived",
+  "detected",
+  "default",
+  "override",
+]);
 
 /** @param {unknown} value */
 export function safeProviderStatusCode(value) {
@@ -46,6 +52,20 @@ export function safeProviderErrorType(value) {
     : null;
 }
 
+/** @param {unknown} value */
+function safeModelContextLength(value) {
+  return Number.isSafeInteger(value) && /** @type {number} */ (value) > 0
+    ? /** @type {number} */ (value)
+    : null;
+}
+
+/** @param {unknown} value */
+function safeModelContextLengthSource(value) {
+  return typeof value === "string" && MODEL_CONTEXT_LENGTH_SOURCES.has(value)
+    ? value
+    : null;
+}
+
 export class AgentGatewayError extends Error {
   /**
    * @param {string} message
@@ -57,11 +77,22 @@ export class AgentGatewayError extends Error {
    *   cause?: unknown,
    *   providerStatusCode?: unknown,
    *   providerErrorType?: unknown,
+   *   contextLength?: unknown,
+   *   contextLengthSource?: unknown,
    * }} details
    */
   constructor(
     message,
-    { code, category, retryable, cause, providerStatusCode, providerErrorType },
+    {
+      code,
+      category,
+      retryable,
+      cause,
+      providerStatusCode,
+      providerErrorType,
+      contextLength,
+      contextLengthSource,
+    },
   ) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = "AgentGatewayError";
@@ -70,6 +101,9 @@ export class AgentGatewayError extends Error {
     this.retryable = retryable;
     this.providerStatusCode = safeProviderStatusCode(providerStatusCode);
     this.providerErrorType = safeProviderErrorType(providerErrorType);
+    this.contextLength = safeModelContextLength(contextLength);
+    this.contextLengthSource =
+      safeModelContextLengthSource(contextLengthSource);
   }
 }
 

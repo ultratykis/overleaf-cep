@@ -122,6 +122,13 @@ const PUBLIC_PROJECT_CONTENT_ERROR = Object.freeze({
   retryable: false,
 });
 
+const PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR = Object.freeze({
+  code: "AI_MODEL_CONTEXT_TOO_SMALL",
+  category: "configuration",
+  message: "The request does not fit the selected model context.",
+  retryable: false,
+});
+
 // A review that named no model can only be answered by the person running it,
 // so this stays distinct from a misconfigured provider.
 const PUBLIC_MODEL_SELECTION_ERROR = Object.freeze({
@@ -378,6 +385,17 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
     return publicErrorForCategory("schema");
   }
   if (error instanceof AgentGatewayError) {
+    if (error.code === PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR.code) {
+      return {
+        ...PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR,
+        ...(error.contextLength == null || error.contextLengthSource == null
+          ? {}
+          : {
+              contextLength: error.contextLength,
+              contextLengthSource: error.contextLengthSource,
+            }),
+      };
+    }
     if (error.code === PUBLIC_PROJECT_CONTENT_ERROR.code) {
       return { ...PUBLIC_PROJECT_CONTENT_ERROR };
     }

@@ -54,8 +54,12 @@ export function setAiReviewerGatewayFactoryForTests(gatewayFactory) {
   };
 }
 
-/** @param {any} gateway @param {any} scope */
-function enforceProjectReviewCoverage(gateway, scope) {
+/**
+ * @param {any} gateway
+ * @param {any} scope
+ * @param {{ contextLength: unknown, contextLengthSource: unknown }} context
+ */
+function enforceProjectReviewCoverage(gateway, scope, context) {
   const reviewCoverage = scope.readProjectFile?.reviewCoverage;
   if (scope.kind !== "project" || typeof reviewCoverage !== "function") {
     return gateway;
@@ -69,6 +73,20 @@ function enforceProjectReviewCoverage(gateway, scope) {
         }
         const coverage = reviewCoverage();
         if (coverage.successfulReadCount === 0) {
+          if (coverage.modelInputBudgetFailureCount > 0) {
+            // A model may recover from a rejected read and still complete. The
+            // coverage guard retains the actual budget cause in that path.
+            throw new AgentGatewayError(
+              "The request does not fit the selected model context.",
+              {
+                code: "AI_MODEL_CONTEXT_TOO_SMALL",
+                category: "configuration",
+                retryable: false,
+                contextLength: context.contextLength,
+                contextLengthSource: context.contextLengthSource,
+              },
+            );
+          }
           throw new AgentGatewayError(
             "The review could not read any manuscript content. Use a model with a larger context length or narrow the scope.",
             {
@@ -266,6 +284,7 @@ export function createConfiguredAiReviewerController({
       const scope = await requestScopeReader.read(context.httpRequest, {
         signal: context.signal,
         contextLength: runConfiguration.contextLength,
+        contextLengthSource: runConfiguration.contextLengthSource,
       });
       const skills = await loadRunSkills(skillStore, userId);
       const gateway = providerService.createAgentGateway(runConfiguration, {
@@ -281,7 +300,7 @@ export function createConfiguredAiReviewerController({
       // this rule.
       return context.request.skill != null &&
         context.request.scope?.kind === "project"
-        ? enforceProjectReviewCoverage(gateway, scope)
+        ? enforceProjectReviewCoverage(gateway, scope, runConfiguration)
         : gateway;
     },
     timeoutSignalFactory,

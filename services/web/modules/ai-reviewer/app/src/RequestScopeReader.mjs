@@ -2,6 +2,7 @@
 
 import { AgentRequestSchema } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
+import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
 import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 import { createProjectSnapshot } from "./ProjectSnapshot.mjs";
 
@@ -12,6 +13,23 @@ function rejected() {
       code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
       category: "configuration",
       retryable: false,
+    },
+  );
+}
+
+/**
+ * @param {unknown} contextLength
+ * @param {unknown} contextLengthSource
+ */
+function modelContextTooSmall(contextLength, contextLengthSource) {
+  return new AgentGatewayError(
+    "The request does not fit the selected model context.",
+    {
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      category: "configuration",
+      retryable: false,
+      contextLength,
+      contextLengthSource,
     },
   );
 }
@@ -71,9 +89,16 @@ export function createRequestScopeReader({
   return {
     /**
      * @param {any} httpRequest
-     * @param {{ signal?: AbortSignal, contextLength?: unknown }} [options]
+     * @param {{
+     *   signal?: AbortSignal,
+     *   contextLength?: unknown,
+     *   contextLengthSource?: unknown,
+     * }} [options]
      */
-    async read(httpRequest, { signal, contextLength } = {}) {
+    async read(
+      httpRequest,
+      { signal, contextLength, contextLengthSource } = {},
+    ) {
       const parsed = AgentRequestSchema.safeParse(httpRequest?.body);
       if (!parsed.success) {
         throw rejected();
@@ -100,7 +125,12 @@ export function createRequestScopeReader({
         const snapshot = createProjectSnapshot(
           request.projectId,
           await loadProjectDocuments(request.projectId, { signal }),
-          { contextLength, request },
+          {
+            contextLength,
+            contextLengthSource,
+            request,
+            modelRequest: request,
+          },
         );
         const zoteroSearchRelevant =
           request.action === "citation-audit" ||
@@ -138,8 +168,13 @@ export function createRequestScopeReader({
         typeof searchZoteroItems === "function" && zoteroLinked
           ? (input, { signal }) => searchZoteroItems(userId, input, { signal })
           : undefined;
-      if (JSON.stringify(request).length > maxModelInputCharacters) {
-        throw rejected();
+      // Use the gateway's readable representation so this early rejection and
+      // the transport boundary cannot disagree about the same scoped prompt.
+      if (formatAgentPrompt(request, null).length > maxModelInputCharacters) {
+        // This request is valid and readable; only the selected model budget is
+        // too small. Preserve that distinction so changing files or retrying the
+        // same model is not presented as a remedy.
+        throw modelContextTooSmall(contextLength, contextLengthSource);
       }
       const projectReadRequest = Object.freeze({
         ...request,
@@ -171,7 +206,9 @@ export function createRequestScopeReader({
         ).then((documents) =>
           createProjectSnapshot(request.projectId, documents, {
             contextLength,
+            contextLengthSource,
             request: projectReadRequest,
+            modelRequest: request,
           }),
         );
         const snapshot = await snapshotPromise;

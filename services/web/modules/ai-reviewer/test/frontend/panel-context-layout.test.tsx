@@ -74,12 +74,20 @@ function catalogModel(
   connection: AiProviderConnection,
   id: string,
   displayName: string,
+  contextLength = 4_096,
+  contextLengthSource:
+    | "derived"
+    | "detected"
+    | "default"
+    | "override" = "default",
 ) {
   return {
     id,
     displayName,
     connectionId: connection.id,
     connectionLabel: connection.label,
+    contextLength,
+    contextLengthSource,
   };
 }
 
@@ -92,6 +100,8 @@ const alternateModel = catalogModel(
   claudeConnection,
   "claude-sonnet-4-20250514",
   "Claude Sonnet",
+  200_000,
+  "derived",
 );
 
 function providerProps(
@@ -269,7 +279,11 @@ async function chooseModel(name: string) {
   fireEvent.click(
     await screen.findByRole("button", { name: /^Selected model/u }),
   );
-  fireEvent.click(screen.getByRole("menuitem", { name }));
+  fireEvent.click(
+    screen
+      .getAllByRole("menuitem")
+      .find((item) => item.textContent?.startsWith(name)) as HTMLElement,
+  );
 }
 
 async function reviewedSelection(
@@ -310,6 +324,41 @@ describe("AI reviewer: context-driven panel", function () {
       .exist;
     expect(screen.queryByRole("button", { name: "Review whole project" })).not
       .to.exist;
+  });
+
+  it("hides the saved unresolved count while no connection onboarding is shown", async function () {
+    const store = new MemoryWorkspace();
+    const request = sourceRequest("saved-onboarding-finding");
+    store.workspace = {
+      runs: [
+        {
+          generation: 1,
+          createdOrder: 1,
+          request,
+          text: "Saved review text.",
+          findings: [
+            {
+              artifact: sourceFinding(request),
+              status: "unresolved",
+            },
+          ],
+          suggestions: [],
+        },
+      ],
+      discussions: [],
+    };
+
+    renderPanel({
+      workspacePersistence: store,
+      ...providerProps([], []),
+    });
+
+    expect(await screen.findByTestId("ai-reviewer-onboarding")).to.exist;
+    expect(
+      screen.queryByRole("button", {
+        name: "Go to unresolved findings (1)",
+      }),
+    ).not.to.exist;
   });
 
   it("keeps the conversation as the default surface", async function () {
@@ -841,7 +890,9 @@ describe("AI reviewer: context-driven panel", function () {
 
     const run = await screen.findByRole("article", { name: "Review run 1" });
     expect(
-      screen.getByRole("button", { name: "Selected model — Claude Sonnet" }),
+      screen.getByRole("button", {
+        name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · built-in model data",
+      }),
     ).to.exist;
     expect(
       within(run).getByText("Model used for this run: fake · deterministic-v1"),
@@ -869,10 +920,10 @@ describe("AI reviewer: context-driven panel", function () {
     expect(
       (
         await screen.findByRole("button", {
-          name: "Selected model — Claude Sonnet",
+          name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · built-in model data",
         })
       ).textContent,
-    ).to.equal("Selected model — Claude Sonnet");
+    ).to.equal("Claude Sonnet");
   });
 
   it("sends the same choice from a review, a transform, and a message", async function () {
@@ -927,7 +978,7 @@ describe("AI reviewer: context-driven panel", function () {
           name: "Selected model — None",
         })
       ).textContent,
-    ).to.equal("Selected model — None");
+    ).to.equal("No model");
     // The next workspace write omits the stale destination instead of choosing
     // another connection for the manuscript.
     await waitFor(() => {

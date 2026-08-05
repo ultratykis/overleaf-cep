@@ -69,6 +69,7 @@ export type SelectionWorkspaceState = {
   >;
   conflict: EditorSelectionSessionConflictCode | null;
   error: string | null;
+  errorCode: string | null;
 };
 
 type BoundAction = {
@@ -138,6 +139,7 @@ export type SelectionWorkspaceAction =
   | (BoundAction & {
       type: "error";
       error: string;
+      errorCode: string;
     });
 
 export type ReviewWorkspaceAction =
@@ -172,6 +174,7 @@ export const initialSelectionWorkspaceState: SelectionWorkspaceState = {
   suggestionConflictCodes: {},
   conflict: null,
   error: null,
+  errorCode: null,
 };
 
 function isBoundToState(state: SelectionWorkspaceState, action: BoundAction) {
@@ -207,6 +210,7 @@ export function reduceSelectionWorkspaceState(
       suggestionConflictCodes: {},
       conflict: null,
       error: null,
+      errorCode: null,
     };
   }
 
@@ -328,6 +332,7 @@ export function reduceSelectionWorkspaceState(
         ...state,
         status: "error",
         error: action.event.error.message,
+        errorCode: action.event.error.code,
       };
     }
     return state;
@@ -475,6 +480,7 @@ export function reduceSelectionWorkspaceState(
       status: "conflict",
       conflict: action.conflict,
       error: null,
+      errorCode: null,
     };
   }
 
@@ -484,6 +490,7 @@ export function reduceSelectionWorkspaceState(
       status: "cancelled",
       conflict: null,
       error: null,
+      errorCode: null,
     };
   }
 
@@ -492,6 +499,7 @@ export function reduceSelectionWorkspaceState(
     status: "error",
     conflict: null,
     error: action.error,
+    errorCode: action.errorCode,
   };
 }
 
@@ -541,6 +549,7 @@ function hydrateWorkspaceRun(run: WorkspaceRun): SelectionWorkspaceState {
     ),
     conflict: null,
     error: null,
+    errorCode: null,
   };
 }
 

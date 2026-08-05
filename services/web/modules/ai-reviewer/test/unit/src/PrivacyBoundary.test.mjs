@@ -13,6 +13,7 @@ import {
   recordAiReviewerFailure,
   recordAiReviewerProviderDiagnostic,
 } from "../../../app/src/AiReviewerFailureLogger.mjs";
+import { SYSTEM_INSTRUCTION } from "../../../app/src/AiSdkAgentGateway.mjs";
 
 const serverContentBoundary = [
   "../../../app/src/AgentGateway.mjs",
@@ -268,14 +269,20 @@ describe("AI reviewer: module shell privacy boundary", function () {
       );
 
       warn.mockClear();
-      const systemInstruction =
-        "You are a bounded LaTeX reviewer working inside one project conversation.";
+      const systemContents = [
+        "DISTINCTIVE_GEMINI_SYSTEM_INSTRUCTION_SKILL_METADATA",
+        "DISTINCTIVE_ANTHROPIC_TOP_LEVEL_SYSTEM_SKILL_METADATA",
+        "DISTINCTIVE_ROLE_SYSTEM_SKILL_METADATA",
+        "DISTINCTIVE_ROLE_DEVELOPER_SKILL_METADATA",
+        "DISTINCTIVE_ROLE_ASSISTANT_CONTENT",
+        "DISTINCTIVE_ROLE_MODEL_CONTENT",
+      ];
       const systemInstructionResponse = JSON.stringify({
         error: {
           code: 400,
           message:
-            `Unknown name "x" at 'systemInstruction.parts[0].text': ` +
-            systemInstruction,
+            `Unknown system fields: ${systemContents.join("; ")}; ` +
+            'unknown name "x".',
         },
       });
       recordAiReviewerProviderDiagnostic({
@@ -285,22 +292,36 @@ describe("AI reviewer: module shell privacy boundary", function () {
           message: "Provider rejected the request.",
           url: "https://generativelanguage.googleapis.com/v1beta/models/test",
           requestBodyValues: {
-            systemInstruction: { parts: [{ text: systemInstruction }] },
-            messages: [{ role: "system", content: systemInstruction }],
+            systemInstruction: { parts: [{ text: systemContents[0] }] },
+            system: [{ type: "text", text: systemContents[1] }],
+            messages: [
+              { role: "system", content: systemContents[2] },
+              { role: "developer", content: systemContents[3] },
+              { role: "assistant", content: systemContents[4] },
+              { role: "model", content: systemContents[5] },
+            ],
           },
           statusCode: 400,
           responseBody: systemInstructionResponse,
           isRetryable: false,
         }),
+        systemInstructionAuthorContent: systemContents.slice(0, 2),
       });
       expect(warn).toHaveBeenCalledExactlyOnceWith(
         {
           provider: "gemini",
           model: "gemini-test",
-          detail: systemInstructionResponse,
+          detail: systemContents.reduce(
+            (detail, content) =>
+              detail.replace(content, "[REDACTED: author content]"),
+            systemInstructionResponse,
+          ),
         },
         AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
       );
+      for (const content of systemContents) {
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(content);
+      }
 
       warn.mockClear();
       const manuscript = "DISTINCTIVE_PROVIDER_ECHOED_MANUSCRIPT_CONTENT";
@@ -336,6 +357,68 @@ describe("AI reviewer: module shell privacy boundary", function () {
         AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
       );
       expect(JSON.stringify(warn.mock.calls)).not.toContain(manuscript);
+    } finally {
+      Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
+      warn.mockRestore();
+    }
+  });
+
+  // Provider schema failures name our fixed tools, while the same system field
+  // also carries private Skill metadata. Both halves must keep their boundary.
+  it("keeps fixed system tool names while redacting Skill metadata", function () {
+    const previousDebugSetting = Settings.aiReviewer?.debugProviderErrors;
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      Settings.aiReviewer = {
+        ...Settings.aiReviewer,
+        debugProviderErrors: true,
+      };
+      const skillName = "DISTINCTIVE_USER_AUTHORED_SKILL_NAME";
+      const skillDescription =
+        "DISTINCTIVE_USER_AUTHORED_SKILL_DESCRIPTION_FOR_REDACTION";
+      const providerReason =
+        `Invalid schema for function 'propose_suggestion': ${skillName}; ` +
+        `description: ${skillDescription}; 'additionalProperties' is required.`;
+      const providerResponse = JSON.stringify({
+        error: { code: 400, message: providerReason },
+      });
+      recordAiReviewerProviderDiagnostic({
+        provider: "gemini",
+        model: "gemini-test",
+        detail: new APICallError({
+          message: "Provider rejected the request.",
+          url: "https://generativelanguage.googleapis.com/v1beta/models/test",
+          requestBodyValues: {
+            systemInstruction: {
+              parts: [
+                {
+                  text: `${SYSTEM_INSTRUCTION}\n${JSON.stringify([
+                    { name: skillName, description: skillDescription },
+                  ])}`,
+                },
+              ],
+            },
+          },
+          statusCode: 400,
+          responseBody: providerResponse,
+          isRetryable: false,
+        }),
+        systemInstructionAuthorContent: [skillName, skillDescription],
+      });
+      const loggedRecord = JSON.stringify(warn.mock.calls);
+      expect(warn).toHaveBeenCalledExactlyOnceWith(
+        {
+          provider: "gemini",
+          model: "gemini-test",
+          detail: providerResponse
+            .replace(skillName, "[REDACTED: author content]")
+            .replace(skillDescription, "[REDACTED: author content]"),
+        },
+        AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
+      );
+      expect(loggedRecord).toContain("propose_suggestion");
+      expect(loggedRecord).not.toContain(skillName);
+      expect(loggedRecord).not.toContain(skillDescription);
     } finally {
       Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
       warn.mockRestore();

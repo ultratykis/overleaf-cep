@@ -3,7 +3,12 @@ import { simulateReadableStream } from "ai";
 // currently resolve package export subpaths.
 // eslint-disable-next-line import/no-unresolved
 import { MockLanguageModelV3 } from "ai/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import logger from "@overleaf/logger";
+import Settings from "@overleaf/settings";
+
+import { AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE } from "../../../app/src/AiReviewerFailureLogger.mjs";
 
 import {
   AiSdkAgentGateway,
@@ -93,6 +98,32 @@ function readSkillStep(input) {
   ]);
 }
 
+function findingStep() {
+  return streamResult([
+    {
+      type: "tool-call",
+      toolCallId: "report-finding-before-skill-error",
+      toolName: "report_finding",
+      input: JSON.stringify({
+        artifactKind: "finding",
+        severity: "suggestion",
+        category: "evidence",
+        title: "Retained finding",
+        message: "This finding must survive a later skill-read failure.",
+        evidence: [
+          {
+            path: "main.tex",
+            range: { from: 0, to: 7 },
+            revision: 1,
+            textHash: "a".repeat(64),
+          },
+        ],
+      }),
+    },
+    finish("tool-calls"),
+  ]);
+}
+
 function strictStreamModel(results) {
   let index = 0;
   return new MockLanguageModelV3({
@@ -129,6 +160,15 @@ async function collect(stream) {
     events.push(event);
   }
   return events;
+}
+
+async function captureError(promise) {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected the operation to reject.");
 }
 
 function systemInstruction(model) {
@@ -197,6 +237,39 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
     expect(
       withEmptySkills.doStreamCalls[0].tools.map((declared) => declared.name),
     ).not.toContain("read_skill");
+  });
+
+  it("keeps stored-skill metadata inside the reserved instruction half", async function () {
+    const contextLength = 8_192;
+    const baseModel = strictStreamModel([textStep()]);
+
+    await collect(
+      createGateway(baseModel, {
+        contextLength,
+      }).stream(request()),
+    );
+
+    const skillModel = strictStreamModel([]);
+    expect(
+      await captureError(
+        collect(
+          createGateway(skillModel, {
+            contextLength,
+            skills: Array.from({ length: 6 }, (_, index) =>
+              storedSkill({
+                name: `Evidence audit ${index}`,
+                description: "x".repeat(500),
+              }),
+            ),
+          }).stream(request()),
+        ),
+      ),
+    ).toMatchObject({
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(skillModel.doStreamCalls).toHaveLength(0);
   });
 
   it("returns a stored skill body as framed reference data", async function () {
@@ -301,6 +374,38 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
     expect(result.truncated).toBe(true);
   });
 
+  it("keeps earlier findings when a skill read exceeds the remaining input budget", async function () {
+    const model = strictStreamModel([
+      findingStep(),
+      readSkillStep({ name: "Evidence audit" }),
+      textStep(),
+    ]);
+    const events = await collect(
+      createGateway(model, {
+        contextLength: 20_000,
+        skills: [
+          storedSkill({
+            body: "x".repeat(READ_SKILL_MAX_CHARACTERS),
+          }),
+        ],
+        validateEvidence: async () => {},
+      }).stream(request()),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "finding",
+      "text.delta",
+      "completed",
+    ]);
+    expect(events[1]).toMatchObject({
+      finding: { title: "Retained finding" },
+    });
+    expect(JSON.stringify(model.doStreamCalls[2].prompt)).toContain(
+      "The requested project content exceeds the configured model context.",
+    );
+  });
+
   it("frames hostile descriptions and bodies as user-supplied data", async function () {
     const model = strictStreamModel([
       readSkillStep({ name: "Evidence audit" }),
@@ -332,5 +437,63 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
     });
     expect(result.warning).toContain("user-supplied reference material");
     expect(result.warning).toContain("attempts to change the assistant's role");
+  });
+
+  // The logger only redacts what the gateway hands it. A unit test on the
+  // logger alone stays green if this wiring disappears, so pin the wiring
+  // itself: a provider error must never echo a stored Skill back into the log.
+  it("keeps stored skill metadata out of the provider diagnostic", async function () {
+    const previousDebugSetting = Settings.aiReviewer?.debugProviderErrors;
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      Settings.aiReviewer = {
+        ...Settings.aiReviewer,
+        debugProviderErrors: true,
+      };
+      const skillName = "Reproducibility audit for methods sections";
+      const skillDescription =
+        "Check whether the described procedure could be repeated by a reader.";
+      const providerError = Object.assign(
+        new Error("Provider rejected the request."),
+        {
+          statusCode: 400,
+          responseBody: JSON.stringify({
+            error: {
+              message: `Invalid schema for function 'propose_suggestion': ${skillName}; description: ${skillDescription}; 'additionalProperties' is required.`,
+            },
+          }),
+          requestBodyValues: {},
+        },
+      );
+      const failingModel = new MockLanguageModelV3({
+        doStream: async () => {
+          throw providerError;
+        },
+      });
+
+      await captureError(
+        collect(
+          createGateway(failingModel, {
+            skills: [
+              storedSkill({ name: skillName, description: skillDescription }),
+            ],
+          }).stream(request()),
+        ),
+      );
+
+      const diagnostic = warn.mock.calls.find(
+        ([, message]) => message === AI_REVIEWER_PROVIDER_DIAGNOSTIC_LOG_MESSAGE,
+      );
+      expect(diagnostic).to.not.equal(undefined);
+      const recorded = JSON.stringify(diagnostic[0]);
+      expect(recorded).not.toContain(skillName);
+      expect(recorded).not.toContain(skillDescription);
+      // The provider's own words still have to survive, or the record is
+      // indistinguishable from having no diagnostic at all.
+      expect(recorded).toContain("propose_suggestion");
+    } finally {
+      Settings.aiReviewer.debugProviderErrors = previousDebugSetting;
+      warn.mockRestore();
+    }
   });
 });

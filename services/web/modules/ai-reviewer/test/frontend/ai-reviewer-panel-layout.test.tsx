@@ -504,6 +504,11 @@ describe("AI reviewer panel width", function () {
   });
 
   it("keeps run provenance and compact artifact controls themed", function () {
+    const panel = declarationsFor(".ai-reviewer-panel");
+    expect(panel.get("--bs-code-color")).to.equal(
+      "var(--content-secondary-themed)",
+    );
+
     const runModel = declarationsFor(".ai-reviewer-run-model");
     expect(runModel.get("color")).to.equal("var(--content-secondary-themed)");
 
@@ -515,6 +520,14 @@ describe("AI reviewer panel width", function () {
       "var(--bg-tertiary-themed)",
     );
 
+    const resolvedStatus = declarationsFor(
+      ".ai-reviewer-artifact-summary-content .ai-reviewer-artifact-status",
+    );
+    expect(resolvedStatus.get("min-width")).to.equal("0");
+    expect(resolvedStatus.get("overflow")).to.equal("hidden");
+    expect(resolvedStatus.get("text-overflow")).to.equal("ellipsis");
+    expect(resolvedStatus.get("flex-shrink")).to.equal("1");
+
     const unresolvedJump = declarationsFor(
       ".ai-reviewer-panel-unresolved-findings",
     );
@@ -524,6 +537,11 @@ describe("AI reviewer panel width", function () {
   });
 
   it("keeps the settings tabs, connection surfaces, and dialog footer themed", function () {
+    const dialog = declarationsFor(".ai-reviewer-provider-settings");
+    expect(dialog.get("--bs-code-color")).to.equal(
+      "var(--content-secondary-themed)",
+    );
+
     const body = declarationsFor(
       ".ai-reviewer-provider-settings .ai-reviewer-provider-settings-body",
     );

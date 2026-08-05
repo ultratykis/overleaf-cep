@@ -210,6 +210,7 @@ function createGateway(model, overrides = {}) {
     provider: "fixture-provider",
     modelId: "fixture-model",
     contextLength: 8_192,
+    contextLengthSource: "override",
     readProjectFile: async () => ({
       path: "main.tex",
       range: { from: 0, to: 22 },
@@ -1032,13 +1033,18 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     expect(overLimitModel.doStreamCalls).toHaveLength(0);
   });
 
-  it("measures the context budget against the exact readable prompt", async function () {
-    const request = documentRequest();
+  it("measures the manuscript budget against the exact readable prompt", async function () {
+    const baseRequest = documentRequest();
+    const request = {
+      ...baseRequest,
+      scope: { ...baseRequest.scope, text: "x".repeat(3_000) },
+    };
     const { model: captureModel } = strictStreamModel([textStep("Captured.")]);
 
     await collect(createGateway(captureModel).stream(request));
 
     const readablePrompt = sentPrompt(captureModel);
+    const systemInstruction = sentSystemInstruction(captureModel);
     const exactContextLength = readablePrompt.length * 2;
     const shortContextLength = (readablePrompt.length - 1) * 2;
     expect(modelInputCharacterBudget(exactContextLength)).toBe(
@@ -1057,9 +1063,11 @@ describe("AI reviewer: one agent path for review and conversation", function () 
         ),
       ),
     ).toMatchObject({
-      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      code: "AI_MODEL_CONTEXT_TOO_SMALL",
       category: "configuration",
       retryable: false,
+      contextLength: shortContextLength,
+      contextLengthSource: "override",
     });
     expect(shortModel.doStreamCalls).toHaveLength(0);
 
@@ -1069,6 +1077,7 @@ describe("AI reviewer: one agent path for review and conversation", function () 
         request,
       ),
     );
+    expect(sentSystemInstruction(exactModel)).toBe(systemInstruction);
     expect(sentPrompt(exactModel)).toBe(readablePrompt);
   });
 

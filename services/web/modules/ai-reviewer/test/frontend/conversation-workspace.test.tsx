@@ -12,6 +12,7 @@ import React from "react";
 import sinon from "sinon";
 
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
+import { aiReviewerDocumentIdentity } from "../../frontend/js/extensions/document-identity";
 import type {
   EditorSelectionSession,
   EditorSelectionSessionContext,
@@ -38,18 +39,30 @@ const baseTextHash =
   "aea23d46109af9b94c5f15085d69113cc2cefa85f05748897a4df172a1ee5104";
 
 function editorContext(doc: string, from: number, to: number) {
+  const currentDocument = {
+    doc_id: documentId,
+    joined: true,
+    getSnapshot: () => doc,
+    hasBufferedOps: () => false,
+    getTrackingChanges: () => false,
+    cm6: undefined as { view: EditorView } | undefined,
+  };
   const view = new EditorView({
     state: EditorState.create({
       doc,
       selection: { anchor: from, head: to },
+      extensions: [
+        aiReviewerDocumentIdentity.of({ documentId, currentDocument }),
+      ],
     }),
   });
+  currentDocument.cm6 = { view };
   const context: EditorSelectionSessionContext = {
     view,
     projectId,
     currentDocumentId: documentId,
     path,
-    currentDocument: null,
+    currentDocument,
     sourceMode: true,
     connected: true,
     connectionEpoch: 1,
@@ -386,6 +399,7 @@ describe("AI reviewer: conversation workspace", function () {
 
     const request = streamRequest.firstCall.args[0].request as AgentRequest;
     expect(request.instruction).to.equal("What is unclear here?");
+    expect(request.currentDocumentPath).to.equal(path);
     expect(request).not.to.have.property("scope");
     expect(request.turns).to.deep.equal([
       {
@@ -402,7 +416,89 @@ describe("AI reviewer: conversation workspace", function () {
     view.destroy();
   });
 
-  it("attaches no editor context when there is no live selection", async function () {
+  it("drops a stale open-document path while retaining live quoted selection text", async function () {
+    const selectedText = "Live text from the editor that stayed open.";
+    const { context, view } = editorContext(
+      selectedText,
+      0,
+      selectedText.length,
+    );
+    // openDocWithId publishes this state before its awaited open can fail; the
+    // CodeMirror identity still belongs to the previous document.
+    context.currentDocumentId = "document-that-failed-to-open";
+    context.path = "chapters/failed-open.tex";
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        call.onEvent(
+          agentEvent(call.request.requestId, 0, {
+            type: "completed",
+            finishReason: "stop",
+          }),
+        );
+      });
+
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        createDiscussionId={() => "stale-document-discussion"}
+        createDiscussionRequestId={() => "stale-document-request"}
+        now={() => createdAt}
+        streamRequest={streamRequest}
+        getSelectionContext={sinon.stub().returns(context)}
+      />,
+    );
+
+    await sendConversationMessage("Use only valid editor context.");
+
+    const request = streamRequest.firstCall.args[0].request as AgentRequest;
+    expect(request).not.to.have.property("currentDocumentPath");
+    expect(request.turns?.at(-1)?.text).to.contain(
+      JSON.stringify(selectedText),
+    );
+    expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
+    view.destroy();
+  });
+
+  it("omits open-document paths that the agent request contract cannot represent", async function () {
+    const invalidPaths = ["figures%2Fplot.tex", "C:/chap.tex"];
+
+    for (const [index, invalidPath] of invalidPaths.entries()) {
+      const { context, view } = editorContext("Nothing selected.", 0, 0);
+      context.path = invalidPath;
+      const streamRequest = sinon
+        .stub()
+        .callsFake(async (call: ReviewStreamCall) => {
+          call.onEvent(
+            agentEvent(call.request.requestId, 0, {
+              type: "completed",
+              finishReason: "stop",
+            }),
+          );
+        });
+      const rendered = render(
+        <AiReviewerPanelView
+          projectId={projectId}
+          createDiscussionId={() => `invalid-path-discussion-${index}`}
+          createDiscussionRequestId={() => `invalid-path-request-${index}`}
+          now={() => createdAt}
+          streamRequest={streamRequest}
+          getSelectionContext={sinon.stub().returns(context)}
+        />,
+      );
+
+      await sendConversationMessage("Continue without the unsupported path.");
+
+      const request = streamRequest.firstCall.args[0].request as AgentRequest;
+      expect(request).not.to.have.property("currentDocumentPath");
+      expect(request).not.to.have.property("scope");
+      expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
+      rendered.unmount();
+      view.destroy();
+    }
+  });
+
+  it("carries the open document without making an empty selection a scope", async function () {
     const { context, view } = editorContext("Nothing selected.", 0, 0);
     const streamRequest = sinon
       .stub()
@@ -429,6 +525,7 @@ describe("AI reviewer: conversation workspace", function () {
     await sendConversationMessage("Answer without editor context.");
 
     const request = streamRequest.firstCall.args[0].request as AgentRequest;
+    expect(request.currentDocumentPath).to.equal(path);
     expect(request).not.to.have.property("scope");
     expect(request).not.to.have.property("turns");
     expect(AgentRequestSchema.safeParse(request).success).to.equal(true);

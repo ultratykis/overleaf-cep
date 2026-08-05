@@ -17,7 +17,8 @@ export function parseModelContextLength(input) {
  * Treat one UTF-16 character as one token so CJK, LaTeX, and JSON do not
  * inherit an optimistic prose ratio. Reserve the other half of the context
  * window for the system instruction, provider schema overhead, tokenization
- * variance, and the model response.
+ * variance, and the model response. Callers must not subtract the instruction
+ * from this manuscript-and-tool allowance a second time.
  *
  * @param {unknown} contextLength
  */
