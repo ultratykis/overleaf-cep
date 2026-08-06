@@ -115,29 +115,82 @@ explicitly forbids suggestions for project scope and permits an edit only in
 the requested document/range. Project-wide runner edits therefore require a
 new authority model; they are not a parser extension.
 
-## Minimal spike
+## Attended mapping spike (2026-08-07)
 
-### Phase 0: deterministic and offline
+The first experiment used an actual Codex result before designing or
+implementing a mapper.
 
-1. Add recorded App Server `fileChange`/`turn/diff/updated` fixtures. Do not
-   invoke a model.
-2. Map a single `.tex` replacement into the existing `SuggestionSchema`.
-3. Cover insert, delete, replacement, multiple hunks, adjacent hunks, CRLF,
-   Japanese text and emoji (UTF-16), path rejection and stale base text.
-4. Feed the result through the existing detached diff and application tests.
-5. Reject rename, delete, binary content, unknown paths, cross-document edits
-   and edits outside a selection until their authority is designed.
+### Run
 
-### Phase 1: one attended runner turn
+- Source: an independent clone of Git Bridge HEAD `eb72cee` for project
+  `ai_debri_chi2027`; the production Git Bridge working tree was not touched.
+- Runtime: one ephemeral `codex --profile rdg exec` run with request and stream
+  retries overridden to zero.
+- Task: make one contiguous wording improvement in the first sentence of
+  `sections/01_intro.tex`, changing no other file and running no build/test.
+- Result: one file changed, one line replaced. Usage was 44,510 input tokens
+  (29,029 cached), 528 output tokens and 201 reasoning tokens.
+- No 4xx/5xx provider response was observed. Codex did log one model-catalog
+  client decode error: the gateway returned its normal `{"data":[...]}` model
+  list while the Codex model manager expected a `models` field. The main
+  Responses turn still completed successfully; no retry was made.
 
-Only after Phase 0 passes:
+The run replaced:
 
-1. Materialize a disposable LaTeX fixture under a temporary directory.
-2. Start Codex App Server with the RDG profile in a read/write sandbox scoped
-   only to that fixture.
-3. Ask for one deterministic, small edit and record the file-change events.
-4. Map the result through the Phase 0 boundary without writing to Overleaf.
-5. Stop immediately on the first provider error; do not retry.
+```text
+... yet this critical sector is currently grappling with persistent,
+structural labor shortages ...
+```
+
+with:
+
+```text
+... yet the sector faces persistent structural labor shortages ...
+```
+
+### Manual mapping
+
+The complete changed sentence can be represented mechanically as a candidate
+suggestion:
+
+- project id: `6a39288ab32ec55ba3169b37`
+- document id: `6a39288bb32ec55ba3169bc1`
+- path: `sections/01_intro.tex`
+- Git source commit: `eb72ceec30ae4595330aaff361129553a82e6101`
+- Git base text hash:
+  `dc896ca012ec5050c3322d135c30c582a61aea3a2a4bb2b2ee7a32ae1d94504c`
+- full-sentence UTF-16 range: `58..285`
+- original length: 227; replacement length: 194
+
+There is no valid Overleaf `baseRevision` for that candidate. The live document
+had already diverged from Git Bridge HEAD:
+
+- live Mongo document version: `549`
+- live text hash:
+  `9f23c2881dcf3794091152615b5018052e8c6f43c4378e47b21df8e8e3b588c4`
+- live first-sentence UTF-16 range: `58..275`
+- live sentence uses “while many industries that rely on deskless labor ...”,
+  not the sentence edited by Codex
+
+Applying the exact checks in `assertSuggestionForRequest` gives
+`identityMatches=false`, `rangeMatches=false` and `originalMatches=false`, so
+the correct result is `AI_EVENT_SCOPE_MISMATCH`.
+
+### What the spike established
+
+1. A real Codex edit can be expressed using the existing suggestion fields;
+   no production mapper was needed to establish that mechanical feasibility.
+2. A Git Bridge checkout is not a revision-pinned representation of the live
+   Overleaf document. In this case its last commit was July 23 while the
+   Overleaf project was updated afterward.
+3. The first architecture problem is therefore project materialization and a
+   synchronization barrier, not unified-diff parsing.
+4. The existing fail-closed boundary correctly prevents this stale candidate
+   from reaching realtime/OT state.
+
+No second gateway run should be made until the runner can start from text that
+is cryptographically tied to the exact Overleaf revision captured by the
+request.
 
 ## Architecture questions after the spike
 
@@ -161,8 +214,9 @@ Only after Phase 0 passes:
 
 ## Decision gate
 
-Do not choose the replacement architecture merely because the single-document
-mapper works. Adoption requires an explicit answer for runner placement,
+Do not choose the replacement architecture merely because single-document
+mapping is mechanically possible. Adoption requires an explicit answer for
+runner placement,
 credentials, concurrency, multi-document authority, lifecycle cleanup and
 error-budget enforcement. If those costs outweigh removal of the current
 harness, issue 012 should be fixed with per-file degradation and the existing
