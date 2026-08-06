@@ -510,6 +510,32 @@ describe("AI reviewer: provider configuration", function () {
     );
   });
 
+  it("serializes an OpenAI-compatible API version and omits a blank one", async function () {
+    const route = fetchMock.post(
+      `/project/${projectId}/ai-reviewer/connections`,
+      configured,
+    );
+    const apiVersion = "2025-01-01-preview";
+    const signal = new AbortController().signal;
+
+    await createAiProviderConnection(
+      projectId,
+      { ...configurationWrite, apiVersion },
+      signal,
+    );
+    await createAiProviderConnection(
+      projectId,
+      { ...configurationWrite, apiVersion: "" },
+      signal,
+    );
+
+    const bodies = route.callHistory
+      .calls()
+      .map((call) => JSON.parse(String(call.options.body)));
+    expect(bodies[0]).to.deep.equal({ ...configurationWrite, apiVersion });
+    expect(bodies[1]).to.deep.equal(configurationWrite);
+  });
+
   it("serializes reasoning model compatibility when enabled", async function () {
     const route = fetchMock.post(
       `/project/${projectId}/ai-reviewer/connections`,
@@ -811,6 +837,69 @@ describe("AI reviewer: provider configuration", function () {
         models: ["reviewer/manual-v1", "reviewer/manual-v2"],
       },
     ]);
+  });
+
+  it("shows, validates, previews, and saves an optional OpenAI-compatible API version", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const { saveConfiguration } = renderDetails();
+    await waitUntilLoaded();
+
+    const apiVersionInput = input("API version (Optional)");
+    expect(apiVersionInput.value).to.equal("");
+    expect(apiVersionInput.required).to.equal(false);
+    expect(
+      screen.getByText(
+        "Requests send this as ?api-version=. Leave blank to use the gateway default.",
+      ),
+    ).to.exist;
+    fireEvent.change(input("Base URL"), {
+      target: { value: configuration.baseUrl },
+    });
+    fireEvent.change(apiVersionInput, { target: { value: "abc" } });
+    expect(button("Save").disabled).to.equal(true);
+
+    fireEvent.change(apiVersionInput, { target: { value: apiVersion } });
+    expect(button("Save").disabled).to.equal(false);
+    expect(requestUrlValues()).to.deep.equal([
+      `${configuration.baseUrl}/chat/completions?api-version=${apiVersion}`,
+    ]);
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal({
+      ...configurationWrite,
+      apiVersion,
+    });
+  });
+
+  it("loads and clears a saved OpenAI-compatible API version", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const versioned: AiProviderConnection = {
+      ...otherConfigured,
+      config: { ...otherConfiguration, apiVersion },
+    };
+    const cleared: AiProviderConnection = {
+      ...versioned,
+      revision: versioned.revision + 1,
+      config: { ...otherConfiguration },
+    };
+    const saveConfiguration = sinon.stub().resolves(cleared);
+    renderDetails({
+      getConfiguration: sinon.stub().resolves(versioned),
+      saveConfiguration,
+    });
+    await waitUntilLoaded();
+
+    editConnection(versioned);
+    const apiVersionInput = input("API version (Optional)");
+    expect(apiVersionInput.value).to.equal(apiVersion);
+    fireEvent.change(apiVersionInput, { target: { value: "" } });
+    fireEvent.click(button("Save"));
+
+    await waitFor(() => expect(saveConfiguration).to.have.been.calledOnce);
+    expect(saveConfiguration.firstCall.args[1]).to.deep.equal(
+      otherConfigurationWrite,
+    );
   });
 
   it("explains the API base URL and rejects a chat completions endpoint", async function () {

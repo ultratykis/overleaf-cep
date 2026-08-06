@@ -53,6 +53,7 @@ const azureResource = "reviewer-resource";
 const azureBaseUrl = `https://${azureResource}.openai.azure.com/openai`;
 const plaintextAzureBaseUrl = "http://host.docker.internal:11434/openai";
 const azureApiVersion = "2025-01-01-preview";
+const openAiCompatibleApiVersion = "2025-01-01-preview";
 const azureDeployment = "gpt-5.6-terra";
 const azurePortalEndpoint = `${azureBaseUrl}/deployments/${azureDeployment}/chat/completions?api-version=${azureApiVersion}`;
 const englishMessages = JSON.parse(
@@ -703,13 +704,12 @@ describe("AI reviewer provider configuration", function () {
     ).toThrow(/only for Azure/u);
   });
 
-  it("keeps an unchosen Azure API version absent but rejects it on other kinds", function () {
+  it("keeps an unchosen Azure API version absent but rejects Azure fields on other kinds", function () {
     const blankVersion = parseAiReviewerConnectionUpdate(
       blankAzureConnectionWrite,
     );
     expect(blankVersion).not.toHaveProperty("apiVersion");
     for (const invalid of [
-      { ...connectionWrite, apiVersion: azureApiVersion },
       { ...connectionWrite, deployments: [azureDeployment] },
       { ...geminiConnectionWrite, apiVersion: azureApiVersion },
       { ...claudeConnectionWrite, deployments: [azureDeployment] },
@@ -723,6 +723,33 @@ describe("AI reviewer provider configuration", function () {
     ]) {
       expect(() => parseAiReviewerConnectionUpdate(invalid)).toThrow();
     }
+  });
+
+  it("normalizes and validates an OpenAI-compatible API version", function () {
+    expect(
+      parseAiReviewerConnectionUpdate({
+        ...connectionWrite,
+        apiVersion: openAiCompatibleApiVersion,
+      }),
+    ).toMatchObject({ apiVersion: openAiCompatibleApiVersion });
+    expect(
+      parseAiReviewerProviderConfig({
+        ...configuration,
+        apiVersion: openAiCompatibleApiVersion,
+      }),
+    ).toMatchObject({ apiVersion: openAiCompatibleApiVersion });
+    expect(
+      parseAiReviewerConnectionUpdate({
+        ...connectionWrite,
+        apiVersion: "",
+      }),
+    ).not.toHaveProperty("apiVersion");
+    expect(() =>
+      parseAiReviewerConnectionUpdate({
+        ...connectionWrite,
+        apiVersion: "abc",
+      }),
+    ).toThrow();
   });
 
   it("stores a Gemini model without its listing prefix", function () {
@@ -1003,6 +1030,28 @@ describe("AI reviewer provider configuration", function () {
       "contextLengthOverride",
     );
     expect(records.get(userId).revision).toBe(1);
+  });
+
+  it("round-trips an OpenAI-compatible API version through storage and the public view", async function () {
+    const { modelDependency, records } = inMemoryModel();
+    const store = createAiReviewerProviderConfigStore({
+      model: modelDependency,
+    });
+
+    const created = await store.create(userId, {
+      ...connectionWrite,
+      apiVersion: openAiCompatibleApiVersion,
+    });
+    const reloaded = await store.get(userId, created.id);
+
+    expect(created.apiVersion).toBe(openAiCompatibleApiVersion);
+    expect(reloaded.apiVersion).toBe(openAiCompatibleApiVersion);
+    expect(storedConnection(records).apiVersion).toBe(
+      openAiCompatibleApiVersion,
+    );
+    expect(publicAiReviewerProviderConnection(created).config.apiVersion).toBe(
+      openAiCompatibleApiVersion,
+    );
   });
 
   it("keeps a legacy record that never stored a context length", async function () {
@@ -2010,6 +2059,27 @@ describe("AI reviewer provider configuration", function () {
     });
   });
 
+  it("passes an OpenAI-compatible API version into transport construction", function () {
+    const transport = { createAgentGateway: vi.fn(() => ({ kind: "review" })) };
+    const transportFactory = vi.fn(() => transport);
+    const service = createOllamaProviderService({ transportFactory });
+
+    service.createAgentGateway(
+      {
+        ...credentialConfiguration,
+        apiVersion: openAiCompatibleApiVersion,
+      },
+      { readProjectFile: vi.fn() },
+    );
+
+    expect(transportFactory).toHaveBeenCalledWith({
+      baseUrl: remoteBaseUrl,
+      apiVersion: openAiCompatibleApiVersion,
+      credential,
+      modelTag: remoteModel,
+    });
+  });
+
   it.each([
     {
       configuration: geminiConfiguration,
@@ -2048,6 +2118,81 @@ describe("AI reviewer provider configuration", function () {
       }
     },
   );
+
+  it("queries and caches OpenAI-compatible model catalogues per API version", async function () {
+    const firstApiVersion = "2024-06-01";
+    const secondApiVersion = "2025-01-01-preview";
+    const modelFetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      modelNow: () => 1_000,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    await service.listModels(
+      { ...connection, apiVersion: firstApiVersion },
+      { cacheKey: userId },
+    );
+    await service.listModels(
+      { ...connection, apiVersion: firstApiVersion },
+      { cacheKey: userId },
+    );
+    await service.listModels(
+      { ...connection, apiVersion: secondApiVersion },
+      { cacheKey: userId },
+    );
+
+    expect(modelFetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      `${remoteBaseUrl}/models?api-version=${firstApiVersion}`,
+      `${remoteBaseUrl}/models?api-version=${secondApiVersion}`,
+    ]);
+  });
+
+  it("caches OpenAI-compatible context lengths per API version", async function () {
+    const contextLengthDetector = vi.fn(async () => 32_768);
+    const service = createAiReviewerProviderService({
+      contextLengthDetector,
+      contextLengthDetectionSignalFactory: () => undefined,
+      modelNow: () => 1_000,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    await service.resolveContextLength(
+      { ...connection, apiVersion: "2024-06-01" },
+      remoteModel,
+      { cacheKey: userId },
+    );
+    await service.resolveContextLength(
+      { ...connection, apiVersion: "2024-06-01" },
+      remoteModel,
+      { cacheKey: userId },
+    );
+    await service.resolveContextLength(
+      { ...connection, apiVersion: openAiCompatibleApiVersion },
+      remoteModel,
+      { cacheKey: userId },
+    );
+
+    expect(contextLengthDetector).toHaveBeenCalledTimes(2);
+    expect(
+      contextLengthDetector.mock.calls.map(
+        ([candidate]) => candidate.apiVersion,
+      ),
+    ).toEqual(["2024-06-01", openAiCompatibleApiVersion]);
+  });
 
   it.each([
     { provider: "gemini", model: geminiModel, contextLength },

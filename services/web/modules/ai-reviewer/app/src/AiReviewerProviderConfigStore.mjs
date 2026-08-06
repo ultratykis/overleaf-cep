@@ -144,23 +144,30 @@ function revisionFilter(userId, revision) {
 function coreConnectionInput(value) {
   return {
     provider: value?.provider,
-    ...(value?.provider === "openai-compatible" || value?.provider === "ollama"
-      ? { baseUrl: value?.baseUrl }
-      : value?.provider === "azure"
-        ? {
-            baseUrl: value?.baseUrl,
-            ...(value != null && Object.hasOwn(value, "requestStyle")
-              ? { requestStyle: value.requestStyle }
-              : {}),
-            ...(value != null && Object.hasOwn(value, "apiVersion")
-              ? { apiVersion: value.apiVersion }
-              : {}),
-            deployments: value?.deployments,
-            ...(value?.contextLengthOverrides == null
-              ? {}
-              : { contextLengthOverrides: value.contextLengthOverrides }),
-          }
-        : {}),
+    ...(value?.provider === "openai-compatible"
+      ? {
+          baseUrl: value?.baseUrl,
+          ...(value != null && Object.hasOwn(value, "apiVersion")
+            ? { apiVersion: value.apiVersion }
+            : {}),
+        }
+      : value?.provider === "ollama"
+        ? { baseUrl: value?.baseUrl }
+        : value?.provider === "azure"
+          ? {
+              baseUrl: value?.baseUrl,
+              ...(value != null && Object.hasOwn(value, "requestStyle")
+                ? { requestStyle: value.requestStyle }
+                : {}),
+              ...(value != null && Object.hasOwn(value, "apiVersion")
+                ? { apiVersion: value.apiVersion }
+                : {}),
+              deployments: value?.deployments,
+              ...(value?.contextLengthOverrides == null
+                ? {}
+                : { contextLengthOverrides: value.contextLengthOverrides }),
+            }
+          : {}),
     ...(value?.provider !== "azure" &&
     value?.provider != null &&
     value?.models != null
@@ -477,20 +484,23 @@ export function createAiReviewerProviderConfigStore({
           ? 1
           : storedConnectionRevision(currentConnection) + 1,
       provider: config.provider,
-      ...(config.provider === "openai-compatible" || config.provider === "azure"
+      ...(config.provider === "openai-compatible"
         ? {
             baseUrl: config.baseUrl,
-            ...(config.provider === "azure"
-              ? {
-                  requestStyle: config.requestStyle,
-                  ...(config.apiVersion == null
-                    ? {}
-                    : { apiVersion: config.apiVersion }),
-                  deployments: config.deployments,
-                }
-              : {}),
+            ...(config.apiVersion == null
+              ? {}
+              : { apiVersion: config.apiVersion }),
           }
-        : {}),
+        : config.provider === "azure"
+          ? {
+              baseUrl: config.baseUrl,
+              requestStyle: config.requestStyle,
+              ...(config.apiVersion == null
+                ? {}
+                : { apiVersion: config.apiVersion }),
+              deployments: config.deployments,
+            }
+          : {}),
       ...(config.provider === "azure" || config.models == null
         ? {}
         : { models: config.models }),

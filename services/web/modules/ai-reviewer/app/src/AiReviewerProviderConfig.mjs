@@ -15,6 +15,7 @@ import {
   LEGACY_AZURE_OPENAI_REQUEST_STYLE,
   parseAzureOpenAiConnection,
   parseAzureOpenAiRunDestination,
+  parseOpenAiCompatibleApiVersion,
 } from "./AzureOpenAiEndpointPolicy.mjs";
 
 const ContextLengthSchema = z
@@ -43,6 +44,7 @@ const CoreProviderConfigSchema = z.discriminatedUnion("provider", [
     .object({
       provider: z.literal("openai-compatible"),
       baseUrl: z.string(),
+      apiVersion: z.string().optional(),
       model: z.string(),
     })
     .strict(),
@@ -73,6 +75,7 @@ const DestinationSchema = z.discriminatedUnion("provider", [
     .object({
       provider: z.literal("openai-compatible"),
       baseUrl: z.string(),
+      apiVersion: z.string().optional(),
       models: z.array(z.string()).max(100).optional(),
     })
     .strict(),
@@ -129,6 +132,13 @@ const NATIVE_PROVIDER_LABELS = Object.freeze({
 });
 
 /** @param {unknown} input */
+function parseOptionalConnectionApiVersion(input) {
+  return input == null || input === ""
+    ? undefined
+    : parseOpenAiCompatibleApiVersion(input);
+}
+
+/** @param {unknown} input */
 export function parseAiReviewerProviderCredential(input) {
   return CredentialSchema.parse(input);
 }
@@ -151,9 +161,11 @@ function parseCoreProviderConfig(input) {
   switch (value.provider) {
     case "openai-compatible": {
       const endpoint = parseOpenAiCompatibleBaseUrl(value.baseUrl);
+      const apiVersion = parseOptionalConnectionApiVersion(value.apiVersion);
       return Object.freeze({
         provider: value.provider,
         baseUrl: endpoint.baseUrl,
+        ...(apiVersion === undefined ? {} : { apiVersion }),
         model: parseOpenAiCompatibleModelId(value.model),
       });
     }
@@ -217,9 +229,13 @@ function parseDestination(
     throw new TypeError("AI provider fallback models must be unique.");
   }
   if (destination.provider === "openai-compatible") {
+    const apiVersion = parseOptionalConnectionApiVersion(
+      destination.apiVersion,
+    );
     return Object.freeze({
       provider: destination.provider,
       baseUrl: parseOpenAiCompatibleBaseUrl(destination.baseUrl).baseUrl,
+      ...(apiVersion === undefined ? {} : { apiVersion }),
       ...(hasModels ? { models: Object.freeze(models) } : {}),
     });
   }
@@ -569,19 +585,22 @@ export function parseAiReviewerProviderConfig(input) {
     : undefined;
   return Object.freeze({
     provider: config.provider,
-    ...(config.provider === "openai-compatible" || config.provider === "azure"
+    ...(config.provider === "openai-compatible"
       ? {
           baseUrl: config.baseUrl,
-          ...(config.provider === "azure"
-            ? {
-                requestStyle: config.requestStyle,
-                ...(config.apiVersion == null
-                  ? {}
-                  : { apiVersion: config.apiVersion }),
-              }
-            : {}),
+          ...(config.apiVersion == null
+            ? {}
+            : { apiVersion: config.apiVersion }),
         }
-      : {}),
+      : config.provider === "azure"
+        ? {
+            baseUrl: config.baseUrl,
+            requestStyle: config.requestStyle,
+            ...(config.apiVersion == null
+              ? {}
+              : { apiVersion: config.apiVersion }),
+          }
+        : {}),
     model: config.model,
     contextLength,
     ...(contextLengthSource === undefined ? {} : { contextLengthSource }),
@@ -614,23 +633,25 @@ export function publicAiReviewerProviderConnection(input) {
         : "remote",
     config: Object.freeze({
       provider: connection.provider,
-      ...(connection.provider === "openai-compatible" ||
-      connection.provider === "azure"
+      ...(connection.provider === "openai-compatible"
         ? {
             baseUrl: connection.baseUrl,
-            ...(connection.provider === "azure"
-              ? {
-                  requestStyle: connection.requestStyle,
-                  ...(connection.apiVersion == null
-                    ? {}
-                    : { apiVersion: connection.apiVersion }),
-                  deployments: connection.deployments,
-                  contextLengthOverrides:
-                    connection.contextLengthOverrides ?? [],
-                }
-              : {}),
+            ...(connection.apiVersion == null
+              ? {}
+              : { apiVersion: connection.apiVersion }),
           }
-        : {}),
+        : connection.provider === "azure"
+          ? {
+              baseUrl: connection.baseUrl,
+              requestStyle: connection.requestStyle,
+              ...(connection.apiVersion == null
+                ? {}
+                : { apiVersion: connection.apiVersion }),
+              deployments: connection.deployments,
+              contextLengthOverrides:
+                connection.contextLengthOverrides ?? [],
+            }
+          : {}),
       ...(connection.provider === "azure"
         ? {}
         : connection.models == null

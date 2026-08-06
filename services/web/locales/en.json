@@ -346,6 +346,8 @@
   "ai_reviewer_provider_azure": "Azure OpenAI",
   "ai_reviewer_provider_azure_api_version": "API version",
   "ai_reviewer_provider_azure_api_version_help": "The deployment route sends this as ?api-version=. Leave blank to use the SDK default, v1.",
+  "ai_reviewer_provider_api_version": "API version",
+  "ai_reviewer_provider_api_version_help": "Requests send this as ?api-version=. Leave blank to use the gateway default.",
   "ai_reviewer_provider_azure_deployments": "Deployments and context lengths",
   "ai_reviewer_provider_azure_deployments_help": "One per line: deployment = tokens.",
   "ai_reviewer_provider_azure_endpoint": "Azure OpenAI resource name or endpoint",

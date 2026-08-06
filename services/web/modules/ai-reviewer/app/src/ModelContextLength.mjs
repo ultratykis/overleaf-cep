@@ -123,6 +123,7 @@ export function resolveModelContextLengthWithoutDetection(input) {
  * @param {{
  *   provider: "openai-compatible" | "gemini" | "claude" | "azure",
  *   baseUrl?: string,
+ *   apiVersion?: string,
  *   model: string,
  *   credential?: unknown,
  *   contextLength?: number,
@@ -132,6 +133,7 @@ export function resolveModelContextLengthWithoutDetection(input) {
  * @param {{
  *   detectOpenAiCompatibleContextLength?: (input: {
  *     baseUrl: string,
+ *     apiVersion?: string,
  *     model: string,
  *     credential?: string,
  *   }) => Promise<unknown>,
@@ -155,6 +157,9 @@ export async function resolveModelContextLength(
   try {
     const detected = await detectOpenAiCompatibleContextLength({
       baseUrl: input.baseUrl,
+      ...(typeof input.apiVersion === "string"
+        ? { apiVersion: input.apiVersion }
+        : {}),
       model: input.model,
       ...(typeof input.credential === "string"
         ? { credential: input.credential }

@@ -16,6 +16,12 @@ const cases = [
     baseUrl: "http://127.0.0.1:11434/v1",
   },
   {
+    name: "OpenAI-compatible gateway API version",
+    provider: "openai-compatible",
+    baseUrl: "https://api.example.com/openai/v1",
+    apiVersion: "2025-01-01-preview",
+  },
+  {
     name: "Azure v1",
     provider: "azure",
     baseUrl:
@@ -50,6 +56,8 @@ describe("AI reviewer: request URL preview parity", function () {
       if (testCase.provider === "openai-compatible") {
         new OllamaOpenAiTransport({
           baseUrl: testCase.baseUrl,
+          apiVersion: testCase.apiVersion,
+          ...(testCase.baseUrl.startsWith("https://") ? { credential } : {}),
           modelTag: model,
           fetchImpl,
           createProvider: vi.fn((options) => {
@@ -69,6 +77,7 @@ describe("AI reviewer: request URL preview parity", function () {
         previewUrl = deriveAiReviewerChatRequestUrl({
           provider: testCase.provider,
           baseUrl: testCase.baseUrl,
+          apiVersion: testCase.apiVersion,
         });
       } else {
         new AzureAiSdkTransport({

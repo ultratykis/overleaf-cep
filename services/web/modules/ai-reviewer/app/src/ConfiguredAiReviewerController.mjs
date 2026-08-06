@@ -243,18 +243,20 @@ async function resolveRunConfiguration(
   }
   return Object.freeze({
     provider: connection.provider,
-    ...(connection.provider === "openai-compatible" ||
-    connection.provider === "azure"
+    ...(connection.provider === "openai-compatible"
       ? {
           baseUrl: connection.baseUrl,
-          ...(connection.provider === "azure"
-            ? {
-                requestStyle: connection.requestStyle,
-                apiVersion: connection.apiVersion,
-              }
-            : {}),
+          ...(connection.apiVersion == null
+            ? {}
+            : { apiVersion: connection.apiVersion }),
         }
-      : {}),
+      : connection.provider === "azure"
+        ? {
+            baseUrl: connection.baseUrl,
+            requestStyle: connection.requestStyle,
+            apiVersion: connection.apiVersion,
+          }
+        : {}),
     ...(typeof connection.credential === "string"
       ? { credential: connection.credential }
       : {}),

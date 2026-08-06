@@ -167,6 +167,7 @@ const emptySkillGitSource: AiReviewerSkillGitSource = {
 };
 const azureDeploymentName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const azureApiVersion = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/u;
+const openAiCompatibleApiVersion = /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?$/u;
 
 function skippedReferenceReasonTranslation(
   reason: AiReviewerSkillGitSkippedReferenceReason,
@@ -339,6 +340,9 @@ function copyPublicConfiguration(
       return {
         provider: configuration.provider,
         baseUrl: configuration.baseUrl,
+        ...(configuration.apiVersion === undefined
+          ? {}
+          : { apiVersion: configuration.apiVersion }),
         models: [...(configuration.models ?? [])],
         ...common,
       };
@@ -409,7 +413,7 @@ function draftFromConnection(
         provider: connection.config.provider,
         baseUrl: connection.config.baseUrl,
         requestStyle: "v1",
-        apiVersion: "",
+        apiVersion: connection.config.apiVersion ?? "",
         deployments: "",
         models: (connection.config.models ?? []).join("\n"),
         ...common,
@@ -580,6 +584,7 @@ function requestUrlsForDraft(
         deriveAiReviewerChatRequestUrl({
           provider: draft.provider,
           baseUrl: draft.baseUrl,
+          ...(draft.apiVersion === "" ? {} : { apiVersion: draft.apiVersion }),
         }),
       ];
     }
@@ -851,6 +856,7 @@ export function AiIntegrationDetailsView({
     (draft.provider === "openai-compatible" &&
       (saved?.provider !== "openai-compatible" ||
         saved.baseUrl !== draft.baseUrl ||
+        (saved.apiVersion ?? "") !== draft.apiVersion ||
         (saved.models ?? []).join("\n") !== parsedModels.join("\n"))) ||
     (draft.provider === "gemini" &&
       (saved?.provider !== "gemini" ||
@@ -922,6 +928,9 @@ export function AiIntegrationDetailsView({
         (draft.requestStyle === "v1" ||
           draft.apiVersion === "" ||
           azureApiVersion.test(draft.apiVersion)))) &&
+    (draft.provider !== "openai-compatible" ||
+      draft.apiVersion === "" ||
+      openAiCompatibleApiVersion.test(draft.apiVersion)) &&
     (draft.provider === "azure" || validFallbackModels) &&
     !openAiBaseUrlHasCompletionPath &&
     !plaintextCredentialBlocked &&
@@ -996,6 +1005,7 @@ export function AiIntegrationDetailsView({
       ...current,
       provider,
       baseUrl: "",
+      apiVersion: "",
       credential: "",
       contextLengthOverride: "",
       reasoningModelCompatibility: false,
@@ -1038,6 +1048,7 @@ export function AiIntegrationDetailsView({
         requested = {
           provider: draft.provider,
           baseUrl: draft.baseUrl,
+          ...(draft.apiVersion === "" ? {} : { apiVersion: draft.apiVersion }),
           models: parsedModels,
           label,
           contextLengthOverride: parsedContextLengthOverride,
@@ -1767,6 +1778,7 @@ export function AiIntegrationDetailsView({
                               draft.provider === "openai-compatible" ||
                               draft.provider === "azure") &&
                             (field !== "apiVersion" ||
+                              draft.provider === "openai-compatible" ||
                               (draft.provider === "azure" &&
                                 draft.requestStyle === "deployment")) &&
                             (field !== "deployments" ||
@@ -1782,7 +1794,10 @@ export function AiIntegrationDetailsView({
                             <OLFormLabel>
                               {field === "baseUrl" && draft.provider === "azure"
                                 ? t("ai_reviewer_provider_azure_endpoint")
-                                : fieldLabel(field, t)}
+                                : field === "apiVersion" &&
+                                    draft.provider === "openai-compatible"
+                                  ? t("ai_reviewer_provider_api_version")
+                                  : fieldLabel(field, t)}
                               {field === "apiVersion" && (
                                 <>
                                   {" "}
@@ -1864,7 +1879,9 @@ export function AiIntegrationDetailsView({
                                 className="ai-reviewer-provider-advanced-help mt-1 mb-0"
                               >
                                 {t(
-                                  "ai_reviewer_provider_azure_api_version_help",
+                                  draft.provider === "openai-compatible"
+                                    ? "ai_reviewer_provider_api_version_help"
+                                    : "ai_reviewer_provider_azure_api_version_help",
                                 )}
                               </p>
                             )}

@@ -29,6 +29,7 @@ export type AiProviderConfiguration =
   | (AiProviderConfigurationCommon & {
       provider: "openai-compatible";
       baseUrl: string;
+      apiVersion?: string;
       models?: string[];
     })
   | (AiProviderConfigurationCommon & {
@@ -60,6 +61,7 @@ export type AiProviderConfigurationWrite =
   | (AiProviderConfigurationWriteCommon & {
       provider: "openai-compatible";
       baseUrl: string;
+      apiVersion?: string;
       models: string[];
     })
   | (AiProviderConfigurationWriteCommon & {
@@ -216,6 +218,9 @@ function connectionBody(config: AiProviderConfigurationWrite) {
       return {
         provider: config.provider,
         baseUrl: config.baseUrl,
+        ...(config.apiVersion === undefined || config.apiVersion === ""
+          ? {}
+          : { apiVersion: config.apiVersion }),
         models: [...config.models],
         label: config.label,
         contextLengthOverride: config.contextLengthOverride,

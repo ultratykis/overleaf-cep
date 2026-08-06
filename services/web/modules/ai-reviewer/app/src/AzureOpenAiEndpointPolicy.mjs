@@ -10,6 +10,8 @@ export const DEFAULT_AZURE_OPENAI_REQUEST_STYLE = "v1";
 export const LEGACY_AZURE_OPENAI_REQUEST_STYLE = "deployment";
 
 const AZURE_API_VERSION = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/u;
+const OPENAI_COMPATIBLE_API_VERSION =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?$/u;
 const AZURE_DEPLOYMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MAX_AZURE_DEPLOYMENTS = 100;
 
@@ -40,6 +42,15 @@ export function parseAzureOpenAiApiVersion(input) {
     throw invalidAzureConfiguration();
   }
   return input;
+}
+
+/** @param {unknown} input */
+export function parseOpenAiCompatibleApiVersion(input) {
+  const parsed = parseAzureOpenAiApiVersion(input);
+  if (OPENAI_COMPATIBLE_API_VERSION.exec(parsed)?.[0] !== parsed) {
+    throw invalidAzureConfiguration();
+  }
+  return parsed;
 }
 
 /** @param {unknown} input */

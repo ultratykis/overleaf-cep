@@ -318,17 +318,28 @@ function normalizeModels(provider, input, capabilities = null) {
  * working list into a failure.
  *
  * @param {string} baseUrl
+ * @param {string | undefined} apiVersion
  * @param {(input: string, init: any) => Promise<Response>} guardedFetch
  * @param {AbortSignal | undefined} signal
  * @returns {Promise<Map<string, string[]> | null>}
  */
-async function fetchOllamaCapabilities(baseUrl, guardedFetch, signal) {
+async function fetchOllamaCapabilities(
+  baseUrl,
+  apiVersion,
+  guardedFetch,
+  signal,
+) {
   try {
-    const response = await guardedFetch(`${baseUrl}/api/tags`, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal,
-    });
+    const response = await guardedFetch(
+      `${baseUrl}/api/tags${
+        apiVersion === undefined ? "" : `?api-version=${apiVersion}`
+      }`,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal,
+      },
+    );
     if (!response.ok) {
       cancelResponseBody(response);
       return null;
@@ -399,7 +410,9 @@ function modelEndpoint(config) {
     case "openai-compatible": {
       const parsedEndpoint = parseOpenAiCompatibleBaseUrl(config.baseUrl);
       return {
-        endpoint: `${parsedEndpoint.baseUrl}/models`,
+        endpoint: `${parsedEndpoint.baseUrl}/models${
+          config.apiVersion == null ? "" : `?api-version=${config.apiVersion}`
+        }`,
         baseUrl: parsedEndpoint.baseUrl,
       };
     }
@@ -428,7 +441,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
     dependencies.openAiCompatibleTransportFactory ??
     dependencies.transportFactory ??
     ((
-      /** @type {{ baseUrl: string, credential?: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
+      /** @type {{ baseUrl: string, apiVersion?: string, credential?: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
     ) => new OllamaOpenAiTransport(options));
   const geminiTransportFactory =
     dependencies.geminiTransportFactory ??
@@ -472,18 +485,20 @@ export function createAiReviewerProviderService(dependencies = {}) {
         : undefined;
     return {
       provider: connection.provider,
-      ...(connection.provider === "openai-compatible" ||
-      connection.provider === "azure"
+      ...(connection.provider === "openai-compatible"
         ? {
             baseUrl: connection.baseUrl,
-            ...(connection.provider === "azure"
-              ? {
-                  requestStyle: connection.requestStyle,
-                  apiVersion: connection.apiVersion,
-                }
-              : {}),
+            ...(connection.apiVersion == null
+              ? {}
+              : { apiVersion: connection.apiVersion }),
           }
-        : {}),
+        : connection.provider === "azure"
+          ? {
+              baseUrl: connection.baseUrl,
+              requestStyle: connection.requestStyle,
+              apiVersion: connection.apiVersion,
+            }
+          : {}),
       model,
       ...(typeof connection.credential === "string"
         ? { credential: connection.credential }
@@ -511,7 +526,10 @@ export function createAiReviewerProviderService(dependencies = {}) {
         ? connection.baseUrl
         : "",
       connection.provider === "azure" ? connection.requestStyle : "",
-      connection.provider === "azure" ? (connection.apiVersion ?? "") : "",
+      connection.provider === "openai-compatible" ||
+      connection.provider === "azure"
+        ? (connection.apiVersion ?? "")
+        : "",
       connection.credentialUpdatedAt ?? "",
       connection.contextLengthOverride ?? "",
       JSON.stringify(
@@ -564,6 +582,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
       case "openai-compatible":
         return openAiCompatibleTransportFactory({
           baseUrl: config.baseUrl,
+          ...(config.apiVersion == null
+            ? {}
+            : { apiVersion: config.apiVersion }),
           credential: config.credential ?? undefined,
           modelTag: config.model,
           ...(config.reasoningModelCompatibility
@@ -634,6 +655,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
       cacheKey,
       config.provider,
       baseUrl,
+      config.provider === "openai-compatible" ? (config.apiVersion ?? "") : "",
       config.credentialUpdatedAt ?? "",
     ].join("\u0000");
     const now = modelNow();
@@ -681,9 +703,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
       config.provider === "openai-compatible" && nativeBaseUrl !== null
         ? await fetchOllamaCapabilities(
             nativeBaseUrl,
+            config.apiVersion,
             createGuardedOpenAiCompatibleFetch({
               baseUrl: nativeBaseUrl,
-              allowedRequestUrl: `${nativeBaseUrl}/api/tags`,
+              allowedRequestUrl: `${nativeBaseUrl}/api/tags${
+                config.apiVersion == null
+                  ? ""
+                  : `?api-version=${config.apiVersion}`
+              }`,
               // A 404 here means the compatible endpoint is not Ollama; it is
               // not a provider execution failure.
               fetchImpl: modelFetchImpl,

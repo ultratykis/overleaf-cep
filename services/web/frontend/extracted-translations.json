@@ -315,6 +315,8 @@
   "ai_reviewer_provider_azure": "",
   "ai_reviewer_provider_azure_api_version": "",
   "ai_reviewer_provider_azure_api_version_help": "",
+  "ai_reviewer_provider_api_version": "",
+  "ai_reviewer_provider_api_version_help": "",
   "ai_reviewer_provider_azure_deployments": "",
   "ai_reviewer_provider_azure_deployments_help": "",
   "ai_reviewer_provider_azure_endpoint": "",

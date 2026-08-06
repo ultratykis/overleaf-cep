@@ -29,7 +29,10 @@ import {
 } from "./OllamaEndpointPolicy.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
 import { recordAiReviewerProviderDiagnostic } from "./AiReviewerFailureLogger.mjs";
-import { parseAzureOpenAiRunDestination } from "./AzureOpenAiEndpointPolicy.mjs";
+import {
+  parseAzureOpenAiRunDestination,
+  parseOpenAiCompatibleApiVersion,
+} from "./AzureOpenAiEndpointPolicy.mjs";
 import { modelContextLengthFromFields } from "./ModelContextLength.mjs";
 
 const CANONICAL_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/u;
@@ -69,6 +72,21 @@ const OPENAI_COMPATIBLE_TOOL_PROVIDER_OPTIONS = Object.freeze({
   openaiCompatible: Object.freeze({
     parallel_tool_calls: false,
     reasoningEffort: "none",
+    strictJsonSchema: true,
+  }),
+});
+const OPENAI_COMPATIBLE_REASONING_MODEL_GATEWAY_PROVIDER_OPTIONS =
+  Object.freeze({
+    openaiCompatible: Object.freeze({}),
+  });
+const OPENAI_COMPATIBLE_REASONING_MODEL_PROVIDER_OPTIONS = Object.freeze({
+  openaiCompatible: Object.freeze({
+    strictJsonSchema: true,
+  }),
+});
+const OPENAI_COMPATIBLE_REASONING_MODEL_TOOL_PROVIDER_OPTIONS = Object.freeze({
+  openaiCompatible: Object.freeze({
+    parallel_tool_calls: false,
     strictJsonSchema: true,
   }),
 });
@@ -2511,18 +2529,34 @@ export function createGuardedOpenAiCompatibleFetch({
 /**
  * @param {{
  *   baseUrl: string,
+ *   apiVersion?: string,
  *   fetchImpl: typeof fetch,
  * }} options
  */
-function createGuardedFetch({ baseUrl, fetchImpl }) {
+function createGuardedFetch({ baseUrl, apiVersion, fetchImpl }) {
   return createGuardedOpenAiCompatibleFetch({
     baseUrl,
     allowedRequestUrl: deriveAiReviewerChatRequestUrl({
       provider: "openai-compatible",
       baseUrl,
+      ...(apiVersion === undefined ? {} : { apiVersion }),
     }),
     fetchImpl,
   });
+}
+
+/** @param {unknown} input */
+function parseOptionalOpenAiCompatibleApiVersion(input) {
+  if (input === undefined || input === "") return undefined;
+  if (typeof input !== "string") {
+    throw new TypeError("apiVersion must be a string.");
+  }
+  return parseOpenAiCompatibleApiVersion(input);
+}
+
+/** @param {string} url @param {string | undefined} apiVersion */
+function appendApiVersionQuery(url, apiVersion) {
+  return apiVersion === undefined ? url : `${url}?api-version=${apiVersion}`;
 }
 
 /** @param {unknown} value */
@@ -2782,6 +2816,7 @@ async function requestContextMetadata({
  *
  * @param {{
  *   baseUrl: unknown,
+ *   apiVersion?: unknown,
  *   credential?: unknown,
  *   model: unknown,
  *   signal?: AbortSignal,
@@ -2791,6 +2826,7 @@ async function requestContextMetadata({
  */
 export async function detectOpenAiCompatibleContextLength({
   baseUrl,
+  apiVersion,
   credential,
   model,
   signal,
@@ -2798,6 +2834,7 @@ export async function detectOpenAiCompatibleContextLength({
   fetchImpl = globalThis.fetch,
 }) {
   const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+  const parsedApiVersion = parseOptionalOpenAiCompatibleApiVersion(apiVersion);
   const parsedModel = parseOpenAiCompatibleModelId(model);
   const parsedCredential =
     credential === undefined
@@ -2816,6 +2853,7 @@ export async function detectOpenAiCompatibleContextLength({
   const chatRequestUrl = deriveAiReviewerChatRequestUrl({
     provider: "openai-compatible",
     baseUrl: endpoint.baseUrl,
+    ...(parsedApiVersion === undefined ? {} : { apiVersion: parsedApiVersion }),
   });
   let probeSucceeded = false;
   try {
@@ -2865,20 +2903,29 @@ export async function detectOpenAiCompatibleContextLength({
     });
 
   if (probeSucceeded) {
-    const running = await request(`${origin}/api/ps`, "GET");
+    const running = await request(
+      appendApiVersionQuery(`${origin}/api/ps`, parsedApiVersion),
+      "GET",
+    );
     if (running != null) {
       const contextLength = ollamaRunningContextLength(running, parsedModel);
       if (contextLength != null) return contextLength;
     }
   }
 
-  const slots = await request(`${origin}/slots`, "GET");
+  const slots = await request(
+    appendApiVersionQuery(`${origin}/slots`, parsedApiVersion),
+    "GET",
+  );
   if (slots != null) {
     const contextLength = llamaSlotContextLength(slots, parsedModel);
     if (contextLength != null) return contextLength;
   }
 
-  const props = await request(`${origin}/props`, "GET");
+  const props = await request(
+    appendApiVersionQuery(`${origin}/props`, parsedApiVersion),
+    "GET",
+  );
   if (props != null) {
     const contextLength = llamaPropsContextLength(props);
     if (contextLength != null) return contextLength;
@@ -3507,6 +3554,7 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
   /**
    * @param {{
    *   baseUrl: unknown,
+   *   apiVersion?: unknown,
    *   credential?: unknown,
    *   modelTag: unknown,
    *   reasoningModelCompatibility?: unknown,
@@ -3516,6 +3564,7 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
    */
   constructor({
     baseUrl,
+    apiVersion,
     credential,
     modelTag,
     reasoningModelCompatibility = false,
@@ -3523,6 +3572,8 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
     createProvider = createOpenAICompatible,
   }) {
     const endpoint = parseOpenAiCompatibleBaseUrl(baseUrl);
+    const parsedApiVersion =
+      parseOptionalOpenAiCompatibleApiVersion(apiVersion);
     const parsedCredential =
       credential == null
         ? undefined
@@ -3548,10 +3599,18 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
         baseURL: endpoint.baseUrl,
         fetch: createGuardedFetch({
           baseUrl: endpoint.baseUrl,
+          apiVersion: parsedApiVersion,
           fetchImpl,
         }),
         includeUsage: true,
         name: "openai-compatible",
+        ...(parsedApiVersion === undefined
+          ? {}
+          : {
+              queryParams: Object.freeze({
+                "api-version": parsedApiVersion,
+              }),
+            }),
         supportsStructuredOutputs: true,
       }),
     );
@@ -3579,12 +3638,18 @@ export class OllamaOpenAiTransport extends HardenedAiSdkProviderTransport {
       languageModel,
       provider: "openai-compatible",
       modelTag: parsedModelTag,
-      gatewayProviderOptions: OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS,
+      gatewayProviderOptions: reasoningModelCompatibility
+        ? OPENAI_COMPATIBLE_REASONING_MODEL_GATEWAY_PROVIDER_OPTIONS
+        : OPENAI_COMPATIBLE_GATEWAY_PROVIDER_OPTIONS,
       // Ollama's OpenAI-compatible endpoint ignores num_ctx both at the top
       // level and under options. Its context allocation must be configured on
       // the Ollama server, so no ineffective num_ctx option is sent here.
-      providerOptions: OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
-      toolProviderOptions: OPENAI_COMPATIBLE_TOOL_PROVIDER_OPTIONS,
+      providerOptions: reasoningModelCompatibility
+        ? OPENAI_COMPATIBLE_REASONING_MODEL_PROVIDER_OPTIONS
+        : OPENAI_COMPATIBLE_PROVIDER_OPTIONS,
+      toolProviderOptions: reasoningModelCompatibility
+        ? OPENAI_COMPATIBLE_REASONING_MODEL_TOOL_PROVIDER_OPTIONS
+        : OPENAI_COMPATIBLE_TOOL_PROVIDER_OPTIONS,
       reasoningModelCompatibility,
       invalidModelMessage:
         "The OpenAI-compatible provider must return a concrete Chat Completions model.",

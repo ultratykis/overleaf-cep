@@ -123,6 +123,33 @@ describe("AI reviewer model context length", function () {
     expect(detectOpenAiCompatibleContextLength).not.toHaveBeenCalled();
   });
 
+  it("passes an OpenAI-compatible API version to runtime discovery", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const detectOpenAiCompatibleContextLength = vi.fn(async () => 32_768);
+
+    expect(
+      await resolveModelContextLength(
+        {
+          provider: "openai-compatible",
+          baseUrl: "https://models.example.test/openai/v1",
+          apiVersion,
+          model: "hosted/reviewer",
+        },
+        { detectOpenAiCompatibleContextLength },
+      ),
+    ).toEqual({
+      contextLength: 32_768,
+      contextLengthSource: "detected",
+    });
+    expect(detectOpenAiCompatibleContextLength).toHaveBeenCalledExactlyOnceWith(
+      {
+        baseUrl: "https://models.example.test/openai/v1",
+        apiVersion,
+        model: "hosted/reviewer",
+      },
+    );
+  });
+
   it("does not start vLLM runtime discovery when the model list has a value", async function () {
     const detectOpenAiCompatibleContextLength = vi.fn(async () => {
       throw new Error("PRIVATE_PROVIDER_FAILURE");

@@ -35,6 +35,7 @@ const claudeModel = "claude-sonnet-4-20250514";
 const geminiCredential = "PRIVATE_GEMINI_CREDENTIAL";
 const claudeCredential = "PRIVATE_CLAUDE_CREDENTIAL";
 const plaintextCredential = "PRIVATE_PLAINTEXT_CREDENTIAL";
+const openAiCompatibleApiVersion = "2025-01-01-preview";
 
 // A connection is a destination: provider, endpoint, credential. No model.
 const localConnection = Object.freeze({
@@ -590,6 +591,26 @@ describe("AI reviewer provider connections", function () {
     expect(existing).not.toHaveProperty("reasoningModelCompatibility");
     expect(await store.get(otherUserId, existing.id)).not.toHaveProperty(
       "reasoningModelCompatibility",
+    );
+  });
+
+  it("round-trips an OpenAI-compatible API version through connection details", async function () {
+    const { records, store } = storeFixture();
+
+    const created = await store.create(userId, {
+      ...localConnection,
+      apiVersion: openAiCompatibleApiVersion,
+    });
+
+    expect(created.apiVersion).toBe(openAiCompatibleApiVersion);
+    expect((await store.get(userId, created.id)).apiVersion).toBe(
+      openAiCompatibleApiVersion,
+    );
+    expect(publicAiReviewerProviderConnection(created).config.apiVersion).toBe(
+      openAiCompatibleApiVersion,
+    );
+    expect(records.get(userId).connections[0].apiVersion).toBe(
+      openAiCompatibleApiVersion,
     );
   });
 
@@ -1467,6 +1488,36 @@ describe("AI reviewer run destination", function () {
         model: sharedModel,
         contextLength: 12_345,
         contextLengthSource: "override",
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("passes an OpenAI-compatible API version from the selected connection into the run", async function () {
+    const { store } = storeFixture();
+    const connection = await store.create(userId, {
+      ...localConnection,
+      apiVersion: openAiCompatibleApiVersion,
+    });
+    const { controller, providerService } = streamFixture({ store });
+
+    const response = new FakeResponse();
+    await controller.stream(
+      httpRequest({
+        body: selectionRequest({
+          connectionId: connection.id,
+          model: localModel,
+        }),
+      }),
+      response,
+    );
+
+    expect(providerService.createAgentGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai-compatible",
+        baseUrl: localBaseUrl,
+        apiVersion: openAiCompatibleApiVersion,
+        model: localModel,
       }),
       expect.anything(),
     );

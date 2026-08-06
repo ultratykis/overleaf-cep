@@ -366,7 +366,7 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
     expect(JSON.stringify(result)).not.toContain("AI_REVIEWER_");
   });
 
-  it("omits sampling fields from the wire in reasoning model compatibility mode", async function () {
+  it("omits sampling and reasoning effort from the wire in reasoning model compatibility mode", async function () {
     let requestBody;
     const transport = new OllamaOpenAiTransport({
       baseUrl,
@@ -384,11 +384,54 @@ describe("AI reviewer: Ollama OpenAI protocol", function () {
     expect(requestBody).not.toHaveProperty("temperature");
     expect(requestBody).not.toHaveProperty("top_p");
     expect(requestBody).not.toHaveProperty("seed");
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
     expect(requestBody).toMatchObject({
       model: modelTag,
       max_tokens: 32,
-      reasoning_effort: "none",
     });
+  });
+
+  it("adds the configured API version to the real SDK Chat Completions URL", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const fetchImpl = vi.fn(async () => successfulChatResponse());
+    const transport = new OllamaOpenAiTransport({
+      baseUrl,
+      apiVersion,
+      modelTag,
+      fetchImpl,
+    });
+
+    await transport.generateChat({ prompt, maxOutputTokens: 32 });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(
+      `${baseUrl}/chat/completions?api-version=${apiVersion}`,
+    );
+  });
+
+  it("keeps tool controls but omits reasoning effort from the compatibility-mode tool request", async function () {
+    let requestBody;
+    const transport = new OllamaOpenAiTransport({
+      baseUrl,
+      modelTag,
+      reasoningModelCompatibility: true,
+      fetchImpl: vi.fn(async (_input, init) => {
+        requestBody = JSON.parse(init.body);
+        return successfulToolProposalResponse();
+      }),
+    });
+
+    await transport.proposeForcedToolCall({
+      prompt: forcedToolPrompt,
+      maxOutputTokens: 64,
+      tool: forcedTool,
+    });
+
+    expect(requestBody.parallel_tool_calls).toBe(false);
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
+    expect(requestBody).not.toHaveProperty("temperature");
+    expect(requestBody).not.toHaveProperty("top_p");
+    expect(requestBody).not.toHaveProperty("seed");
   });
 
   it("attaches a remote credential only as the Authorization header and redacts transport failure text", async function () {

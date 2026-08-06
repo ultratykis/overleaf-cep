@@ -4,6 +4,8 @@ const CANONICAL_ENDPOINT =
   /^(https?):\/\/(\[[0-9a-f:]+\]|[a-z0-9.-]+)(?::([1-9][0-9]{0,4}))?((?:\/[A-Za-z0-9._~-]+)*)$/u;
 const AZURE_RESOURCE_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const AZURE_API_VERSION = /^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$/u;
+const OPENAI_COMPATIBLE_API_VERSION =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?$/u;
 const AZURE_DEPLOYMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const AZURE_DEPLOYMENT_ENDPOINT =
   /^(https:\/\/[a-z0-9.-]+(?::[1-9][0-9]{0,4})?(?:\/[A-Za-z0-9._~-]+)*)\/deployments\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/chat\/completions\?api-version=([A-Za-z0-9][A-Za-z0-9.-]{0,63})$/u;
@@ -116,7 +118,11 @@ export function normalizeAzureOpenAiEndpoint(
  * this function.
  *
  * @param {
- *   | { provider: "openai-compatible", baseUrl: unknown }
+ *   | {
+ *       provider: "openai-compatible",
+ *       baseUrl: unknown,
+ *       apiVersion?: unknown,
+ *     }
  *   | {
  *       provider: "azure",
  *       baseUrl: unknown,
@@ -133,7 +139,20 @@ export function deriveAiReviewerChatRequestUrl(destination) {
 
   if (destination.provider === "openai-compatible") {
     const endpoint = parseCanonicalAiProviderBaseUrl(destination.baseUrl);
-    return `${endpoint.baseUrl}/chat/completions`;
+    const apiVersion =
+      destination.apiVersion == null || destination.apiVersion === ""
+        ? null
+        : destination.apiVersion;
+    if (
+      apiVersion != null &&
+      (typeof apiVersion !== "string" ||
+        OPENAI_COMPATIBLE_API_VERSION.exec(apiVersion)?.[0] !== apiVersion)
+    ) {
+      throw invalidRequestDestination();
+    }
+    return `${endpoint.baseUrl}/chat/completions${
+      apiVersion == null ? "" : `?api-version=${apiVersion}`
+    }`;
   }
   if (
     destination.provider !== "azure" ||

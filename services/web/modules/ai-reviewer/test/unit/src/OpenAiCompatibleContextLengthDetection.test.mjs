@@ -73,6 +73,33 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     ]);
   });
 
+  it("adds the configured API version to the probe and metadata URLs", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const fetchImpl = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("/chat/completions?")) return chatCompletionResponse();
+      if (url.includes("/api/ps?")) {
+        return jsonResponse({
+          models: [{ name: model, context_length: 16_384 }],
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    expect(
+      await detectOpenAiCompatibleContextLength({
+        baseUrl,
+        apiVersion,
+        model,
+        fetchImpl,
+      }),
+    ).toBe(16_384);
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      `${baseUrl}/chat/completions?api-version=${apiVersion}`,
+      `http://127.0.0.1:11434/api/ps?api-version=${apiVersion}`,
+    ]);
+  });
+
   it("uses the smallest llama.cpp slot allocation before model properties", async function () {
     const fetchImpl = vi.fn(async (input) => {
       const url = String(input);

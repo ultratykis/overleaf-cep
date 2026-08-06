@@ -509,6 +509,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     const transport = new OllamaOpenAiTransport({
       baseUrl,
       modelTag,
+      reasoningModelCompatibility: true,
       fetchImpl,
     });
     const gateway = transport.createAgentGateway({
@@ -532,6 +533,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     const findingDeclaration = requestBody.tools.find(
       (declaration) => declaration.function.name === "report_finding",
     ).function;
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
     expect(findingDeclaration.strict).toBe(true);
     expect(findingDeclaration.parameters).toMatchObject({
       type: "object",
@@ -699,7 +701,7 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
     expect(Object.isFrozen(result.usage)).toBe(true);
   });
 
-  it("omits sampling parameters in reasoning model compatibility mode", async function () {
+  it("omits reasoning effort in every OpenAI-compatible option path in compatibility mode", async function () {
     const fixture = transportFixture({ reasoningModelCompatibility: true });
     fixture.model.doGenerate.mockResolvedValue(plainGenerateResult());
 
@@ -715,12 +717,51 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
       responseFormat: { type: "text" },
       providerOptions: {
         openaiCompatible: {
-          reasoningEffort: "none",
           strictJsonSchema: true,
         },
       },
       abortSignal: undefined,
     });
+
+    const gateway = fixture.transport.createAgentGateway({
+      contextLength: 8_192,
+      readProjectFile: vi.fn(),
+    });
+    expect(gateway.providerOptions).toEqual({ openaiCompatible: {} });
+
+    fixture.model.doGenerate.mockResolvedValueOnce(plainToolProposalResult());
+    await fixture.transport.proposeForcedToolCall({
+      prompt: "Call the synthetic lookup once.",
+      maxOutputTokens: 64,
+      tool: forcedTool,
+    });
+    expect(fixture.model.doGenerate.mock.calls[1][0].providerOptions).toEqual({
+      openaiCompatible: {
+        parallel_tool_calls: false,
+        strictJsonSchema: true,
+      },
+    });
+  });
+
+  it("configures one API version query and guards the same request URL", async function () {
+    const apiVersion = "2025-01-01-preview";
+    const fixture = transportFixture({ apiVersion });
+    const providerOptions = fixture.createProvider.mock.calls[0][0];
+    const requestUrl = `${baseUrl}/chat/completions?api-version=${apiVersion}`;
+
+    expect(providerOptions.queryParams).toEqual({
+      "api-version": apiVersion,
+    });
+    await providerOptions.fetch(requestUrl, { method: "POST" });
+
+    expect(fixture.fetchImpl).toHaveBeenCalledExactlyOnceWith(
+      requestUrl,
+      expect.objectContaining({ method: "POST", redirect: "error" }),
+    );
+    await expect(
+      providerOptions.fetch(`${baseUrl}/chat/completions`),
+    ).rejects.toMatchObject({ code: "AI_OLLAMA_REQUEST_URL_NOT_ALLOWED" });
+    expect(fixture.fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("uses the opt-in provider diagnostic for direct 400 responses", async function () {
@@ -1694,6 +1735,28 @@ describe("AI reviewer: Ollama OpenAI transport", function () {
         category: "schema",
         retryable: false,
       });
+    },
+  );
+
+  it.each([
+    { apiVersion: null, message: "apiVersion must be a string" },
+    { apiVersion: 20250101, message: "apiVersion must be a string" },
+    { apiVersion: "abc", message: "Azure OpenAI configuration is invalid" },
+  ])(
+    "rejects invalid API version $apiVersion before provider creation",
+    function ({ apiVersion, message }) {
+      const createProvider = vi.fn();
+      expect(
+        () =>
+          new OllamaOpenAiTransport({
+            baseUrl,
+            apiVersion,
+            modelTag,
+            createProvider,
+            fetchImpl: vi.fn(),
+          }),
+      ).toThrow(message);
+      expect(createProvider).not.toHaveBeenCalled();
     },
   );
 
