@@ -1408,7 +1408,10 @@ export function AiReviewerPanelView({
   const selectedModelRef = useRef<WorkspaceModelSelection | null>(null);
   const [connections, setConnections] = useState<AiProviderConnection[]>([]);
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
-  const [providerCatalogRevision, setProviderCatalogRevision] = useState(0);
+  const [providerCatalogRequest, setProviderCatalogRequest] = useState({
+    revision: 0,
+    refreshModels: false,
+  });
   const [showProviderSettings, setShowProviderSettings] = useState(false);
   const [showModeInstructionSettings, setShowModeInstructionSettings] =
     useState(false);
@@ -1440,6 +1443,7 @@ export function AiReviewerPanelView({
   );
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const activeCircuitReset = useRef<AbortController | null>(null);
+  const consumedModelRefreshRevision = useRef<number | null>(null);
   const modelCatalogProjectId = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
@@ -1459,13 +1463,19 @@ export function AiReviewerPanelView({
   );
   selectedModelRef.current = resolvedSelectedModel;
   const refreshProviderCatalog = useCallback(() => {
-    setProviderCatalogRevision((revision) => revision + 1);
+    setProviderCatalogRequest((request) => ({
+      revision: request.revision + 1,
+      refreshModels: false,
+    }));
   }, []);
   const retryProviderCatalog = useCallback(() => {
     setConnectionCatalogError(false);
     setModelCatalogError(false);
-    refreshProviderCatalog();
-  }, [refreshProviderCatalog]);
+    setProviderCatalogRequest((request) => ({
+      revision: request.revision + 1,
+      refreshModels: true,
+    }));
+  }, []);
   const resetStoppedConnection = useCallback(
     (connectionId: string) => {
       if (activeCircuitReset.current != null) {
@@ -1595,14 +1605,24 @@ export function AiReviewerPanelView({
         }
       });
     return () => controller.abort();
-  }, [loadProviderConnections, projectId, providerCatalogRevision]);
+  }, [loadProviderConnections, projectId, providerCatalogRequest]);
 
   useEffect(() => {
     if (loadProviderModels == null) {
       return;
     }
     const controller = new AbortController();
-    loadProviderModels(projectId, controller.signal)
+    const refreshModels =
+      providerCatalogRequest.refreshModels &&
+      consumedModelRefreshRevision.current !==
+        providerCatalogRequest.revision;
+    if (refreshModels) {
+      consumedModelRefreshRevision.current = providerCatalogRequest.revision;
+    }
+    const loading = refreshModels
+      ? loadProviderModels(projectId, controller.signal, { refresh: true })
+      : loadProviderModels(projectId, controller.signal);
+    loading
       .then((catalog) => {
         if (controller.signal.aborted) {
           return;
@@ -1622,7 +1642,7 @@ export function AiReviewerPanelView({
         }
       });
     return () => controller.abort();
-  }, [loadProviderModels, projectId, providerCatalogRevision]);
+  }, [loadProviderModels, projectId, providerCatalogRequest]);
 
   useEffect(() => {
     if (

@@ -1208,7 +1208,10 @@ describe("AI reviewer unified model list", function () {
     });
     expect(providerService.testConnection).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ id: gemini.id, provider: "gemini" }),
-      { signal: expect.any(AbortSignal) },
+      {
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${gemini.id}`,
+      },
     );
 
     // Naming no connection cannot mean "any of them".

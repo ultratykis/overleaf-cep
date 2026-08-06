@@ -285,11 +285,13 @@ function conversationEvents() {
 
 function httpRequest({
   body,
+  query,
   authenticatedUserId = userId,
   routedProjectId = projectId,
 } = {}) {
   const request = new EventEmitter();
   request.body = body;
+  request.query = query;
   request.params = { project_id: routedProjectId };
   request.user = {
     _id: {
@@ -1862,6 +1864,7 @@ describe("AI reviewer provider configuration", function () {
       baseUrl: remoteBaseUrl,
       model: remoteModel,
       credential,
+      fetchImpl: expect.any(Function),
       probeSignal: signal,
     });
     expect(service.contextLengthForModelList(connection, remoteModel)).toEqual({
@@ -1947,6 +1950,7 @@ describe("AI reviewer provider configuration", function () {
         baseUrl: remoteBaseUrl,
         model: remoteModel,
         credential,
+        fetchImpl: expect.any(Function),
         probeSignal,
       });
     } finally {
@@ -2155,6 +2159,286 @@ describe("AI reviewer provider configuration", function () {
       `${remoteBaseUrl}/models?api-version=${firstApiVersion}`,
       `${remoteBaseUrl}/models?api-version=${secondApiVersion}`,
     ]);
+  });
+
+  it("negatively caches model-list HTTP failures until their TTL expires", async function () {
+    let now = 1_000;
+    const modelFetchImpl = vi.fn(
+      async () => new Response(null, { status: 404 }),
+    );
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      modelNow: () => now,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    const first = await captureError(
+      service.listModels(connection, { cacheKey: userId }),
+    );
+    const cached = await captureError(
+      service.listModels(connection, { cacheKey: userId }),
+    );
+
+    expect(first).toMatchObject({
+      code: "AI_PROVIDER_MODEL_DISCOVERY_UNSUPPORTED",
+      category: "configuration",
+      retryable: false,
+    });
+    expect(cached).toMatchObject({
+      code: first.code,
+      category: first.category,
+      retryable: first.retryable,
+    });
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
+
+    now += 60_001;
+    await captureError(service.listModels(connection, { cacheKey: userId }));
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("bypasses only a negative model cache entry and replaces it on success", async function () {
+    const modelFetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      modelNow: () => 1_000,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    await captureError(service.listModels(connection, { cacheKey: userId }));
+    await captureError(service.listModels(connection, { cacheKey: userId }));
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
+
+    expect(
+      await service.listModels(connection, {
+        cacheKey: userId,
+        bypassNegativeCache: true,
+      }),
+    ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+    expect(await service.listModels(connection, { cacheKey: userId })).toEqual(
+      [{ id: remoteModel, displayName: remoteModel }],
+    );
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a connection test as an explicit negative-cache bypass", async function () {
+    const modelFetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    await captureError(service.listModels(connection, { cacheKey: userId }));
+    expect(
+      await service.testConnection(connection, { cacheKey: userId }),
+    ).toEqual({
+      ok: true,
+      provider: "openai-compatible",
+      modelCount: 1,
+      classification: "remote",
+    });
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not negatively cache caller aborts or open-circuit refusals", async function () {
+    const cases = [
+      {
+        firstCall(signal) {
+          const reason = new AgentGatewayAbortError();
+          signal.abort(reason);
+          throw reason;
+        },
+        options(signal) {
+          return { signal: signal.signal, cacheKey: userId };
+        },
+        expectedCode: "AI_REQUEST_ABORTED",
+      },
+      {
+        firstCall() {
+          throw new AgentGatewayError("The circuit is open.", {
+            code: "AI_PROVIDER_CIRCUIT_OPEN",
+            category: "configuration",
+            retryable: false,
+          });
+        },
+        options() {
+          return { cacheKey: userId };
+        },
+        expectedCode: "AI_PROVIDER_CIRCUIT_OPEN",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const firstSignal = new AbortController();
+      const modelFetchImpl = vi
+        .fn()
+        .mockImplementationOnce(() => testCase.firstCall(firstSignal))
+        .mockResolvedValue(
+          new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      const service = createAiReviewerProviderService({ modelFetchImpl });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        credential,
+      };
+
+      expect(
+        await captureError(
+          service.listModels(connection, testCase.options(firstSignal)),
+        ),
+      ).toMatchObject({ code: testCase.expectedCode });
+      expect(
+        await service.listModels(connection, { cacheKey: userId }),
+      ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+      expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it.each(["AbortError", "TimeoutError"])(
+    "does not cache a raw %s raised while reading a model response",
+    async function (errorName) {
+      const reason = new DOMException("model response read stopped", errorName);
+      const modelFetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(reason);
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+        )
+        .mockResolvedValue(
+          new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      const service = createAiReviewerProviderService({ modelFetchImpl });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        credential,
+      };
+
+      expect(
+        await captureError(service.listModels(connection, { cacheKey: userId })),
+      ).toMatchObject({ name: errorName });
+      expect(
+        await service.listModels(connection, { cacheKey: userId }),
+      ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+      expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not cache a general body-reader error after the caller signal is aborted", async function () {
+    const caller = new AbortController();
+    const reason = new Error("caller stopped waiting");
+    const modelFetchImpl = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        caller.abort(reason);
+        // Keep the raw Error past the guarded fetch boundary so this isolates
+        // the outer signal.aborted cache guard.
+        const response = new Response(null, {
+          headers: { "content-type": "application/json" },
+        });
+        Object.defineProperty(response, "body", {
+          value: {
+            getReader() {
+              throw reason;
+            },
+          },
+        });
+        return response;
+      })
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+
+    expect(
+      await captureError(
+        service.listModels(connection, {
+          signal: caller.signal,
+          cacheKey: userId,
+        }),
+      ),
+    ).toBe(reason);
+    expect(
+      await service.listModels(connection, { cacheKey: userId }),
+    ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not share a failed model catalogue with another destination", async function () {
+    const firstBaseUrl = "https://models-a.example.com/v1";
+    const secondBaseUrl = "https://models-b.example.com/v1";
+    const modelFetchImpl = vi.fn(async (input) =>
+      String(input).startsWith(firstBaseUrl)
+        ? new Response(null, { status: 404 })
+        : new Response(JSON.stringify({ data: [{ id: remoteModel }] }), {
+            headers: { "content-type": "application/json" },
+          }),
+    );
+    const service = createAiReviewerProviderService({ modelFetchImpl });
+
+    await captureError(
+      service.listModels(
+        {
+          provider: "openai-compatible",
+          baseUrl: firstBaseUrl,
+          credential,
+        },
+        { cacheKey: userId },
+      ),
+    );
+    expect(
+      await service.listModels(
+        {
+          provider: "openai-compatible",
+          baseUrl: secondBaseUrl,
+          credential,
+        },
+        { cacheKey: userId },
+      ),
+    ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("caches OpenAI-compatible context lengths per API version", async function () {
@@ -2425,7 +2709,7 @@ describe("AI reviewer provider configuration", function () {
     expect(contextLengthDetector).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps a failed probe unknown without negatively caching it", async function () {
+  it("does not cache a context detector failure before any provider request", async function () {
     const contextLengthDetector = vi.fn(async () => {
       throw new Error("PRIVATE_CONTEXT_PROBE_FAILURE");
     });
@@ -2445,6 +2729,153 @@ describe("AI reviewer provider configuration", function () {
     });
     expect(contextLengthDetector).toHaveBeenCalledTimes(2);
   });
+
+  it("caches an unavailable context resolution after failed provider probes", async function () {
+    let now = 1_000;
+    const modelFetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "unsupported" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      contextLengthDetectionSignalFactory: () => undefined,
+      modelNow: () => now,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl,
+    };
+    const unavailable = {
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    };
+
+    expect(await service.resolveContextLength(connection, model)).toEqual(
+      unavailable,
+    );
+    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+    expect(await service.resolveContextLength(connection, model)).toEqual(
+      unavailable,
+    );
+    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+
+    expect(
+      await service.resolveContextLength(
+        { ...connection, contextLengthOverride: contextLength },
+        model,
+      ),
+    ).toEqual({
+      contextLength,
+      contextLengthSource: "override",
+    });
+    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+
+    now += 60_001;
+    expect(await service.resolveContextLength(connection, model)).toEqual(
+      unavailable,
+    );
+    expect(modelFetchImpl).toHaveBeenCalledTimes(6);
+  });
+
+  it("replaces a negative context resolution with advertised Retry metadata", async function () {
+    const modelFetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [{ id: remoteModel, context_window: contextLength }],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    const service = createAiReviewerProviderService({
+      modelFetchImpl,
+      contextLengthDetectionSignalFactory: () => undefined,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: remoteBaseUrl,
+      credential,
+    };
+    const options = { cacheKey: userId };
+
+    expect(
+      await service.resolveContextLength(connection, remoteModel, options),
+    ).toEqual({
+      contextLength: null,
+      contextLengthSource: "unavailable",
+    });
+    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+
+    expect(
+      await service.listModels(connection, {
+        ...options,
+        bypassNegativeCache: true,
+      }),
+    ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(4);
+    expect(
+      service.contextLengthForModelList(connection, remoteModel, options),
+    ).toEqual({
+      contextLength,
+      contextLengthSource: "detected",
+    });
+
+    expect(
+      await service.resolveContextLength(connection, remoteModel, options),
+    ).toEqual({
+      contextLength,
+      contextLengthSource: "detected",
+    });
+    expect(modelFetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(["AbortError", "TimeoutError"])(
+    "does not cache context discovery stopped by a raw %s",
+    async function (errorName) {
+      const contextLengthDetector = vi
+        .fn()
+        .mockImplementationOnce(async ({ fetchImpl }) => {
+          await fetchImpl(`${remoteBaseUrl}/slots`);
+          throw new DOMException("context discovery stopped", errorName);
+        })
+        .mockResolvedValue(contextLength);
+      const service = createAiReviewerProviderService({
+        contextLengthDetector,
+        contextLengthDetectionSignalFactory: () => undefined,
+        modelFetchImpl: vi.fn(async () => new Response(null, { status: 404 })),
+      });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: remoteBaseUrl,
+        credential,
+      };
+
+      expect(
+        await service.resolveContextLength(connection, remoteModel, {
+          cacheKey: userId,
+        }),
+      ).toEqual({
+        contextLength: null,
+        contextLengthSource: "unavailable",
+      });
+      expect(
+        await service.resolveContextLength(connection, remoteModel, {
+          cacheKey: userId,
+        }),
+      ).toEqual({
+        contextLength,
+        contextLengthSource: "detected",
+      });
+      expect(contextLengthDetector).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it.each([
     {
@@ -3053,6 +3484,38 @@ describe("AI reviewer provider configuration", function () {
     expect(missing.providerService.listModels).not.toHaveBeenCalled();
   });
 
+  it("passes an explicit model refresh through to the negative-cache bypass", async function () {
+    const refreshed = providerControllerFixture();
+    const response = new FakeResponse();
+
+    await refreshed.controller.listModels(
+      httpRequest({ query: { refresh: "true" } }),
+      response,
+    );
+
+    expect(
+      refreshed.providerService.listModels,
+    ).toHaveBeenCalledExactlyOnceWith(
+      { ...otherConnection, baseUrl },
+      {
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${storedConnectionId}`,
+        bypassNegativeCache: true,
+      },
+    );
+    expect(response.statusCode).toBe(200);
+
+    const invalid = providerControllerFixture();
+    const invalidResponse = new FakeResponse();
+    await invalid.controller.listModels(
+      httpRequest({ query: { refresh: "yes" } }),
+      invalidResponse,
+    );
+    expect(invalidResponse.statusCode).toBe(400);
+    expect(invalid.store.getAll).not.toHaveBeenCalled();
+    expect(invalid.providerService.listModels).not.toHaveBeenCalled();
+  });
+
   it("redacts model-discovery authentication failures from responses and failure logs", async function () {
     const rawBody = "RAW_PROVIDER_AUTHENTICATION_RESPONSE";
     const modelFetchImpl = vi.fn(async () => {
@@ -3231,7 +3694,10 @@ describe("AI reviewer provider configuration", function () {
     expect(store.get).toHaveBeenCalledExactlyOnceWith(userId, null);
     expect(providerService.testConnection).toHaveBeenCalledExactlyOnceWith(
       { ...otherConnection, baseUrl },
-      { signal: expect.any(AbortSignal) },
+      {
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${storedConnectionId}`,
+      },
     );
     expect(response.body).toEqual({
       ok: true,

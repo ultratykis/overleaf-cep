@@ -161,6 +161,13 @@ function selectedConnectionId(request) {
   return value == null ? null : parseAiReviewerConnectionId(value);
 }
 
+/** @param {unknown} value */
+function parseModelRefresh(value) {
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new TypeError("refresh must be 'true' or 'false'.");
+}
+
 /**
  * @param {Response} response
  * @param {number} status
@@ -517,6 +524,14 @@ export function createAiReviewerProviderController(dependencies) {
   async function listModels(request, response) {
     let connections;
     let authenticatedUserId;
+    let bypassNegativeCache;
+    try {
+      bypassNegativeCache = parseModelRefresh(
+        /** @type {any} */ (request.query)?.refresh,
+      );
+    } catch {
+      return sendError(response, 400, "invalid");
+    }
     try {
       authenticatedUserId = userId(request);
       connections = await configStore.getAll(authenticatedUserId);
@@ -555,6 +570,9 @@ export function createAiReviewerProviderController(dependencies) {
               listedModels = await providerService.listModels(connection, {
                 signal,
                 cacheKey,
+                ...(bypassNegativeCache
+                  ? { bypassNegativeCache: true }
+                  : {}),
               });
             } catch (error) {
               if (
@@ -675,7 +693,13 @@ export function createAiReviewerProviderController(dependencies) {
       }
       await circuitBreakerStore?.assertRequestAllowed(connection.id);
       return response.json(
-        await providerService.testConnection(connection, { signal }),
+        await providerService.testConnection(connection, {
+          signal,
+          cacheKey: aiReviewerModelCacheKey(
+            userId(request),
+            connection.id ?? null,
+          ),
+        }),
       );
     } catch (error) {
       if (timeout.aborted) {

@@ -34,6 +34,7 @@ const AZURE_CONNECTION_TEST_OUTPUT_TOKENS = 2048;
 // rest of that budget.
 const CONTEXT_LENGTH_PROBE_TIMEOUT_MILLISECONDS = 55_000;
 const MODEL_CACHE_TTL_MILLISECONDS = 60_000;
+const MODEL_FAILURE_CACHE_TTL_MILLISECONDS = 60_000;
 const MAX_MODEL_COUNT = 1_000;
 const MAX_MODEL_RESPONSE_BYTES = 1_048_576;
 const MAX_MODEL_RESPONSE_CHUNKS = 512;
@@ -88,6 +89,31 @@ function invalidModelResponse() {
     category: "schema",
     retryable: false,
   });
+}
+
+/**
+ * Only remember failures reached after the provider fetch boundary. Caller
+ * cancellation and local circuit gates consume no provider request and must
+ * be reconsidered immediately on the next operation.
+ *
+ * @param {unknown} error
+ * @param {boolean} providerFetchAttempted
+ */
+function isCacheableDiscoveryFailure(error, providerFetchAttempted) {
+  if (!providerFetchAttempted) return false;
+  if (error instanceof AgentGatewayAbortError) return false;
+  if (
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return false;
+  }
+  return !(
+    error instanceof AgentGatewayError &&
+    (error.category === "aborted" ||
+      error.code === "AI_PROVIDER_CIRCUIT_OPEN" ||
+      error.code === "AI_PROVIDER_COOLDOWN")
+  );
 }
 
 /** @param {Response} response */
@@ -460,6 +486,9 @@ export function createAiReviewerProviderService(dependencies = {}) {
   const circuitBreakerStore = dependencies.circuitBreakerStore ?? null;
   const modelCacheTtlMilliseconds =
     dependencies.modelCacheTtlMilliseconds ?? MODEL_CACHE_TTL_MILLISECONDS;
+  const modelFailureCacheTtlMilliseconds =
+    dependencies.modelFailureCacheTtlMilliseconds ??
+    MODEL_FAILURE_CACHE_TTL_MILLISECONDS;
   const contextLengthCacheTtlMilliseconds =
     dependencies.contextLengthCacheTtlMilliseconds ??
     MODEL_CACHE_TTL_MILLISECONDS;
@@ -627,9 +656,15 @@ export function createAiReviewerProviderService(dependencies = {}) {
 
   /**
    * @param {unknown} input
-   * @param {{ signal?: AbortSignal, cacheKey?: string }} [options]
+   * @param {{ signal?: AbortSignal, cacheKey?: string, bypassNegativeCache?: boolean }} [options]
    */
-  async function listModels(input, { signal, cacheKey = "" } = {}) {
+  async function listModels(
+    input,
+    { signal, cacheKey = "", bypassNegativeCache = false } = {},
+  ) {
+    if (typeof bypassNegativeCache !== "boolean") {
+      throw new TypeError("bypassNegativeCache must be a boolean.");
+    }
     throwIfAborted(signal);
     const config = parseAiReviewerConnection(input);
     if ("baseUrl" in config) {
@@ -661,9 +696,17 @@ export function createAiReviewerProviderService(dependencies = {}) {
     const now = modelNow();
     const cached = modelCache.get(effectiveCacheKey);
     if (cached?.expiresAt > now) {
-      return cached.models;
+      if (cached.kind === "models") {
+        return cached.models;
+      }
+      if (!bypassNegativeCache) {
+        throw cached.error;
+      }
+      modelCache.delete(effectiveCacheKey);
     }
-    modelCache.delete(effectiveCacheKey);
+    if (cached?.expiresAt <= now) {
+      modelCache.delete(effectiveCacheKey);
+    }
 
     /** @type {Record<string, string>} */
     const headers = { Accept: "application/json" };
@@ -677,72 +720,104 @@ export function createAiReviewerProviderService(dependencies = {}) {
         headers.Authorization = `Bearer ${config.credential}`;
       }
     }
-    const guardedFetch = createGuardedOpenAiCompatibleFetch({
-      baseUrl,
-      allowedRequestUrl: endpoint,
-      // Model listing is capability discovery. Unsupported endpoints are a
-      // valid configuration when the user supplied model ids, so discovery
-      // must not change the provider execution circuit.
-      fetchImpl: modelFetchImpl,
-    });
-    const response = await guardedFetch(endpoint, {
-      method: "GET",
-      headers,
-      signal,
-    });
-    if (!response.ok) {
-      throw providerHttpError(response);
-    }
-    const body = await readBoundedModelResponse(response, signal);
-    // The standard list establishes both compatibility and Ollama identity
-    // before the native route widens discovery beyond the configured base.
-    const nativeBaseUrl = isOllamaCompatibleModelList(body)
-      ? ollamaNativeBaseUrl(baseUrl)
-      : null;
-    const capabilities =
-      config.provider === "openai-compatible" && nativeBaseUrl !== null
-        ? await fetchOllamaCapabilities(
-            nativeBaseUrl,
-            config.apiVersion,
-            createGuardedOpenAiCompatibleFetch({
-              baseUrl: nativeBaseUrl,
-              allowedRequestUrl: `${nativeBaseUrl}/api/tags${
-                config.apiVersion == null
-                  ? ""
-                  : `?api-version=${config.apiVersion}`
-              }`,
-              // A 404 here means the compatible endpoint is not Ollama; it is
-              // not a provider execution failure.
-              fetchImpl: modelFetchImpl,
-            }),
-            signal,
-          )
+    let providerFetchAttempted = false;
+    /** @type {typeof fetch} */
+    const trackedModelFetch = async (...args) => {
+      providerFetchAttempted = true;
+      return await modelFetchImpl(...args);
+    };
+    try {
+      const guardedFetch = createGuardedOpenAiCompatibleFetch({
+        baseUrl,
+        allowedRequestUrl: endpoint,
+        // Model listing is capability discovery. Unsupported endpoints are a
+        // valid configuration when the user supplied model ids, so discovery
+        // must not change the provider execution circuit.
+        fetchImpl: trackedModelFetch,
+      });
+      const response = await guardedFetch(endpoint, {
+        method: "GET",
+        headers,
+        signal,
+      });
+      if (!response.ok) {
+        throw providerHttpError(response);
+      }
+      const body = await readBoundedModelResponse(response, signal);
+      // The standard list establishes both compatibility and Ollama identity
+      // before the native route widens discovery beyond the configured base.
+      const nativeBaseUrl = isOllamaCompatibleModelList(body)
+        ? ollamaNativeBaseUrl(baseUrl)
         : null;
-    const normalizedModels = normalizeModels(
-      config.provider,
-      body,
-      capabilities,
-    );
-    const models = Object.freeze(
-      normalizedModels.map(({ id, displayName }) =>
-        Object.freeze({ id, displayName }),
-      ),
-    );
-    for (const candidate of normalizedModels) {
-      if (candidate.detectedContextLength == null) continue;
-      advertisedContextLengthCache.set(
-        contextLengthCacheKey(config, candidate.id, cacheKey),
-        {
+      const capabilities =
+        config.provider === "openai-compatible" && nativeBaseUrl !== null
+          ? await fetchOllamaCapabilities(
+              nativeBaseUrl,
+              config.apiVersion,
+              createGuardedOpenAiCompatibleFetch({
+                baseUrl: nativeBaseUrl,
+                allowedRequestUrl: `${nativeBaseUrl}/api/tags${
+                  config.apiVersion == null
+                    ? ""
+                    : `?api-version=${config.apiVersion}`
+                }`,
+                // A 404 here means the compatible endpoint is not Ollama; it
+                // is not a provider execution failure.
+                fetchImpl: trackedModelFetch,
+              }),
+              signal,
+            )
+          : null;
+      const normalizedModels = normalizeModels(
+        config.provider,
+        body,
+        capabilities,
+      );
+      const models = Object.freeze(
+        normalizedModels.map(({ id, displayName }) =>
+          Object.freeze({ id, displayName }),
+        ),
+      );
+      for (const candidate of normalizedModels) {
+        if (candidate.detectedContextLength == null) continue;
+        const contextKey = contextLengthCacheKey(
+          config,
+          candidate.id,
+          cacheKey,
+        );
+        advertisedContextLengthCache.set(contextKey, {
           expiresAt: now + modelCacheTtlMilliseconds,
           contextLength: candidate.detectedContextLength,
-        },
-      );
+        });
+        const cachedResolution = contextLengthCache.get(contextKey);
+        // A successful explicit catalogue refresh is newer evidence than a
+        // still-live failed probe. Keep successful probe resolutions intact.
+        if (
+          cachedResolution != null &&
+          cachedResolution.resolution.contextLength == null
+        ) {
+          contextLengthCache.delete(contextKey);
+        }
+      }
+      modelCache.set(effectiveCacheKey, {
+        kind: /** @type {const} */ ("models"),
+        expiresAt: now + modelCacheTtlMilliseconds,
+        models,
+      });
+      return models;
+    } catch (error) {
+      if (
+        signal?.aborted !== true &&
+        isCacheableDiscoveryFailure(error, providerFetchAttempted)
+      ) {
+        modelCache.set(effectiveCacheKey, {
+          kind: /** @type {const} */ ("failure"),
+          expiresAt: modelNow() + modelFailureCacheTtlMilliseconds,
+          error,
+        });
+      }
+      throw error;
     }
-    modelCache.set(effectiveCacheKey, {
-      expiresAt: now + modelCacheTtlMilliseconds,
-      models,
-    });
-    return models;
   }
 
   return {
@@ -790,6 +865,13 @@ export function createAiReviewerProviderService(dependencies = {}) {
         return cached;
       }
       const advertised = cachedAdvertisedContextLength(key);
+      let providerFetchAttempted = false;
+      let detectionFailure = null;
+      /** @type {typeof fetch} */
+      const trackedContextFetch = async (...args) => {
+        providerFetchAttempted = true;
+        return await modelFetchImpl(...args);
+      };
       const resolution = await resolveModelContextLength(
         contextLengthResolutionInput(connection, parsedModel, advertised),
         {
@@ -801,14 +883,19 @@ export function createAiReviewerProviderService(dependencies = {}) {
                 : timeoutSignal == null
                   ? signal
                   : AbortSignal.any([signal, timeoutSignal]);
-            return await contextLengthDetector({
-              ...candidate,
-              // Runtime metadata probes are best-effort capability discovery,
-              // including /api/ps, /slots, and /props.
-              fetchImpl: modelFetchImpl,
-              ...(signal == null ? {} : { signal }),
-              ...(probeSignal == null ? {} : { probeSignal }),
-            });
+            try {
+              return await contextLengthDetector({
+                ...candidate,
+                // Runtime metadata probes are best-effort capability
+                // discovery, including /api/ps, /slots, and /props.
+                fetchImpl: trackedContextFetch,
+                ...(signal == null ? {} : { signal }),
+                ...(probeSignal == null ? {} : { probeSignal }),
+              });
+            } catch (error) {
+              detectionFailure = error;
+              throw error;
+            }
           },
         },
       );
@@ -816,7 +903,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
       // resolver may convert detector failures to an advertised or unknown
       // value, so re-check the route signal before caching or starting a review.
       throwIfAborted(signal);
-      if (resolution.contextLength != null) {
+      if (
+        resolution.contextLength != null ||
+        (signal?.aborted !== true &&
+          isCacheableDiscoveryFailure(
+            detectionFailure,
+            providerFetchAttempted,
+          ))
+      ) {
         contextLengthCache.set(key, {
           expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,
           resolution,
@@ -875,7 +969,11 @@ export function createAiReviewerProviderService(dependencies = {}) {
           classification: "remote",
         });
       }
-      const models = await listModels(config, { signal, cacheKey });
+      const models = await listModels(config, {
+        signal,
+        cacheKey,
+        bypassNegativeCache: true,
+      });
       return Object.freeze({
         ok: true,
         provider: config.provider,

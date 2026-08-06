@@ -388,10 +388,16 @@ export function deleteUserAiProviderConnection(
  * Each entry names the connection it came from, so choosing a model chooses a
  * connection too.
  */
-export function getAiProviderModels(projectId: string, signal: AbortSignal) {
+export function getAiProviderModels(
+  projectId: string,
+  signal: AbortSignal,
+  { refresh = false }: { refresh?: boolean } = {},
+) {
   return request(signal, () =>
     getJSON<AiProviderModelCatalog>(
-      `/project/${projectId}/ai-reviewer/provider/models`,
+      `/project/${projectId}/ai-reviewer/provider/models${
+        refresh ? "?refresh=true" : ""
+      }`,
       { signal, swallowAbortError: false },
     ),
   );

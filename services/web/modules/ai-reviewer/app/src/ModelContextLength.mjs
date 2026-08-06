@@ -177,7 +177,8 @@ export async function resolveModelContextLength(
     // Runtime allocation discovery is best-effort. Ollama /api/ps values enter
     // only through the detector after a successful probe, so its failed probe
     // is unavailable for this run and is refused before the review request. A
-    // later run may probe again because failures are not cached.
+    // caller may briefly cache that unavailable resolution to avoid repeating
+    // the same failed capability requests.
   }
 
   return withoutDetection.contextLengthSource === "pending"

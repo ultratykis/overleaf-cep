@@ -376,6 +376,8 @@ describe("AI reviewer: context-driven panel", function () {
     expect(screen.queryByTestId("ai-reviewer-onboarding")).not.to.exist;
     expect(loadProviderConnections).to.have.been.calledTwice;
     expect(loadProviderModels).to.have.been.calledTwice;
+    expect(loadProviderModels.firstCall.args).to.have.length(2);
+    expect(loadProviderModels.secondCall.args).to.have.length(2);
     fireEvent.click(modelChip);
     expect(
       screen.getByRole("menuitem", {
@@ -1353,14 +1355,15 @@ describe("AI reviewer: context-driven panel", function () {
     ).to.exist;
   });
 
-  it("manually retries a failed initial model catalogue load", async function () {
+  it("consumes a manual model catalogue refresh once per Retry revision", async function () {
     const loadProviderModels = sinon.stub();
     loadProviderModels.onFirstCall().rejects(new Error("HTTP 504"));
     loadProviderModels.resolves({ models: [defaultModel], failures: [] });
-    renderPanel({
-      loadProviderConnections: sinon
-        .stub()
-        .resolves({ connections: [localConnection] }),
+    const loadProviderConnections = sinon
+      .stub()
+      .resolves({ connections: [localConnection] });
+    const rendered = renderPanel({
+      loadProviderConnections,
       loadProviderModels,
     });
 
@@ -1372,8 +1375,29 @@ describe("AI reviewer: context-driven panel", function () {
       await screen.findByRole("button", { name: "Selected model — None" }),
     ).to.exist;
     expect(loadProviderModels).to.have.been.calledTwice;
+    expect(loadProviderModels.firstCall.args).to.have.length(2);
+    expect(loadProviderModels.secondCall.args[2]).to.deep.equal({
+      refresh: true,
+    });
     expect(screen.queryByTestId("ai-reviewer-model-catalog-error")).not.to
       .exist;
+
+    // The panel supports an in-place project prop change. That dependency
+    // reruns the catalogue effect without advancing the Retry revision.
+    rendered.rerender(
+      <AiReviewerPanelView
+        projectId="context-layout-project-after-retry"
+        loadProviderConnections={loadProviderConnections}
+        loadProviderModels={loadProviderModels}
+      />,
+    );
+    await waitFor(() => {
+      expect(loadProviderModels).to.have.been.calledThrice;
+    });
+    expect(loadProviderModels.thirdCall.args[0]).to.equal(
+      "context-layout-project-after-retry",
+    );
+    expect(loadProviderModels.thirdCall.args).to.have.length(2);
   });
 
   it("saves the chosen model and restores it after a reload", async function () {

@@ -752,6 +752,22 @@ describe("AI reviewer: provider configuration", function () {
     expect(call.options.signal).to.equal(signal);
     expect(call.options.body).to.equal(undefined);
     expect(call.url).not.to.include("connectionId");
+    expect(call.url).not.to.include("refresh");
+  });
+
+  it("adds refresh only to an explicit model catalogue reload", async function () {
+    const catalog = { models: [], failures: [] };
+    const route = fetchMock.get(
+      `/project/${projectId}/ai-reviewer/provider/models?refresh=true`,
+      catalog,
+    );
+    const signal = new AbortController().signal;
+
+    expect(
+      await getAiProviderModels(projectId, signal, { refresh: true }),
+    ).to.deep.equal(catalog);
+    expect(route.callHistory.calls()).to.have.length(1);
+    expect(route.callHistory.calls()[0].url).to.include("refresh=true");
   });
 
   it("saves a connection without asking for a model and tests it afterwards", async function () {
