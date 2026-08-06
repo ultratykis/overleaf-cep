@@ -166,7 +166,7 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     ]);
   });
 
-  it("uses llama.cpp slots after the probe exceeds its own timeout", async function () {
+  it("stops after the probe exceeds its own timeout", async function () {
     const probeSignal = AbortSignal.timeout(5);
     const fetchImpl = vi.fn(async (input, init) => {
       const url = String(input);
@@ -183,9 +183,6 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
           );
         });
       }
-      if (url.endsWith("/slots")) {
-        return jsonResponse([{ model, n_ctx: 16_384 }]);
-      }
       return jsonResponse({}, 404);
     });
 
@@ -196,10 +193,9 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
         probeSignal,
         fetchImpl,
       }),
-    ).toBe(16_384);
+    ).toBeNull();
     expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
       "http://127.0.0.1:11434/v1/chat/completions",
-      "http://127.0.0.1:11434/slots",
     ]);
   });
 
@@ -240,28 +236,30 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
-  it("uses llama.cpp properties after a non-2xx probe response", async function () {
+  it("stops after a 400 probe response without speculative metadata requests", async function () {
+    const apiVersion = "2025-01-01-preview";
     const fetchImpl = vi.fn(async (input) => {
       const url = String(input);
-      if (url.endsWith("/chat/completions")) {
+      if (url.includes("/chat/completions?")) {
         return jsonResponse(
-          { error: { message: "PRIVATE_CHAT_TEMPLATE_FAILURE" } },
-          503,
+          { error: { message: "Unsupported parameter: max_tokens" } },
+          400,
         );
-      }
-      if (url.endsWith("/props")) {
-        return jsonResponse({ default_generation_settings: { n_ctx: 32_768 } });
       }
       return jsonResponse({}, 404);
     });
 
     expect(
-      await detectOpenAiCompatibleContextLength({ baseUrl, model, fetchImpl }),
-    ).toBe(32_768);
+      await detectOpenAiCompatibleContextLength({
+        baseUrl,
+        apiVersion,
+        model,
+        fetchImpl,
+      }),
+    ).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledOnce();
     expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
-      "http://127.0.0.1:11434/v1/chat/completions",
-      "http://127.0.0.1:11434/slots",
-      "http://127.0.0.1:11434/props",
+      `${baseUrl}/chat/completions?api-version=${apiVersion}`,
     ]);
   });
 
@@ -285,8 +283,6 @@ describe("AI reviewer OpenAI-compatible context detection", function () {
     ).toBeNull();
     expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
       "http://127.0.0.1:11434/v1/chat/completions",
-      "http://127.0.0.1:11434/slots",
-      "http://127.0.0.1:11434/props",
     ]);
     expect(fetchImpl.mock.calls.flat()).not.toContain(
       "http://127.0.0.1:11434/api/ps",

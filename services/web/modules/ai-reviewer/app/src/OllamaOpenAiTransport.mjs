@@ -2810,9 +2810,10 @@ async function requestContextMetadata({
  * First send the smallest standard Chat Completions request through the same
  * configured endpoint used by reviews. Ollama loads that request with its
  * server default, so the immediately following /api/ps value is the allocation
- * reviews can actually use. llama.cpp keeps its existing /slots and /props
- * fallbacks after the same probe. Without a runtime value, planning remains
- * unknown. Every request stays on the configured endpoint's guarded origin.
+ * reviews can actually use. After the same probe succeeds, llama.cpp keeps
+ * its existing /slots and /props fallbacks. Without a runtime value, planning
+ * remains unknown. Every request stays on the configured endpoint's guarded
+ * origin.
  *
  * @param {{
  *   baseUrl: unknown,
@@ -2876,8 +2877,8 @@ export async function detectOpenAiCompatibleContextLength({
   } catch (error) {
     // A caller cancellation remains authoritative. A probe-local timeout,
     // network failure, or non-2xx response is only evidence that generation
-    // could not reveal the runtime allocation; llama.cpp may still expose its
-    // context through /slots or /props.
+    // could not reveal the runtime allocation. Do not speculate about
+    // server-specific metadata endpoints without a successful probe.
     throwIfTransportSignalAborted(signal);
     if (
       !(error instanceof AgentGatewayError) ||
@@ -2911,24 +2912,24 @@ export async function detectOpenAiCompatibleContextLength({
       const contextLength = ollamaRunningContextLength(running, parsedModel);
       if (contextLength != null) return contextLength;
     }
-  }
 
-  const slots = await request(
-    appendApiVersionQuery(`${origin}/slots`, parsedApiVersion),
-    "GET",
-  );
-  if (slots != null) {
-    const contextLength = llamaSlotContextLength(slots, parsedModel);
-    if (contextLength != null) return contextLength;
-  }
+    const slots = await request(
+      appendApiVersionQuery(`${origin}/slots`, parsedApiVersion),
+      "GET",
+    );
+    if (slots != null) {
+      const contextLength = llamaSlotContextLength(slots, parsedModel);
+      if (contextLength != null) return contextLength;
+    }
 
-  const props = await request(
-    appendApiVersionQuery(`${origin}/props`, parsedApiVersion),
-    "GET",
-  );
-  if (props != null) {
-    const contextLength = llamaPropsContextLength(props);
-    if (contextLength != null) return contextLength;
+    const props = await request(
+      appendApiVersionQuery(`${origin}/props`, parsedApiVersion),
+      "GET",
+    );
+    if (props != null) {
+      const contextLength = llamaPropsContextLength(props);
+      if (contextLength != null) return contextLength;
+    }
   }
 
   return null;

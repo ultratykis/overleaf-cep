@@ -2730,7 +2730,7 @@ describe("AI reviewer provider configuration", function () {
     expect(contextLengthDetector).toHaveBeenCalledTimes(2);
   });
 
-  it("caches an unavailable context resolution after failed provider probes", async function () {
+  it("caches an unavailable context resolution after a failed provider probe", async function () {
     let now = 1_000;
     const modelFetchImpl = vi.fn(
       async () =>
@@ -2756,11 +2756,11 @@ describe("AI reviewer provider configuration", function () {
     expect(await service.resolveContextLength(connection, model)).toEqual(
       unavailable,
     );
-    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
     expect(await service.resolveContextLength(connection, model)).toEqual(
       unavailable,
     );
-    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
 
     expect(
       await service.resolveContextLength(
@@ -2771,20 +2771,18 @@ describe("AI reviewer provider configuration", function () {
       contextLength,
       contextLengthSource: "override",
     });
-    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
 
     now += 60_001;
     expect(await service.resolveContextLength(connection, model)).toEqual(
       unavailable,
     );
-    expect(modelFetchImpl).toHaveBeenCalledTimes(6);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("replaces a negative context resolution with advertised Retry metadata", async function () {
     const modelFetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
-      .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(new Response(null, { status: 404 }))
       .mockResolvedValueOnce(
         new Response(
@@ -2811,7 +2809,7 @@ describe("AI reviewer provider configuration", function () {
       contextLength: null,
       contextLengthSource: "unavailable",
     });
-    expect(modelFetchImpl).toHaveBeenCalledTimes(3);
+    expect(modelFetchImpl).toHaveBeenCalledOnce();
 
     expect(
       await service.listModels(connection, {
@@ -2819,7 +2817,7 @@ describe("AI reviewer provider configuration", function () {
         bypassNegativeCache: true,
       }),
     ).toEqual([{ id: remoteModel, displayName: remoteModel }]);
-    expect(modelFetchImpl).toHaveBeenCalledTimes(4);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
     expect(
       service.contextLengthForModelList(connection, remoteModel, options),
     ).toEqual({
@@ -2833,7 +2831,7 @@ describe("AI reviewer provider configuration", function () {
       contextLength,
       contextLengthSource: "detected",
     });
-    expect(modelFetchImpl).toHaveBeenCalledTimes(4);
+    expect(modelFetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it.each(["AbortError", "TimeoutError"])(
