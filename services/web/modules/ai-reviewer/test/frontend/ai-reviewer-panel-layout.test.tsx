@@ -1016,7 +1016,7 @@ describe("AI reviewer panel width", function () {
 
     expect(
       await screen.findByText(
-        "This connection was stopped after repeated provider failures. Check and save the connection settings to enable it again.",
+        "This connection was stopped after repeated provider failures. Enable the connection to try again, or correct its endpoint or credentials and save it to enable it automatically.",
       ),
     ).to.exist;
     fireEvent.click(

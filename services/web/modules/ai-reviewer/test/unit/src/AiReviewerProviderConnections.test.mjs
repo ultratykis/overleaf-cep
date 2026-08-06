@@ -614,6 +614,160 @@ describe("AI reviewer provider connections", function () {
     );
   });
 
+  it("resets the circuit only when a normalized request destination changes", async function () {
+    const remoteConnection = {
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      credential: geminiCredential,
+    };
+    const { store } = storeFixture();
+    let current = await store.create(userId, remoteConnection);
+    const reset = vi.fn(async () => {});
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+      circuitBreakerStore: { reset },
+    });
+    const save = async (body) => {
+      const response = new FakeResponse();
+      await controller.updateConnection(
+        httpRequest({
+          body: { ...body, expectedRevision: current.revision },
+          params: { connection_id: current.id },
+        }),
+        response,
+      );
+      expect(response.statusCode).toBe(200);
+      current = { ...current, revision: response.body.revision };
+    };
+
+    await save({
+      provider: "ollama",
+      baseUrl: "https://api.example.com/v1",
+      label: "Renamed connection",
+    });
+    await save({
+      ...remoteConnection,
+      label: "Renamed connection",
+    });
+    await save({
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      label: "Renamed connection",
+      reasoningModelCompatibility: true,
+    });
+    await save({
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      label: "Renamed connection",
+      reasoningModelCompatibility: true,
+      contextLengthOverride: 32_768,
+    });
+    await save({
+      provider: "openai-compatible",
+      baseUrl: "https://api.example.com/v1",
+      apiVersion: "",
+      label: "Renamed connection",
+    });
+
+    expect(reset).not.toHaveBeenCalled();
+
+    await save({
+      provider: "openai-compatible",
+      baseUrl: "https://other.example.com/v1",
+    });
+    expect(reset).toHaveBeenCalledExactlyOnceWith(current.id);
+  });
+
+  it.each([
+    {
+      name: "credential",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: geminiCredential,
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: claudeCredential,
+      },
+    },
+    {
+      name: "API version",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        apiVersion: openAiCompatibleApiVersion,
+      },
+    },
+    {
+      name: "API version removal",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        apiVersion: openAiCompatibleApiVersion,
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        apiVersion: "",
+      },
+    },
+    {
+      name: "API version value",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        apiVersion: openAiCompatibleApiVersion,
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        apiVersion: "2025-04-01-preview",
+      },
+    },
+    {
+      name: "Azure request style",
+      initial: azureConnection,
+      update: {
+        provider: "azure",
+        baseUrl: azureConnection.baseUrl,
+        requestStyle: "v1",
+        deployments: azureConnection.deployments,
+        credential: azureConnection.credential,
+      },
+    },
+  ])("resets the circuit after a $name change", async function ({
+    initial,
+    update,
+  }) {
+    const { store } = storeFixture();
+    const created = await store.create(userId, initial);
+    const reset = vi.fn(async () => {});
+    const controller = createAiReviewerProviderController({
+      configStore: store,
+      providerService: {},
+      circuitBreakerStore: { reset },
+    });
+    const response = new FakeResponse();
+
+    await controller.updateConnection(
+      httpRequest({
+        body: { ...update, expectedRevision: created.revision },
+        params: { connection_id: created.id },
+      }),
+      response,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(reset).toHaveBeenCalledExactlyOnceWith(created.id);
+  });
+
   it("rejects changing a saved connection's provider without touching its destination", async function () {
     const { records, store } = storeFixture();
     const azure = await store.create(userId, azureConnection);
@@ -638,9 +792,11 @@ describe("AI reviewer provider connections", function () {
     expect(records.get(userId)).toEqual(before);
     expect(await store.get(userId, azure.id)).toMatchObject(azureConnection);
 
+    const reset = vi.fn(async () => {});
     const controller = createAiReviewerProviderController({
       configStore: store,
       providerService: {},
+      circuitBreakerStore: { reset },
     });
     const response = new FakeResponse();
     await controller.updateConnection(
@@ -656,6 +812,7 @@ describe("AI reviewer provider connections", function () {
     );
     expect(response.statusCode).toBe(400);
     expect(response.body.error.code).toBe("AI_PROVIDER_CONFIGURATION_INVALID");
+    expect(reset).not.toHaveBeenCalled();
     expect(records.get(userId)).toEqual(before);
   });
 

@@ -14,6 +14,13 @@ import {
 import { createAiReviewerProviderCredentialManager } from "./AiReviewerProviderCredentialManager.mjs";
 
 const MAX_PROVIDER_CONFIG_SAVE_RETRIES = 5;
+const PROVIDER_REQUEST_DESTINATION_FIELDS = Object.freeze([
+  "provider",
+  "baseUrl",
+  "model",
+  "requestStyle",
+  "apiVersion",
+]);
 // The single connection this module stored before connections became a list,
 // together with the model and context length a connection no longer owns.
 const LEGACY_CONNECTION_FIELDS = Object.freeze([
@@ -357,6 +364,58 @@ async function storedConnection(record, credentialManager) {
   });
 }
 
+/**
+ * Compare the normalized destination that was committed before an update with
+ * the normalized replacement. The model field is retained as a defensive
+ * boundary, but is inactive in the current schema because neither normalized
+ * value can contain it. It will participate if model returns to connection
+ * records and update inputs in the future.
+ *
+ * A supplied credential is compared with the decrypted stored value. An
+ * omitted credential means "keep the existing credential" and is therefore
+ * unchanged. If an existing envelope cannot be compared, resetting is the
+ * safe outcome after the replacement has committed.
+ *
+ * @param {any} currentRecord
+ * @param {ReturnType<typeof parseAiReviewerConnection>} current
+ * @param {ReturnType<typeof parseAiReviewerConnectionUpdate>} next
+ * @param {ReturnType<typeof createAiReviewerProviderCredentialManager>} credentialManager
+ */
+async function providerRequestDestinationChanged(
+  currentRecord,
+  current,
+  next,
+  credentialManager,
+) {
+  if (
+    PROVIDER_REQUEST_DESTINATION_FIELDS.some(
+      (field) => Reflect.get(current, field) !== Reflect.get(next, field),
+    )
+  ) {
+    return true;
+  }
+  if (!Object.hasOwn(next, "credential")) {
+    return false;
+  }
+  const hasStoredCredential =
+    typeof currentRecord?.credentialEncrypted === "string" &&
+    currentRecord.credentialEncrypted.length > 0;
+  if (next.credential == null) {
+    return hasStoredCredential;
+  }
+  if (!hasStoredCredential) {
+    return true;
+  }
+  try {
+    return (
+      (await storedCredential(currentRecord, current, credentialManager)) !==
+      next.credential
+    );
+  } catch {
+    return true;
+  }
+}
+
 /** @param {unknown} value */
 function timestamp(value) {
   const date = value instanceof Date ? value : new Date(String(value));
@@ -609,6 +668,7 @@ export function createAiReviewerProviderConfigStore({
       connectionId == null
         ? null
         : parseAiReviewerConnectionRevision(expectedRevisionInput);
+    let destinationChanged = false;
     if (connectionId != null) {
       const currentRecord = await lean(model.findOne({ _id: userId }));
       const currentConnection = connectionRecord(currentRecord, connectionId);
@@ -617,6 +677,15 @@ export function createAiReviewerProviderConfigStore({
         /** @type {number} */ (expectedRevision),
       );
       assertProviderUnchanged(currentConnection, config);
+      const current = parseAiReviewerConnection(
+        coreConnectionInput(currentConnection),
+      );
+      destinationChanged = await providerRequestDestinationChanged(
+        currentConnection,
+        current,
+        config,
+        credentialManager,
+      );
     }
     // Encrypting before the compare-and-set keeps a credential-storage failure
     // from reaching the stored document at all, and keeps a retry from
@@ -672,9 +741,12 @@ export function createAiReviewerProviderConfigStore({
               ),
       };
     });
-    return publicConnections(written).find(
-      (connection) => connection.id === writtenId,
-    );
+    return Object.freeze({
+      connection: publicConnections(written).find(
+        (connection) => connection.id === writtenId,
+      ),
+      destinationChanged,
+    });
   }
 
   /**
@@ -754,7 +826,7 @@ export function createAiReviewerProviderConfigStore({
      * @param {unknown} input
      */
     async create(userId, input) {
-      return await writeConnection(userId, null, input, null);
+      return (await writeConnection(userId, null, input, null)).connection;
     },
 
     /**
@@ -764,6 +836,27 @@ export function createAiReviewerProviderConfigStore({
      * @param {unknown} expectedRevision
      */
     async update(userId, connectionId, input, expectedRevision) {
+      return (
+        await writeConnection(userId, connectionId, input, expectedRevision)
+      ).connection;
+    },
+
+    /**
+     * Update a connection and report whether the committed write changed the
+     * provider request destination. The comparison reuses the update's
+     * existing pre-write read, so callers do not need another database read.
+     *
+     * @param {string} userId
+     * @param {string} connectionId
+     * @param {unknown} input
+     * @param {unknown} expectedRevision
+     */
+    async updateWithDestinationChange(
+      userId,
+      connectionId,
+      input,
+      expectedRevision,
+    ) {
       return await writeConnection(
         userId,
         connectionId,

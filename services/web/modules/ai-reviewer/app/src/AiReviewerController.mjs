@@ -158,7 +158,7 @@ const PUBLIC_PROVIDER_CIRCUIT_OPEN_ERROR = Object.freeze({
   code: "AI_PROVIDER_CIRCUIT_OPEN",
   category: "configuration",
   message:
-    "This AI provider connection was stopped after repeated failures. Check and save its settings before trying again.",
+    "This AI provider connection was stopped after repeated failures. Enable the connection before trying again, or correct its endpoint or credentials and save it to enable it automatically.",
   retryable: false,
 });
 

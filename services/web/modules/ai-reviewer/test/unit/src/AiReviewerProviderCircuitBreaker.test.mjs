@@ -262,16 +262,19 @@ describe("AI reviewer provider circuit breaker", function () {
     ).rejects.toBeInstanceOf(AiReviewerProviderCircuitOpenError);
   });
 
-  it("resets the circuit after an existing connection is saved", async function () {
+  it("resets the circuit after an existing connection destination changes", async function () {
     const reset = vi.fn(async () => {});
     const controller = createAiReviewerProviderController({
       configStore: {
-        update: vi.fn(async () => ({
-          id: connectionId,
-          revision: 2,
-          label: "provider.example",
-          provider: "openai-compatible",
-          baseUrl: "https://provider.example/v1",
+        updateWithDestinationChange: vi.fn(async () => ({
+          connection: {
+            id: connectionId,
+            revision: 2,
+            label: "other-provider.example",
+            provider: "openai-compatible",
+            baseUrl: "https://other-provider.example/v1",
+          },
+          destinationChanged: true,
         })),
       },
       providerService: {},
@@ -282,9 +285,9 @@ describe("AI reviewer provider circuit breaker", function () {
     request.params = { connection_id: connectionId };
     request.body = {
       provider: "openai-compatible",
-      baseUrl: "https://provider.example/v1",
+      baseUrl: "https://other-provider.example/v1",
       models: [],
-      label: "provider.example",
+      label: "other-provider.example",
       contextLengthOverride: null,
       expectedRevision: 1,
     };
@@ -299,15 +302,61 @@ describe("AI reviewer provider circuit breaker", function () {
     expect(reset).toHaveBeenCalledWith(connectionId);
   });
 
+  it("keeps the circuit after a save that does not change the destination", async function () {
+    const reset = vi.fn(async () => {});
+    const controller = createAiReviewerProviderController({
+      configStore: {
+        updateWithDestinationChange: vi.fn(async () => ({
+          connection: {
+            id: connectionId,
+            revision: 2,
+            label: "Renamed provider",
+            provider: "openai-compatible",
+            baseUrl: "https://provider.example/v1",
+          },
+          destinationChanged: false,
+        })),
+      },
+      providerService: {},
+      circuitBreakerStore: { reset },
+    });
+    const request = new EventEmitter();
+    request.user = { _id: { toString: () => "user-circuit-0001" } };
+    request.params = { connection_id: connectionId };
+    request.body = {
+      provider: "openai-compatible",
+      baseUrl: "https://provider.example/v1",
+      models: [],
+      label: "Renamed provider",
+      contextLengthOverride: null,
+      reasoningModelCompatibility: true,
+      expectedRevision: 1,
+    };
+    const responseFixture = {
+      status: vi.fn(() => responseFixture),
+      json: vi.fn((body) => body),
+    };
+
+    await controller.updateConnection(request, responseFixture);
+
+    expect(reset).not.toHaveBeenCalled();
+    expect(responseFixture.json).toHaveBeenCalledWith(
+      expect.objectContaining({ id: connectionId, revision: 2 }),
+    );
+  });
+
   it("returns the saved revision when automatic circuit reset fails", async function () {
     const controller = createAiReviewerProviderController({
       configStore: {
-        update: vi.fn(async () => ({
-          id: connectionId,
-          revision: 2,
-          label: "provider.example",
-          provider: "openai-compatible",
-          baseUrl: "https://provider.example/v1",
+        updateWithDestinationChange: vi.fn(async () => ({
+          connection: {
+            id: connectionId,
+            revision: 2,
+            label: "other-provider.example",
+            provider: "openai-compatible",
+            baseUrl: "https://other-provider.example/v1",
+          },
+          destinationChanged: true,
         })),
       },
       providerService: {},
@@ -322,9 +371,9 @@ describe("AI reviewer provider circuit breaker", function () {
     request.params = { connection_id: connectionId };
     request.body = {
       provider: "openai-compatible",
-      baseUrl: "https://provider.example/v1",
+      baseUrl: "https://other-provider.example/v1",
       models: [],
-      label: "provider.example",
+      label: "other-provider.example",
       contextLengthOverride: null,
       expectedRevision: 1,
     };
@@ -339,6 +388,30 @@ describe("AI reviewer provider circuit breaker", function () {
     expect(responseFixture.json).toHaveBeenCalledWith(
       expect.objectContaining({ id: connectionId, revision: 2 }),
     );
+  });
+
+  it("still resets the circuit after a connection is deleted", async function () {
+    const reset = vi.fn(async () => {});
+    const controller = createAiReviewerProviderController({
+      configStore: {
+        remove: vi.fn(async () => []),
+      },
+      providerService: {},
+      circuitBreakerStore: { reset },
+    });
+    const request = new EventEmitter();
+    request.user = { _id: { toString: () => "user-circuit-0001" } };
+    request.params = { connection_id: connectionId };
+    request.body = { expectedRevision: 1 };
+    const responseFixture = {
+      status: vi.fn(() => responseFixture),
+      json: vi.fn((body) => body),
+    };
+
+    await controller.deleteConnection(request, responseFixture);
+
+    expect(reset).toHaveBeenCalledExactlyOnceWith(connectionId);
+    expect(responseFixture.json).toHaveBeenCalledWith({ connections: [] });
   });
 
   it("explicitly resets an owned connection without contacting the provider", async function () {

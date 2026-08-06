@@ -84,7 +84,7 @@ const ERRORS = Object.freeze({
     code: "AI_PROVIDER_CIRCUIT_OPEN",
     category: "configuration",
     message:
-      "This AI provider connection was stopped after repeated failures. Check and save its settings before trying again.",
+      "This AI provider connection was stopped after repeated failures. Enable the connection before trying again, or correct its endpoint or credentials and save it to enable it automatically.",
     retryable: false,
   }),
   cooldown: Object.freeze({
@@ -356,15 +356,21 @@ export function createAiReviewerProviderController(dependencies) {
 
     const startedAt = readElapsedNow(elapsedNow);
     try {
-      const saved = create
-        ? await configStore.create(userId(request), config)
-        : await configStore.update(
-            userId(request),
-            connectionId,
-            config,
-            expectedRevision,
-          );
-      if (!create) {
+      let saved;
+      let destinationChanged = false;
+      if (create) {
+        saved = await configStore.create(userId(request), config);
+      } else {
+        const update = await configStore.updateWithDestinationChange(
+          userId(request),
+          connectionId,
+          config,
+          expectedRevision,
+        );
+        saved = update.connection;
+        destinationChanged = update.destinationChanged;
+      }
+      if (destinationChanged) {
         try {
           await circuitBreakerStore?.reset(saved.id);
         } catch (error) {
