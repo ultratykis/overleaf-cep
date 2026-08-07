@@ -406,11 +406,19 @@ describe("pinned Codex App Server runner", function () {
     );
     expect(childCommand).toBe(process.execPath);
     expect(childStdio).toEqual(["pipe", "pipe", "pipe"]);
-    await Fs.promises.writeFile(
-      Path.join(appServer.stateDirectory, "state-bytes-fixture"),
-      "state",
+    const outsideState = Path.join(root, "outside-state");
+    const stateLink = Path.join(appServer.stateDirectory, "state-link");
+    await Promise.all([
+      Fs.promises.writeFile(
+        Path.join(appServer.stateDirectory, "state-bytes-fixture"),
+        "state",
+      ),
+      Fs.promises.writeFile(outsideState, "must-not-be-counted"),
+    ]);
+    await Fs.promises.symlink(outsideState, stateLink);
+    expect(await appServer.measureStateBytes()).toBe(
+      5 + (await Fs.promises.lstat(stateLink)).size,
     );
-    expect(await appServer.measureStateBytes()).toBe(5);
     expect(
       await Fs.promises
         .access(Path.join(work, ".git"))

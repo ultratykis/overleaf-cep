@@ -1368,7 +1368,8 @@ async function directoryBytes(directory) {
     const path = Path.join(directory, entry.name);
     if (entry.isDirectory()) {
       total += await directoryBytes(path);
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // Count the link itself; never follow a Codex-managed state symlink.
       total += (await Fs.promises.lstat(path)).size;
     } else {
       throw new CodexAppServerProtocolError();
