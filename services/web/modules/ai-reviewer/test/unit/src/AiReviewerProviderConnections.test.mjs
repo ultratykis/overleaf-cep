@@ -1150,7 +1150,11 @@ describe("AI reviewer provider connections", function () {
 });
 
 describe("AI reviewer unified model list", function () {
-  function modelListFixture({ listModels } = {}) {
+  function modelListFixture({
+    listModels,
+    circuitBreakerStore,
+    externalHarnessEnabled,
+  } = {}) {
     const { records, store } = storeFixture();
     const providerService = {
       listModels:
@@ -1171,12 +1175,14 @@ describe("AI reviewer unified model list", function () {
       controller: createAiReviewerProviderController({
         configStore: store,
         providerService,
+        circuitBreakerStore,
+        externalHarnessEnabled,
       }),
     };
   }
 
   it("returns every connection's models with the connection each came from", async function () {
-    const { controller, store } = modelListFixture();
+    const { controller, providerService, store } = modelListFixture();
     const gemini = await store.create(userId, geminiConnection);
     const local = await store.create(userId, {
       ...localConnection,
@@ -1226,6 +1232,39 @@ describe("AI reviewer unified model list", function () {
       failures: [],
     });
     expect(JSON.stringify(response.body)).not.toContain(geminiCredential);
+    expect(providerService.listModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("lists only configured models without provider access for the external harness", async function () {
+    const circuitBreakerStore = { assertRequestAllowed: vi.fn() };
+    const { controller, providerService, store } = modelListFixture({
+      circuitBreakerStore,
+      externalHarnessEnabled: true,
+    });
+    const local = await store.create(userId, {
+      ...localConnection,
+      models: [localModel, sharedModel],
+      contextLengthOverride: contextLength,
+    });
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.body).toEqual({
+      models: [localModel, sharedModel].map((id) => ({
+        id,
+        displayName: id,
+        connectionId: local.id,
+        connectionLabel: "127.0.0.1:11434",
+        contextLength,
+        contextLengthSource: "override",
+      })),
+      failures: [],
+    });
+    expect(circuitBreakerStore.assertRequestAllowed).not.toHaveBeenCalled();
+    expect(providerService.listModels).not.toHaveBeenCalled();
+    expect(providerService.contextLengthForModelList).not.toHaveBeenCalled();
+    expect(providerService.resolveContextLength).not.toHaveBeenCalled();
   });
 
   it("keeps a reachable connection's models when another connection fails", async function () {

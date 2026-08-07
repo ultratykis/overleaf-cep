@@ -141,6 +141,9 @@ export const AgentRequestSchema = z
     ]),
     instruction: z.string().min(1).max(20_000),
     skill: IdentifierSchema.nullable(),
+    // A discussion ID selects a server-owned Agent session. Its thread and
+    // state paths never cross this client boundary.
+    agentSessionId: IdentifierSchema.optional(),
     // Editor state is context only; review authority remains exclusively in
     // `scope` so this path cannot widen artifact or suggestion permissions.
     currentDocumentPath: ProjectRelativePathSchema.optional(),
@@ -312,6 +315,14 @@ export const WorkspaceSuggestionSchema = z
     }
   });
 
+// Agent discussions capture a fresh document for every turn. Persist the
+// public request that produced this edit so preview/apply can rebind it after
+// reload without persisting any server-owned thread state.
+const WorkspaceDiscussionSuggestionSchema =
+  WorkspaceSuggestionSchema.safeExtend({
+    sourceRequest: AgentRequestSchema.optional(),
+  });
+
 const WorkspaceOrderSchema = z.number().int().nonnegative();
 export const WorkspaceRevisionSchema = z.number().int().nonnegative();
 // A custom perspective shares the instruction reserve with fixed tool and
@@ -373,7 +384,7 @@ export const WorkspaceDiscussionSchema = z
     subject: DiscussionSubjectSchema.nullable(),
     sourceGeneration: WorkspaceOrderSchema.nullable(),
     turns: z.array(DiscussionTurnSchema).max(AI_REVIEWER_WORKSPACE_TURN_LIMIT),
-    suggestions: z.array(WorkspaceSuggestionSchema),
+    suggestions: z.array(WorkspaceDiscussionSuggestionSchema),
     updatedAt: z.string().datetime({ offset: true }),
   })
   .strict()
@@ -388,13 +399,6 @@ export const WorkspaceDiscussionSchema = z
         message:
           "Workspace discussion subject bindings must be all present or all null",
         path: ["subject"],
-      });
-    }
-    if (!hasSubject && discussion.suggestions.length > 0) {
-      context.addIssue({
-        code: "custom",
-        message: "An open discussion cannot contain suggestions",
-        path: ["suggestions"],
       });
     }
   });
@@ -538,44 +542,50 @@ export const AiReviewerWorkspaceSchema = z
       }
       createdOrders.add(discussion.createdOrder);
 
-      if (discussion.subject == null) {
-        continue;
-      }
-      const sourceRequest = discussion.subject.sourceRequest;
-      const sourceRun = runsByRequestId.get(sourceRequest.requestId);
-      if (
-        discussion.subject.kind !== "scope" &&
-        (discussion.subject.artifact.requestId !== sourceRequest.requestId ||
-          discussion.subject.artifact.projectId !== sourceRequest.projectId)
-      ) {
-        context.addIssue({
-          code: "custom",
-          message: "Workspace discussion subject must belong to its source run",
-          path: ["discussions", discussionIndex, "subject", "artifact"],
-        });
-      }
-      if (
-        sourceRun == null ||
-        sourceRun.generation !== discussion.sourceGeneration ||
-        JSON.stringify(sourceRun.request) !== JSON.stringify(sourceRequest)
-      ) {
-        context.addIssue({
-          code: "custom",
-          message: "Workspace discussion must belong to its source run",
-          path: ["discussions", discussionIndex, "subject"],
-        });
+      const subjectRequest = discussion.subject?.sourceRequest ?? null;
+      if (discussion.subject != null) {
+        const subjectRequest = discussion.subject.sourceRequest;
+        const sourceRun = runsByRequestId.get(subjectRequest.requestId);
+        if (
+          discussion.subject.kind !== "scope" &&
+          (discussion.subject.artifact.requestId !== subjectRequest.requestId ||
+            discussion.subject.artifact.projectId !== subjectRequest.projectId)
+        ) {
+          context.addIssue({
+            code: "custom",
+            message:
+              "Workspace discussion subject must belong to its source run",
+            path: ["discussions", discussionIndex, "subject", "artifact"],
+          });
+        }
+        if (
+          sourceRun == null ||
+          sourceRun.generation !== discussion.sourceGeneration ||
+          JSON.stringify(sourceRun.request) !== JSON.stringify(subjectRequest)
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Workspace discussion must belong to its source run",
+            path: ["discussions", discussionIndex, "subject"],
+          });
+        }
       }
       for (const [
         suggestionIndex,
         suggestion,
       ] of discussion.suggestions.entries()) {
+        const sourceRequest = suggestion.sourceRequest ?? subjectRequest;
         if (
+          sourceRequest == null ||
           suggestion.artifact.requestId !== sourceRequest.requestId ||
-          suggestion.artifact.projectId !== sourceRequest.projectId
+          suggestion.artifact.projectId !== sourceRequest.projectId ||
+          (suggestion.sourceRequest != null &&
+            (sourceRequest.agentSessionId !== discussion.id ||
+              sourceRequest.scope?.kind !== "document"))
         ) {
           context.addIssue({
             code: "custom",
-            message: "Discussion suggestion must belong to its source run",
+            message: "Discussion suggestion must belong to its source request",
             path: [
               "discussions",
               discussionIndex,

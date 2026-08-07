@@ -1,6 +1,9 @@
 // @ts-check
 
+import { createHash } from "node:crypto";
+
 import { expressify } from "@overleaf/promise-utils";
+import Settings from "@overleaf/settings";
 
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
@@ -17,15 +20,30 @@ import {
   aiReviewerModelCacheKey,
   createAiReviewerProviderConfigStore,
 } from "./AiReviewerProviderConfigStore.mjs";
+import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
 import { createAiReviewerProviderController } from "./AiReviewerProviderController.mjs";
 import { createAiReviewerSkillController } from "./AiReviewerSkillController.mjs";
 import { createAiReviewerSkillGitImporter } from "./AiReviewerSkillGitImporter.mjs";
 import { createAiReviewerSkillStore } from "./AiReviewerSkillStore.mjs";
 import { createAiReviewerWorkspaceController } from "./AiReviewerWorkspaceController.mjs";
 import { createAiReviewerWorkspaceStore } from "./AiReviewerWorkspaceStore.mjs";
+import { createExternalAgentCheckpoint } from "./ExternalAgentCheckpoint.mjs";
+import { createExternalAgentGateway } from "./ExternalAgentGateway.mjs";
+import { ExternalAgentRunnerClient } from "./ExternalAgentRunnerService.mjs";
+import { createExternalAgentSessionController } from "./ExternalAgentSessionController.mjs";
+import {
+  AiReviewerExternalAgentSessionConflictError,
+  AiReviewerExternalAgentSessionNotFoundError,
+  AiReviewerExternalAgentSessionValidationError,
+  createExternalAgentSessionStore,
+} from "./ExternalAgentSessionStore.mjs";
 import { MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE } from "./ModelContextLength.mjs";
 import { createAiReviewerProviderService } from "./OllamaProviderService.mjs";
-import { parseOpenAiCompatibleModelId } from "./OllamaEndpointPolicy.mjs";
+import {
+  assertOpenAiCompatibleCredentialTransport,
+  parseOpenAiCompatibleBaseUrl,
+  parseOpenAiCompatibleModelId,
+} from "./OllamaEndpointPolicy.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
 import {
   authenticatedUserId,
@@ -138,14 +156,99 @@ function selectedConnectionMissing() {
 }
 
 function modelContextLengthRequired() {
+  return new AgentGatewayError(MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE, {
+    code: "AI_MODEL_CONTEXT_UNKNOWN",
+    category: "configuration",
+    retryable: false,
+  });
+}
+
+function invalidExternalHarnessConfiguration() {
   return new AgentGatewayError(
-    MODEL_CONTEXT_UNKNOWN_ERROR_MESSAGE,
+    "The selected provider is not available to the external reviewer harness.",
     {
-      code: "AI_MODEL_CONTEXT_UNKNOWN",
+      code: "AI_EXTERNAL_HARNESS_CONFIGURATION_INVALID",
       category: "configuration",
       retryable: false,
     },
   );
+}
+
+function externalSessionConflict() {
+  return new AgentGatewayError(
+    "The external AI reviewer session cannot safely continue.",
+    {
+      code: "AI_EXTERNAL_SESSION_INTERMEDIATE_STATE",
+      category: "configuration",
+      retryable: true,
+    },
+  );
+}
+
+/** @param {unknown} error */
+function mapExternalSessionError(error) {
+  if (
+    error instanceof AiReviewerExternalAgentSessionConflictError ||
+    error instanceof AiReviewerExternalAgentSessionNotFoundError
+  ) {
+    return externalSessionConflict();
+  }
+  if (error instanceof AiReviewerExternalAgentSessionValidationError) {
+    return invalidExternalHarnessConfiguration();
+  }
+  return error;
+}
+
+/** @param {any} connection @param {any} request */
+function externalRunConfiguration(connection, request) {
+  let endpoint;
+  let model;
+  let credential;
+  try {
+    endpoint = parseOpenAiCompatibleBaseUrl(connection?.baseUrl);
+    model = parseOpenAiCompatibleModelId(request.model);
+    credential =
+      connection?.credential == null
+        ? null
+        : parseAiReviewerProviderCredential(connection.credential);
+    assertOpenAiCompatibleCredentialTransport(
+      endpoint.baseUrl,
+      credential != null,
+    );
+  } catch {
+    throw invalidExternalHarnessConfiguration();
+  }
+  if (
+    connection?.provider !== "openai-compatible" ||
+    endpoint.classification !== "local" ||
+    connection.apiVersion != null ||
+    !Array.isArray(connection.models) ||
+    !connection.models.includes(model)
+  ) {
+    throw invalidExternalHarnessConfiguration();
+  }
+  return Object.freeze({
+    provider: "openai-compatible",
+    baseUrl: endpoint.baseUrl,
+    model,
+    ...(credential == null ? {} : { credential }),
+  });
+}
+
+/** @param {any} connection @param {{ provider: string, baseUrl: string, model: string, credential?: string }} configuration */
+function externalConnectionFingerprint(connection, configuration) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        connection.id,
+        configuration.provider,
+        configuration.baseUrl,
+        configuration.model,
+        connection.credentialUpdatedAt ?? null,
+        configuration.credential ?? null,
+      ]),
+    )
+    .digest("hex");
 }
 
 /**
@@ -309,7 +412,15 @@ export function createConfiguredAiReviewerController({
   elapsedNow,
   failureRecorder,
   circuitBreakerStore = null,
+  harness = "native",
+  externalCheckpoint = createExternalAgentCheckpoint,
+  externalSessionStore = null,
+  externalRunnerClient = null,
+  externalGatewayFactory = createExternalAgentGateway,
 }) {
+  if (harness !== "native" && harness !== "external") {
+    throw new TypeError("The AI reviewer harness is invalid.");
+  }
   return createAiReviewerController({
     async gatewayFactory(context) {
       if (testGatewayFactory != null) {
@@ -317,6 +428,69 @@ export function createConfiguredAiReviewerController({
       }
 
       const userId = authenticatedUserId(context.httpRequest);
+      if (harness === "external") {
+        const snapshot = await externalCheckpoint(context.request, {
+          signal: context.signal,
+        });
+        const connection = await loadRunConnection(
+          configStore,
+          context,
+          userId,
+        );
+        const configuration = externalRunConfiguration(
+          connection,
+          context.request,
+        );
+        context.setFailureProvider(configuration.provider, configuration.model);
+        if (externalSessionStore == null || externalRunnerClient == null) {
+          throw invalidExternalHarnessConfiguration();
+        }
+        const mode =
+          context.request.agentSessionId == null ? "review" : "agent";
+        const clientSessionId =
+          context.request.agentSessionId ?? context.request.requestId;
+        let session;
+        let claim;
+        try {
+          session = await externalSessionStore.create({
+            userId,
+            projectId: context.request.projectId,
+            clientSessionId,
+            mode,
+            connectionFingerprint: externalConnectionFingerprint(
+              connection,
+              configuration,
+            ),
+          });
+          if (mode === "review" && session.threadId != null) {
+            throw externalSessionConflict();
+          }
+          claim = await externalSessionStore.claim({
+            userId,
+            projectId: context.request.projectId,
+            clientSessionId,
+            type: "turn",
+            expectedRevision: session.revision,
+            expectedThreadId: session.threadId,
+          });
+        } catch (error) {
+          throw mapExternalSessionError(error);
+        }
+        return externalGatewayFactory({
+          request: context.request,
+          snapshot,
+          configuration,
+          session,
+          claim,
+          runnerClient: externalRunnerClient,
+          sessionStore: externalSessionStore,
+          userId,
+          projectId: context.request.projectId,
+          clientSessionId,
+          ...(eventId == null ? {} : { createId: eventId }),
+          ...(now == null ? {} : { now }),
+        });
+      }
       const configuration = await loadRunConnection(
         configStore,
         context,
@@ -447,15 +621,19 @@ const requestScopeReader = createRequestScopeReader({
 const workspaceStore = createAiReviewerWorkspaceStore({
   connectionStore: configStore,
 });
+const externalHarnessEnabled = Settings.aiReviewer?.harness === "external";
 const providerController = createAiReviewerProviderController({
   configStore,
   providerService,
   workspaceStore,
   failureRecorder: recordAiReviewerFailure,
   circuitBreakerStore,
+  externalHarnessEnabled,
 });
 const skillStore = createAiReviewerSkillStore();
 const modeInstructionStore = createAiReviewerModeInstructionStore();
+const externalSessionStore = createExternalAgentSessionStore();
+const externalRunnerClient = new ExternalAgentRunnerClient();
 const skillGitImporter = createAiReviewerSkillGitImporter();
 const skillController = createAiReviewerSkillController({
   skillStore,
@@ -469,6 +647,9 @@ const configuredController = createConfiguredAiReviewerController({
   requestScopeReader,
   failureRecorder: recordAiReviewerFailure,
   circuitBreakerStore,
+  harness: externalHarnessEnabled ? "external" : "native",
+  externalSessionStore,
+  externalRunnerClient,
 });
 const workspaceController = createAiReviewerWorkspaceController({
   workspaceStore,
@@ -479,6 +660,11 @@ const modeInstructionController = createAiReviewerModeInstructionController({
 const provenanceStore = createAiReviewerCommentProvenanceStore();
 const provenanceController = createAiReviewerCommentProvenanceController({
   provenanceStore,
+});
+const externalSessionController = createExternalAgentSessionController({
+  sessionStore: externalSessionStore,
+  runnerClient: externalRunnerClient,
+  enabled: externalHarnessEnabled,
 });
 
 export default {
@@ -495,6 +681,9 @@ export default {
   confirmSkillGitImport: expressify(skillController.confirmGitImport),
   deleteSkill: expressify(skillController.deleteSkill),
   stream: expressify(configuredController.stream),
+  getAgentSession: expressify(externalSessionController.getSession),
+  resolveAgentSession: expressify(externalSessionController.resolveSession),
+  reopenAgentSession: expressify(externalSessionController.reopenSession),
   getModeInstructions: expressify(
     modeInstructionController.getModeInstructions,
   ),

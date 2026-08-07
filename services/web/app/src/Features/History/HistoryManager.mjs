@@ -255,10 +255,11 @@ async function getCurrentContent(projectId) {
  * the history data and apply all operations.
  * @param {string} projectId
  * @param {number} version
+ * @param {{ signal?: AbortSignal }} [options]
  *
  * @returns Promise<object>
  */
-async function getContentAtVersion(projectId, version) {
+async function getContentAtVersion(projectId, version, options = {}) {
   const historyId = await getHistoryId(projectId)
 
   try {
@@ -266,6 +267,7 @@ async function getContentAtVersion(projectId, version) {
       `${HISTORY_V1_URL}/projects/${historyId}/versions/${version}/content`,
       {
         method: 'GET',
+        signal: options.signal,
         basicAuth: HISTORY_V1_BASIC_AUTH,
       }
     )
@@ -276,6 +278,28 @@ async function getContentAtVersion(projectId, version) {
       { historyId, version }
     )
   }
+}
+
+/**
+ * Process pending project-history updates and return the resulting global
+ * history version.
+ *
+ * @param {string} projectId
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<number>}
+ */
+async function getLatestVersion(projectId, options = {}) {
+  const body = await fetchJson(
+    `${settings.apis.project_history.url}/project/${projectId}/version`,
+    { method: 'GET', signal: options.signal }
+  )
+  const version = body?.version
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new OError('project-history did not provide a valid version', {
+      projectId,
+    })
+  }
+  return version
 }
 
 /**
@@ -319,9 +343,14 @@ async function getLatestZipWithHistoryId(historyId) {
   return { stream, historyVersion: response.headers.get('X-History-Version') }
 }
 
-async function ensureNoResyncPending(projectId) {
+/**
+ * @param {string} projectId
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+async function ensureNoResyncPending(projectId, options = {}) {
   const { resyncPending } = await fetchJson(
-    `${settings.apis.project_history.url}/project/${projectId}/resync-pending`
+    `${settings.apis.project_history.url}/project/${projectId}/resync-pending`,
+    { signal: options.signal }
   )
   if (resyncPending) throw new OError('broken history with pending resync')
 }
@@ -506,6 +535,7 @@ export default {
     deleteProjectHistory,
     getCurrentContent,
     getContentAtVersion,
+    getLatestVersion,
     uploadBlobFromDisk,
     copyBlob,
     requestBlob,

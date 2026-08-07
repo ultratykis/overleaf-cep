@@ -200,6 +200,30 @@ const PUBLIC_CONCURRENCY_ERROR = Object.freeze({
   retryable: true,
 });
 
+const PUBLIC_EXTERNAL_ERRORS = Object.freeze({
+  AI_EXTERNAL_CHECKPOINT_STALE: Object.freeze({
+    code: "AI_EXTERNAL_CHECKPOINT_STALE",
+    category: "configuration",
+    message:
+      "The document changed before the external review started. Capture it again and retry.",
+    retryable: true,
+  }),
+  AI_EXTERNAL_CHECKPOINT_UNAVAILABLE: Object.freeze({
+    code: "AI_EXTERNAL_CHECKPOINT_UNAVAILABLE",
+    category: "configuration",
+    message:
+      "The external reviewer could not create a complete project history checkpoint.",
+    retryable: false,
+  }),
+  AI_EXTERNAL_SESSION_INTERMEDIATE_STATE: Object.freeze({
+    code: "AI_EXTERNAL_SESSION_INTERMEDIATE_STATE",
+    category: "configuration",
+    message:
+      "The external reviewer session has an unfinished operation. Reload before trying again.",
+    retryable: true,
+  }),
+});
+
 /** @type {{
  *   acquire: (userId: unknown) => Promise<
  *     | { acquired: false, limit: 'user' | 'system' }
@@ -417,6 +441,13 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
     return publicErrorForCategory("schema");
   }
   if (error instanceof AgentGatewayError) {
+    if (Object.hasOwn(PUBLIC_EXTERNAL_ERRORS, error.code)) {
+      return {
+        ...PUBLIC_EXTERNAL_ERRORS[
+          /** @type {keyof typeof PUBLIC_EXTERNAL_ERRORS} */ (error.code)
+        ],
+      };
+    }
     if (error.code === PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR.code) {
       return {
         ...PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR,

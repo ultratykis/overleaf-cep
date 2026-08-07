@@ -35,6 +35,7 @@ const path = "chapters/context.tex";
 const baseTextHash =
   "aea23d46109af9b94c5f15085d69113cc2cefa85f05748897a4df172a1ee5104";
 const selectedText = "beta";
+const documentText = "alpha beta gamma";
 const selectionPreview = {
   filename: "main.tex",
   fromLine: 1,
@@ -172,14 +173,30 @@ function captureSelectionSession() {
         requestId,
         action,
         instruction,
+        target,
       }: {
         requestId: string;
         action: AgentRequest["action"];
         instruction: string;
+        target?: "selection" | "document";
       }) => ({
         status: "ready" as const,
         session: Object.freeze({
-          request: Object.freeze(sourceRequest(requestId, action, instruction)),
+          request: Object.freeze({
+            ...sourceRequest(requestId, action, instruction),
+            ...(target === "document"
+              ? {
+                  scope: {
+                    kind: "document" as const,
+                    documentId,
+                    path,
+                    baseRevision: 7,
+                    baseTextHash,
+                    text: documentText,
+                  },
+                }
+              : {}),
+          }),
           binding: Object.freeze({
             currentDocument: {},
             shareDocument: {},
@@ -193,7 +210,8 @@ function captureSelectionSession() {
 
 /**
  * One endpoint now answers both a review and a message. An editor action
- * carries its captured scope, while a typed message stays scope-free.
+ * carries its captured selection, while a typed Agent turn captures the full
+ * current document.
  */
 function unifiedStream(
   answer = "A precise explanation.",
@@ -201,7 +219,7 @@ function unifiedStream(
 ) {
   return sinon.stub().callsFake(async (call: ReviewStreamCall) => {
     const { requestId, skill } = call.request;
-    const reviewing = call.request.scope != null;
+    const reviewing = call.request.agentSessionId == null;
     let sequence = 0;
     const emit = (event: Record<string, unknown>) =>
       call.onEvent({
@@ -266,7 +284,13 @@ class MemoryWorkspace {
 function renderPanel(
   props: Partial<React.ComponentProps<typeof AiReviewerPanelView>> = {},
 ) {
-  return render(<AiReviewerPanelView projectId={projectId} {...props} />);
+  return render(
+    <AiReviewerPanelView
+      projectId={projectId}
+      captureSelectionSession={captureSelectionSession()}
+      {...props}
+    />,
+  );
 }
 
 function ChangedProviderSettings({
@@ -595,7 +619,7 @@ describe("AI reviewer: context-driven panel", function () {
     ).to.equal("Freeform");
   });
 
-  it("sends a typed message with the selected review mode and no scope", async function () {
+  it("sends a document-bound Agent turn with the selected review mode", async function () {
     const streamRequest = unifiedStream();
     renderPanel({
       createDiscussionId: () => "review-mode-discussion",
@@ -613,14 +637,15 @@ describe("AI reviewer: context-driven panel", function () {
     const request = streamRequest.firstCall.args[0].request;
     expect(request.instruction).to.equal("Review chapter 3 as a referee.");
     expect(request.skill).to.equal("referee-review");
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("review-mode-discussion");
     expect(
       screen.getByRole("button", { name: "Selected mode — Review mode" })
         .textContent,
     ).to.equal("Review mode");
   });
 
-  it("sends a typed message with brainstorm mode and no scope", async function () {
+  it("sends a document-bound Agent turn with brainstorm mode", async function () {
     const streamRequest = unifiedStream();
     renderPanel({
       createDiscussionId: () => "brainstorm-mode-discussion",
@@ -637,7 +662,8 @@ describe("AI reviewer: context-driven panel", function () {
 
     const request = streamRequest.firstCall.args[0].request;
     expect(request.skill).to.equal("brainstorm");
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("brainstorm-mode-discussion");
     expect(
       screen.getByRole("button", {
         name: "Selected mode — Brainstorm mode",
@@ -664,7 +690,7 @@ describe("AI reviewer: context-driven panel", function () {
   });
 
   // Spec case 5
-  it("sends a typed message with no skill or scope in Freeform", async function () {
+  it("sends a document-bound Agent turn with no skill in Freeform", async function () {
     const streamRequest = unifiedStream();
     renderPanel({
       createDiscussionId: () => "typed-message-discussion",
@@ -682,7 +708,8 @@ describe("AI reviewer: context-driven panel", function () {
       `${projectReviewInstruction} But only chapter 2.`,
     );
     expect(request.skill).to.equal(null);
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("typed-message-discussion");
     expect(screen.queryByLabelText("Review run 1")).not.to.exist;
   });
 
@@ -1118,7 +1145,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(document.activeElement?.textContent).to.contain("Ambiguous phrase");
   });
 
-  it("uses the visible mode and omits scope in the pinned conversation", async function () {
+  it("uses the visible mode and document scope in the pinned Agent session", async function () {
     const { streamRequest } = await reviewedSelection();
 
     fireEvent.click(screen.getByRole("button", { name: "Discuss finding" }));
@@ -1128,7 +1155,8 @@ describe("AI reviewer: context-driven panel", function () {
     const request = streamRequest.secondCall.args[0].request;
     expect(request.instruction).to.equal("Why is it ambiguous?");
     expect(request.skill).to.equal(null);
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("context-layout-discussion");
     // The pinned finding leads the history as the assistant turn it was.
     expect(request.turns[0]).to.deep.equal({
       role: "assistant",

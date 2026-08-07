@@ -23,6 +23,9 @@
  *   confirmSkillGitImport: (...args: any[]) => unknown,
  *   deleteSkill: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
+ *   getAgentSession: (...args: any[]) => unknown,
+ *   resolveAgentSession: (...args: any[]) => unknown,
+ *   reopenAgentSession: (...args: any[]) => unknown,
  *   getModeInstructions: (...args: any[]) => unknown,
  *   saveModeInstructions: (...args: any[]) => unknown,
  *   getWorkspace: (...args: any[]) => unknown,
@@ -51,6 +54,9 @@ export function createAiReviewerRouter({
   confirmSkillGitImport,
   deleteSkill,
   stream,
+  getAgentSession,
+  resolveAgentSession,
+  reopenAgentSession,
   getModeInstructions,
   saveModeInstructions,
   getWorkspace,
@@ -253,6 +259,21 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/connections/:connection_id/circuit-reset",
         ...commonMiddleware,
         resetCircuit,
+      );
+      webRouter.get(
+        "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id",
+        ...commonMiddleware,
+        getAgentSession,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id/resolve",
+        ...commonMiddleware,
+        resolveAgentSession,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id/reopen",
+        ...commonMiddleware,
+        reopenAgentSession,
       );
     },
   };

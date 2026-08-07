@@ -99,6 +99,13 @@ const booleanFromEnv = function (name, defaultValue) {
 }
 
 const aiReviewerEnabled = booleanFromEnv('OVERLEAF_AI_REVIEWER_ENABLED', false)
+const aiReviewerHarness =
+  process.env.OVERLEAF_AI_REVIEWER_HARNESS?.trim().toLowerCase() || 'native'
+if (!['native', 'external'].includes(aiReviewerHarness)) {
+  throw new Error(
+    'OVERLEAF_AI_REVIEWER_HARNESS must be "native" or "external"'
+  )
+}
 
 const httpPermissionsPolicy = {
   blocked: [
@@ -479,6 +486,7 @@ module.exports = {
 
   aiReviewer: {
     enabled: aiReviewerEnabled,
+    harness: aiReviewerHarness,
     // Development aid only: records why a provider refused a request. The text
     // is provider-controlled and can quote the request, so this must stay off
     // wherever real manuscripts are reviewed.

@@ -8,12 +8,18 @@ const settingsPath = path.resolve(
   "../../../../../config/settings.defaults.js",
 );
 const originalValue = process.env.OVERLEAF_AI_REVIEWER_ENABLED;
+const originalHarness = process.env.OVERLEAF_AI_REVIEWER_HARNESS;
 
-function loadSettings(value) {
+function loadSettings(value, harness) {
   if (value == null) {
     delete process.env.OVERLEAF_AI_REVIEWER_ENABLED;
   } else {
     process.env.OVERLEAF_AI_REVIEWER_ENABLED = value;
+  }
+  if (harness == null) {
+    delete process.env.OVERLEAF_AI_REVIEWER_HARNESS;
+  } else {
+    process.env.OVERLEAF_AI_REVIEWER_HARNESS = harness;
   }
   delete require.cache[require.resolve(settingsPath)];
   return require(settingsPath);
@@ -59,10 +65,25 @@ afterEach(function () {
   } else {
     process.env.OVERLEAF_AI_REVIEWER_ENABLED = originalValue;
   }
+  if (originalHarness == null) {
+    delete process.env.OVERLEAF_AI_REVIEWER_HARNESS;
+  } else {
+    process.env.OVERLEAF_AI_REVIEWER_HARNESS = originalHarness;
+  }
   delete require.cache[require.resolve(settingsPath)];
 });
 
 describe("AI reviewer: feature off", function () {
+  it("defaults to the native harness and accepts external explicitly", function () {
+    expect(loadSettings("false").aiReviewer.harness).toBe("native");
+    expect(loadSettings("false", " EXTERNAL ").aiReviewer.harness).toBe(
+      "external",
+    );
+    expect(() => loadSettings("false", "typo")).toThrow(
+      /OVERLEAF_AI_REVIEWER_HARNESS.*native.*external/,
+    );
+  });
+
   it.each([undefined, "", "false", " FALSE "])(
     "does not register the module for %s",
     function (value) {

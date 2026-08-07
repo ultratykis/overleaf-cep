@@ -1,0 +1,127 @@
+{
+  "package": {
+    "name": "@openai/codex",
+    "version": "0.146.0",
+    "publishedAt": "2026-07-29T01:45:57.696Z",
+    "registryIntegrity": "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==",
+    "yarnChecksum": "10c0/3e6cf877683904211f66d769d5a25a28eedc17341aaa98718b08097a26eb2c368b282589f5f6a5372659dad8d176db4b6229b784bfe34807b1094dabdacfd9b5",
+    "linuxX64": {
+      "version": "0.146.0-linux-x64",
+      "registryIntegrity": "sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA=="
+    }
+  },
+  "transport": {
+    "framing": "newline-delimited-json",
+    "jsonrpc": false,
+    "requestFields": ["id", "method", "params"],
+    "responseFields": ["id", "result", "error"],
+    "notificationFields": ["method", "params"]
+  },
+  "securityInvariants": {
+    "environments": "omitted",
+    "projectDocMaxBytes": 0,
+    "projectDocFallbackFilenames": [],
+    "skillInstructions": false,
+    "requestCompression": false,
+    "providerEndpoints": "local-only",
+    "providerCredentials": "https-local-env-key-only",
+    "providerRequestRetries": 0,
+    "providerStreamRetries": 0,
+    "processIsolation": "outer-bundled-bwrap",
+    "sessionFilesystem": "state-work-bind-fd-only",
+    "outerNetworkNamespace": "shared-local-provider-only",
+    "threadSandbox": "danger-full-access",
+    "turnSandbox": "externalSandbox",
+    "turnNetworkAccess": "restricted"
+  },
+  "clientRequests": {
+    "initialize": {
+      "params": [
+        "clientInfo.name",
+        "clientInfo.version",
+        "capabilities.experimentalApi"
+      ],
+      "result": ["codexHome", "platformFamily", "platformOs", "userAgent"]
+    },
+    "thread/start": {
+      "params": [
+        "cwd",
+        "model",
+        "modelProvider",
+        "config",
+        "approvalPolicy",
+        "sandbox",
+        "runtimeWorkspaceRoots",
+        "allowProviderModelFallback"
+      ],
+      "result": ["thread.id"]
+    },
+    "thread/resume": {
+      "params": [
+        "threadId",
+        "cwd",
+        "model",
+        "modelProvider",
+        "config",
+        "approvalPolicy",
+        "sandbox",
+        "runtimeWorkspaceRoots"
+      ],
+      "result": ["thread.id"]
+    },
+    "thread/read": {
+      "params": ["threadId", "includeTurns"],
+      "result": ["thread.id", "thread.status", "thread.turns"]
+    },
+    "thread/archive": {
+      "params": ["threadId"],
+      "result": []
+    },
+    "thread/unarchive": {
+      "params": ["threadId"],
+      "result": ["thread.id"]
+    },
+    "turn/start": {
+      "params": [
+        "threadId",
+        "input[].type",
+        "input[].text",
+        "cwd",
+        "approvalPolicy",
+        "sandboxPolicy",
+        "runtimeWorkspaceRoots"
+      ],
+      "result": ["turn.id", "turn.status"]
+    },
+    "turn/interrupt": {
+      "params": ["threadId", "turnId"],
+      "result": []
+    },
+    "thread/backgroundTerminals/clean": {
+      "params": ["threadId"],
+      "result": []
+    },
+    "thread/backgroundTerminals/list": {
+      "params": ["threadId"],
+      "result": ["data", "nextCursor"]
+    }
+  },
+  "clientNotifications": {
+    "initialized": []
+  },
+  "serverRequests": {
+    "item/commandExecution/requestApproval": {
+      "fields": ["id", "params.threadId", "params.turnId", "params.itemId"],
+      "reply": { "decision": "cancel" }
+    },
+    "item/fileChange/requestApproval": {
+      "fields": ["id", "params.threadId", "params.turnId", "params.itemId"],
+      "reply": { "decision": "cancel" }
+    }
+  },
+  "serverNotifications": {
+    "item/agentMessage/delta": ["threadId", "turnId", "itemId", "delta"],
+    "turn/completed": ["threadId", "turn.id", "turn.status", "turn.error"]
+  },
+  "excludedMethods": ["thread/fork", "thread/delete"]
+}

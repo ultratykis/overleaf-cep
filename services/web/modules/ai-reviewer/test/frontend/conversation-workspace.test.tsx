@@ -18,8 +18,10 @@ import type {
   EditorSelectionSessionContext,
 } from "../../frontend/js/services/editor-selection-session";
 import { streamAgentEvents } from "../../frontend/js/services/agent-stream";
+import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import {
   AgentRequestSchema,
+  AiReviewerWorkspaceSchema,
   DISCUSSION_CONTEXT_TURN_LIMIT,
 } from "../../shared/contracts.mjs";
 import type {
@@ -39,9 +41,16 @@ const baseTextHash =
   "aea23d46109af9b94c5f15085d69113cc2cefa85f05748897a4df172a1ee5104";
 
 function editorContext(doc: string, from: number, to: number) {
+  const shareDocument = {
+    connection: {
+      state: "ok",
+    },
+    getVersion: () => 7,
+  };
   const currentDocument = {
     doc_id: documentId,
     joined: true,
+    doc: shareDocument,
     getSnapshot: () => doc,
     hasBufferedOps: () => false,
     getTrackingChanges: () => false,
@@ -124,6 +133,49 @@ function sourceSession(request: AgentRequest): EditorSelectionSession {
   });
 }
 
+function captureEditorSession() {
+  return sinon
+    .stub()
+    .callsFake(
+      async ({
+        requestId,
+        action,
+        instruction,
+        target,
+      }: {
+        requestId: string;
+        action: "review" | "rewrite" | "shorten";
+        instruction: string;
+        target?: "selection" | "document";
+      }) => {
+        const request = sourceRequest();
+        return {
+          status: "ready" as const,
+          session: sourceSession(
+            Object.freeze({
+              ...request,
+              requestId,
+              action,
+              instruction,
+              ...(target === "document"
+                ? {
+                    scope: {
+                      kind: "document" as const,
+                      documentId,
+                      path,
+                      baseRevision: 7,
+                      baseTextHash,
+                      text: baseText,
+                    },
+                  }
+                : {}),
+            }),
+          ),
+        };
+      },
+    );
+}
+
 function sourceFinding(request: AgentRequest): Finding {
   return {
     id: "discussion-finding",
@@ -185,9 +237,8 @@ function discussionSuggestion(request: AgentRequest): UnresolvedSuggestion {
 }
 
 /**
- * One endpoint answers both an editor action and a message. Only the editor
- * action carries a captured scope, so that is what the stub uses to decide
- * which shape to answer with.
+ * One endpoint answers both a Review and a document-bound Agent turn. The
+ * client session ID is the unambiguous discriminator between them.
  */
 function agentEvent(
   requestId: string,
@@ -206,7 +257,7 @@ function agentEvent(
 function reviewingStream(onConversation: (call: ReviewStreamCall) => void) {
   return sinon.stub().callsFake(async (call: ReviewStreamCall) => {
     const { requestId, skill } = call.request;
-    if (call.request.scope != null) {
+    if (call.request.agentSessionId == null) {
       call.onEvent(
         agentEvent(requestId, 0, {
           type: "started",
@@ -245,6 +296,7 @@ async function renderCompletedFindingRun({
   const session = sourceSession(request);
   const finding = sourceFinding(request);
   const streamRequest = reviewingStream(onConversation);
+  const captureSelectionSession = captureEditorSession();
 
   let conversationRequestNumber = 0;
   const rendered = render(
@@ -256,10 +308,7 @@ async function renderCompletedFindingRun({
         `discussion-request-${++conversationRequestNumber}`
       }
       now={() => createdAt}
-      captureSelectionSession={async () => ({
-        status: "ready",
-        session,
-      })}
+      captureSelectionSession={captureSelectionSession}
       selectionPreview={{
         filename: "main.tex",
         fromLine: 1,
@@ -284,6 +333,7 @@ async function renderCompletedFindingRun({
     request,
     session,
     streamRequest,
+    captureSelectionSession,
   };
 }
 
@@ -336,6 +386,7 @@ describe("AI reviewer: conversation workspace", function () {
     render(
       <AiReviewerPanelView
         projectId={projectId}
+        captureSelectionSession={captureEditorSession()}
         createDiscussionId={() => "responding-discussion-0001"}
         createDiscussionRequestId={() => "responding-discussion-request-1"}
         now={() => createdAt}
@@ -364,7 +415,7 @@ describe("AI reviewer: conversation workspace", function () {
     expect(await screen.findByText("Delayed reply")).to.exist;
   });
 
-  it("attaches a live selection as quoted context without adding a scope", async function () {
+  it("captures a document scope while retaining a live selection as quoted context", async function () {
     const selectedText = "The author's currently selected manuscript text.";
     const doc = `Before ${selectedText} After`;
     const from = doc.indexOf(selectedText);
@@ -384,9 +435,11 @@ describe("AI reviewer: conversation workspace", function () {
         );
       });
 
+    const captureSelectionSession = captureEditorSession();
     render(
       <AiReviewerPanelView
         projectId={projectId}
+        captureSelectionSession={captureSelectionSession}
         createDiscussionId={() => "selection-context-discussion"}
         createDiscussionRequestId={() => "selection-context-request"}
         now={() => createdAt}
@@ -400,7 +453,11 @@ describe("AI reviewer: conversation workspace", function () {
     const request = streamRequest.firstCall.args[0].request as AgentRequest;
     expect(request.instruction).to.equal("What is unclear here?");
     expect(request.currentDocumentPath).to.equal(path);
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("selection-context-discussion");
+    expect(captureSelectionSession.firstCall.args[0].target).to.equal(
+      "document",
+    );
     expect(request.turns).to.deep.equal([
       {
         role: "user",
@@ -416,7 +473,7 @@ describe("AI reviewer: conversation workspace", function () {
     view.destroy();
   });
 
-  it("drops a stale open-document path while retaining live quoted selection text", async function () {
+  it("fails closed when the document capture reports a stale editor binding", async function () {
     const selectedText = "Live text from the editor that stayed open.";
     const { context, view } = editorContext(
       selectedText,
@@ -438,9 +495,14 @@ describe("AI reviewer: conversation workspace", function () {
         );
       });
 
+    const captureSelectionSession = sinon.stub().resolves({
+      status: "conflict",
+      code: "AI_SELECTION_DOCUMENT_UNBOUND",
+    });
     render(
       <AiReviewerPanelView
         projectId={projectId}
+        captureSelectionSession={captureSelectionSession}
         createDiscussionId={() => "stale-document-discussion"}
         createDiscussionRequestId={() => "stale-document-request"}
         now={() => createdAt}
@@ -451,16 +513,17 @@ describe("AI reviewer: conversation workspace", function () {
 
     await sendConversationMessage("Use only valid editor context.");
 
-    const request = streamRequest.firstCall.args[0].request as AgentRequest;
-    expect(request).not.to.have.property("currentDocumentPath");
-    expect(request.turns?.at(-1)?.text).to.contain(
-      JSON.stringify(selectedText),
+    expect(streamRequest.called).to.equal(false);
+    expect(captureSelectionSession.firstCall.args[0].target).to.equal(
+      "document",
     );
-    expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
+    expect((await screen.findByRole("alert")).textContent).to.equal(
+      "The editor review target could not be captured.",
+    );
     view.destroy();
   });
 
-  it("omits open-document paths that the agent request contract cannot represent", async function () {
+  it("fails closed when document capture rejects an unsafe path", async function () {
     const invalidPaths = ["figures%2Fplot.tex", "C:/chap.tex"];
 
     for (const [index, invalidPath] of invalidPaths.entries()) {
@@ -476,9 +539,14 @@ describe("AI reviewer: conversation workspace", function () {
             }),
           );
         });
+      const captureSelectionSession = sinon.stub().resolves({
+        status: "conflict",
+        code: "AI_SELECTION_REQUEST_INVALID",
+      });
       const rendered = render(
         <AiReviewerPanelView
           projectId={projectId}
+          captureSelectionSession={captureSelectionSession}
           createDiscussionId={() => `invalid-path-discussion-${index}`}
           createDiscussionRequestId={() => `invalid-path-request-${index}`}
           now={() => createdAt}
@@ -489,16 +557,16 @@ describe("AI reviewer: conversation workspace", function () {
 
       await sendConversationMessage("Continue without the unsupported path.");
 
-      const request = streamRequest.firstCall.args[0].request as AgentRequest;
-      expect(request).not.to.have.property("currentDocumentPath");
-      expect(request).not.to.have.property("scope");
-      expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
+      expect(streamRequest.called).to.equal(false);
+      expect(captureSelectionSession.firstCall.args[0].target).to.equal(
+        "document",
+      );
       rendered.unmount();
       view.destroy();
     }
   });
 
-  it("carries the open document without making an empty selection a scope", async function () {
+  it("captures the document when the editor selection is empty", async function () {
     const { context, view } = editorContext("Nothing selected.", 0, 0);
     const streamRequest = sinon
       .stub()
@@ -514,6 +582,7 @@ describe("AI reviewer: conversation workspace", function () {
     render(
       <AiReviewerPanelView
         projectId={projectId}
+        captureSelectionSession={captureEditorSession()}
         createDiscussionId={() => "empty-selection-discussion"}
         createDiscussionRequestId={() => "empty-selection-request"}
         now={() => createdAt}
@@ -526,13 +595,14 @@ describe("AI reviewer: conversation workspace", function () {
 
     const request = streamRequest.firstCall.args[0].request as AgentRequest;
     expect(request.currentDocumentPath).to.equal(path);
-    expect(request).not.to.have.property("scope");
+    expect(request.scope?.kind).to.equal("document");
+    expect(request.agentSessionId).to.equal("empty-selection-discussion");
     expect(request).not.to.have.property("turns");
     expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
     view.destroy();
   });
 
-  it("sends a scopeless message with only the 12 most recent prior turns", async function () {
+  it("reuses one document-bound Agent session with only the 12 most recent prior turns", async function () {
     let responseNumber = 0;
     const streamRequest = sinon
       .stub()
@@ -562,6 +632,7 @@ describe("AI reviewer: conversation workspace", function () {
     render(
       <AiReviewerPanelView
         projectId={projectId}
+        captureSelectionSession={captureEditorSession()}
         createDiscussionId={() => "open-discussion-0001"}
         createDiscussionRequestId={() =>
           `open-conversation-request-${++requestNumber}`
@@ -579,9 +650,9 @@ describe("AI reviewer: conversation workspace", function () {
     for (const call of streamRequest.getCalls()) {
       const request = call.args[0].request as AgentRequest;
       expect(request.projectId).to.equal(projectId);
-      // Nothing is pinned, so nothing constrains the request but the message.
       expect(request.skill).to.equal(null);
-      expect(request.scope).to.equal(undefined);
+      expect(request.scope?.kind).to.equal("document");
+      expect(request.agentSessionId).to.equal("open-discussion-0001");
       expect(request.turns?.length ?? 0).to.be.at.most(
         DISCUSSION_CONTEXT_TURN_LIMIT,
       );
@@ -666,7 +737,8 @@ describe("AI reviewer: conversation workspace", function () {
       );
       expect(AgentRequestSchema.safeParse(request).success).to.equal(true);
       expect(request.skill).to.equal(null);
-      expect(request).not.to.have.property("scope");
+      expect(request.scope?.kind).to.equal("document");
+      expect(request.agentSessionId).to.equal("discussion-0001");
     }
     const finalRequest = requests.at(-1);
     expect(finalRequest?.instruction).to.equal("Conversation message 13");
@@ -701,9 +773,9 @@ describe("AI reviewer: conversation workspace", function () {
     );
   });
 
-  it("routes a conversation suggestion through the existing preview/apply callback with the exact source session", async function () {
+  it("routes an Agent suggestion through preview/apply with its exact turn session", async function () {
     const request = sourceRequest();
-    const emittedSuggestion = discussionSuggestion(request);
+    let emittedSuggestion: UnresolvedSuggestion | null = null;
     const destroy = sinon.stub();
     const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
       options.onSelectionChange(["ai-hunk-v1-discussion"]);
@@ -719,6 +791,7 @@ describe("AI reviewer: conversation workspace", function () {
     const workspace = await renderCompletedFindingRun({
       onConversation: (call) => {
         const { requestId } = call.request;
+        emittedSuggestion = discussionSuggestion(call.request);
         call.onEvent(
           agentEvent(requestId, 0, {
             type: "started",
@@ -749,6 +822,10 @@ describe("AI reviewer: conversation workspace", function () {
     });
 
     expect(workspace.session.request).to.deep.equal(request);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Selected mode — Freeform" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review mode" }));
     typeConversationMessage("Please propose a precise replacement.");
     const previewButton = await screen.findByRole("button", {
       name: "Preview discussion diff 1",
@@ -762,8 +839,11 @@ describe("AI reviewer: conversation workspace", function () {
     await screen.findByText("Suggestion preview ready");
 
     expect(mountSuggestionPreview.calledOnce).to.equal(true);
+    const agentRequest = conversationCalls(workspace.streamRequest)[0];
+    expect(agentRequest.agentSessionId).to.equal("discussion-0001");
+    expect(agentRequest.scope?.kind).to.equal("document");
     expect(mountSuggestionPreview.firstCall.args[0].request).to.equal(
-      workspace.session.request,
+      agentRequest,
     );
     expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
       emittedSuggestion,
@@ -776,7 +856,10 @@ describe("AI reviewer: conversation workspace", function () {
       expect(applySelectionSuggestion.calledOnce).to.equal(true);
     });
     const applyOptions = applySelectionSuggestion.firstCall.args[0];
-    expect(applyOptions.session).to.equal(workspace.session);
+    const agentCapture =
+      await workspace.captureSelectionSession.secondCall.returnValue;
+    expect(applyOptions.session.request).to.equal(agentRequest);
+    expect(applyOptions.session.binding).to.equal(agentCapture.session.binding);
     expect(applyOptions.suggestion).to.equal(emittedSuggestion);
     expect(applyOptions.getContext).to.equal(getSelectionContext);
     expect(applyOptions.selectedHunkIds).to.deep.equal([
@@ -785,5 +868,113 @@ describe("AI reviewer: conversation workspace", function () {
     expect(Object.isFrozen(applyOptions.selectedHunkIds)).to.equal(true);
     await screen.findByText("Status: Applied");
     expect(destroy.calledOnce).to.equal(true);
+  });
+
+  it("rebinds a persisted Agent suggestion to its generating turn after reload", async function () {
+    const reviewRequest = sourceRequest();
+    const finding = sourceFinding(reviewRequest);
+    const agentRequest: AgentRequest = {
+      requestId: "persisted-agent-turn",
+      projectId,
+      action: "review",
+      instruction: "Propose a precise replacement.",
+      skill: "referee-review",
+      agentSessionId: "persisted-agent-discussion",
+      currentDocumentPath: path,
+      scope: {
+        kind: "document",
+        documentId,
+        path,
+        baseRevision: 7,
+        baseTextHash,
+        text: baseText,
+      },
+    };
+    const suggestion = discussionSuggestion(agentRequest);
+    const storedWorkspace = AiReviewerWorkspaceSchema.parse({
+      runs: [
+        {
+          generation: 1,
+          createdOrder: 1,
+          request: reviewRequest,
+          text: "Stored review.",
+          findings: [{ artifact: finding, status: "unresolved" }],
+          suggestions: [],
+        },
+      ],
+      discussions: [
+        {
+          id: "persisted-agent-discussion",
+          createdOrder: 2,
+          subjectKey: `1:finding:${finding.id}`,
+          subject: {
+            kind: "finding",
+            sourceRequest: reviewRequest,
+            artifact: finding,
+          },
+          sourceGeneration: 1,
+          turns: [
+            { role: "user", text: agentRequest.instruction },
+            { role: "assistant", text: "Use the stored suggestion." },
+          ],
+          suggestions: [
+            {
+              sourceRequest: agentRequest,
+              artifact: suggestion,
+            },
+          ],
+          updatedAt: createdAt,
+        },
+      ],
+    });
+    const persistence: AiReviewerWorkspacePersistence = {
+      load: async () => ({ revision: 1, workspace: storedWorkspace }),
+      save: async (_projectId, workspace) => ({ revision: 2, workspace }),
+      deleteDiscussion: async () => ({
+        revision: 2,
+        workspace: storedWorkspace,
+      }),
+      deleteAll: async () => ({ revision: 2, workspace: storedWorkspace }),
+    };
+    const { context, view } = editorContext(baseText, 0, 0);
+    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
+      options.onSelectionChange(["persisted-agent-hunk"]);
+      return {
+        hunkIds: Object.freeze(["persisted-agent-hunk"]),
+        destroy: sinon.stub(),
+      };
+    });
+
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        workspacePersistence={persistence}
+        getSelectionContext={sinon.stub().returns(context)}
+        mountSuggestionPreview={mountSuggestionPreview}
+      />,
+    );
+
+    const summary = await screen.findByRole("article", {
+      name: "Discussion summary",
+    });
+    fireEvent.click(
+      within(summary).getByRole("button", {
+        name: "Finding: Ambiguous discussion phrase",
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Preview discussion diff 1",
+      }),
+    );
+    await waitFor(() => {
+      expect(mountSuggestionPreview.calledOnce).to.equal(true);
+    });
+    await screen.findByText("Suggestion preview ready");
+
+    expect(mountSuggestionPreview.firstCall.args[0].request).to.deep.equal(
+      agentRequest,
+    );
+    view.destroy();
   });
 });

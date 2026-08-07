@@ -397,6 +397,21 @@ describe("AI reviewer: runtime contracts", function () {
     expect(request).not.toHaveProperty("turns");
   });
 
+  it("accepts only a bounded external Agent session identifier", function () {
+    const request = conversationRequest({ agentSessionId: "discussion-0001" });
+
+    expect(AgentRequestSchema.parse(request)).toEqual(request);
+    expect(
+      AgentRequestSchema.safeParse(conversationRequest({ agentSessionId: "" }))
+        .success,
+    ).toBe(false);
+    expect(
+      AgentRequestSchema.safeParse(
+        conversationRequest({ agentSessionId: "x".repeat(201) }),
+      ).success,
+    ).toBe(false);
+  });
+
   it("rejects an unsafe current-document fact", function () {
     expect(
       AgentRequestSchema.safeParse(
@@ -488,7 +503,7 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
   });
 
-  it("keeps open discussion bindings null and rejects open suggestions", function () {
+  it("keeps open discussion bindings null and binds Agent suggestions to their turn", function () {
     const openDiscussion = {
       id: "open-discussion-invalid",
       createdOrder: 1,
@@ -518,6 +533,49 @@ describe("AI reviewer: runtime contracts", function () {
           {
             ...openDiscussion,
             suggestions: [{ artifact: suggestion() }],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    const sourceRequest = conversationRequest({
+      requestId: "agent-turn-0001",
+      projectId: "project-0001",
+      skill: "line-edit",
+      agentSessionId: openDiscussion.id,
+      scope: {
+        kind: "document",
+        documentId: "document-0001",
+        path: "chapters/introduction.tex",
+        baseRevision: 12,
+        baseTextHash: hash,
+        text: "Synthetic text.",
+      },
+    });
+    const artifact = { ...suggestion(), requestId: sourceRequest.requestId };
+    const bound = {
+      ...openDiscussion,
+      suggestions: [{ artifact, sourceRequest }],
+    };
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({ runs: [], discussions: [bound] })
+        .success,
+    ).toBe(true);
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        runs: [],
+        discussions: [
+          {
+            ...bound,
+            suggestions: [
+              {
+                artifact,
+                sourceRequest: {
+                  ...sourceRequest,
+                  agentSessionId: "another-discussion",
+                },
+              },
+            ],
           },
         ],
       }).success,

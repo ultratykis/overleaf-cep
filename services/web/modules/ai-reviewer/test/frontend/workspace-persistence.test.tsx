@@ -270,6 +270,53 @@ function sourceRequest(projectId = "persistence-project"): AgentRequest {
   };
 }
 
+function captureDocumentSession(projectId: string) {
+  return sinon
+    .stub()
+    .callsFake(
+      async ({
+        requestId,
+        action,
+        instruction,
+      }: {
+        requestId: string;
+        action: AgentRequest["action"];
+        instruction: string;
+      }) => {
+        const source = sourceRequest(projectId);
+        if (source.scope == null || source.scope.kind === "project") {
+          throw new Error("The fixture requires a document scope.");
+        }
+        const request: AgentRequest = {
+          ...source,
+          requestId,
+          action,
+          instruction,
+          scope: {
+            kind: "document",
+            documentId: source.scope.documentId,
+            path: source.scope.path,
+            baseRevision: source.scope.baseRevision,
+            baseTextHash: source.scope.baseTextHash,
+            text: source.scope.text,
+          },
+        };
+        return {
+          status: "ready" as const,
+          session: Object.freeze({
+            request: Object.freeze(request),
+            binding: Object.freeze({
+              currentDocument: {},
+              shareDocument: {},
+              trackChanges: false,
+              connectionEpoch: 1,
+            }),
+          }),
+        };
+      },
+    );
+}
+
 function sourceFinding(
   request: AgentRequest,
   id = "persistence-finding",
@@ -658,6 +705,7 @@ describe("AI reviewer: persisted review workspace", function () {
         createDiscussionId: () => "persisted-open-discussion",
         createDiscussionRequestId: () =>
           `persisted-open-request-${++requestNumber}`,
+        captureSelectionSession: captureDocumentSession(projectId),
         now: () => createdAt,
         streamRequest,
       });

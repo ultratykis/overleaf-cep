@@ -363,6 +363,9 @@ describe("AI reviewer: module shell authenticated route", function () {
     const listModels = vi.fn();
     const testConnection = vi.fn();
     const stream = vi.fn();
+    const getAgentSession = vi.fn();
+    const resolveAgentSession = vi.fn();
+    const reopenAgentSession = vi.fn();
     const getWorkspace = vi.fn();
     const saveWorkspace = vi.fn();
     const getModeInstructions = vi.fn();
@@ -404,6 +407,9 @@ describe("AI reviewer: module shell authenticated route", function () {
       listModels,
       testConnection,
       stream,
+      getAgentSession,
+      resolveAgentSession,
+      reopenAgentSession,
       getWorkspace,
       saveWorkspace,
       getModeInstructions,
@@ -691,9 +697,41 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       resetCircuit,
     );
-    expect(anotherRouter.get).toHaveBeenCalledTimes(8);
+    expect(get).toHaveBeenNthCalledWith(
+      9,
+      "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      getAgentSession,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      12,
+      "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id/resolve",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      resolveAgentSession,
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      13,
+      "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id/reopen",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      reopenAgentSession,
+    );
+    expect(
+      remove.mock.calls.some(([path]) =>
+        String(path).includes("agent-sessions"),
+      ),
+    ).toBe(false);
+    expect(anotherRouter.get).toHaveBeenCalledTimes(9);
     expect(anotherRouter.put).toHaveBeenCalledTimes(5);
-    expect(anotherRouter.post).toHaveBeenCalledTimes(11);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(13);
     expect(anotherRouter.delete).toHaveBeenCalledTimes(7);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);

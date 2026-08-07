@@ -191,6 +191,78 @@ describe('HistoryManager', function () {
     })
   })
 
+  describe('History checkpoint reads', function () {
+    it('gets and validates the latest version with the caller signal', async function (ctx) {
+      const projectId = 'project-checkpoint-0001'
+      const signal = new AbortController().signal
+      ctx.FetchUtils.fetchJson.resolves({ version: 57 })
+
+      const version = await ctx.HistoryManager.promises.getLatestVersion(
+        projectId,
+        { signal }
+      )
+
+      expect(version).to.equal(57)
+      expect(ctx.FetchUtils.fetchJson).to.have.been.calledWithExactly(
+        `${ctx.projectHistoryUrl}/project/${projectId}/version`,
+        { method: 'GET', signal }
+      )
+    })
+
+    it('rejects an invalid latest version response', async function (ctx) {
+      for (const body of [
+        null,
+        {},
+        { version: -1 },
+        { version: 1.5 },
+        { version: '57' },
+      ]) {
+        ctx.FetchUtils.fetchJson.resolves(body)
+        await expect(
+          ctx.HistoryManager.promises.getLatestVersion(
+            'project-checkpoint-0001'
+          )
+        ).to.be.rejectedWith('project-history did not provide a valid version')
+      }
+    })
+
+    it('forwards the signal to content and resync reads', async function (ctx) {
+      const projectId = 'project-checkpoint-0001'
+      const signal = new AbortController().signal
+      const content = { files: {} }
+      ctx.FetchUtils.fetchJson
+        .onFirstCall()
+        .resolves(content)
+        .onSecondCall()
+        .resolves({ resyncPending: false })
+
+      expect(
+        await ctx.HistoryManager.promises.getContentAtVersion(projectId, 57, {
+          signal,
+        })
+      ).to.equal(content)
+      await ctx.HistoryManager.promises.ensureNoResyncPending(projectId, {
+        signal,
+      })
+
+      expect(ctx.FetchUtils.fetchJson).to.have.been.calledWithExactly(
+        `${ctx.v1HistoryUrl}/projects/${ctx.historyId}/versions/57/content`,
+        {
+          method: 'GET',
+          signal,
+          basicAuth: {
+            user: ctx.v1HistoryUser,
+            password: ctx.v1HistoryPassword,
+          },
+        }
+      )
+      expect(ctx.FetchUtils.fetchJson).to.have.been.calledWithExactly(
+        `${ctx.projectHistoryUrl}/project/${projectId}/resync-pending`,
+        { signal }
+      )
+    })
+  })
+
   describe('injectUserDetails', function () {
     beforeEach(function (ctx) {
       ctx.user1 = {

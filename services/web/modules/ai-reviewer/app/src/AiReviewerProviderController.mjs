@@ -256,6 +256,7 @@ export function createAiReviewerProviderController(dependencies) {
     circuitBreakerStore = null,
     failureRecorder = () => {},
     elapsedNow = () => performance.now(),
+    externalHarnessEnabled = false,
   } = dependencies;
   const timeoutSignalFactory =
     dependencies.timeoutSignalFactory ?? (() => AbortSignal.timeout(30_000));
@@ -546,6 +547,26 @@ export function createAiReviewerProviderController(dependencies) {
     }
     if (connections.length === 0) {
       return sendError(response, 409, "missing");
+    }
+    if (externalHarnessEnabled) {
+      return response.json({
+        models: connections.flatMap((/** @type {any} */ connection) =>
+          (connection.models ?? []).map(
+            (/** @type {string} */ id) => ({
+              id,
+              displayName: id,
+              connectionId: connection.id,
+              connectionLabel: connection.label,
+              contextLength: connection.contextLengthOverride ?? null,
+              contextLengthSource:
+                connection.contextLengthOverride == null
+                  ? "unavailable"
+                  : "override",
+            }),
+          ),
+        ),
+        failures: [],
+      });
     }
 
     const startedAt = readElapsedNow(elapsedNow);

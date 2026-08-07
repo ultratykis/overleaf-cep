@@ -92,6 +92,7 @@ import {
   type EditorSelectionSessionAction,
   type EditorSelectionSessionContext,
   type EditorSelectionSessionResult,
+  type EditorSelectionSessionTarget,
 } from "../services/editor-selection-session";
 import { aiReviewerDocumentIdentity } from "../extensions/document-identity";
 import {
@@ -144,6 +145,7 @@ type CaptureSelectionRequest = {
   requestId: string;
   action: EditorSelectionSessionAction;
   instruction: string;
+  target?: EditorSelectionSessionTarget;
 };
 type CaptureSelectionSession = (
   request: CaptureSelectionRequest,
@@ -238,10 +240,11 @@ type Discussion = {
   subject: DiscussionSubject | null;
   subjectLabel: string;
   sourceGeneration: number | null;
-  sourceSession: EditorSelectionSession | null;
   turns: DiscussionTurn[];
   toolCalls: Array<{ position: number; call: ToolCall }>;
   suggestions: UnresolvedSuggestion[];
+  suggestionRequests: Readonly<Record<string, AgentRequest>>;
+  suggestionSessions: Readonly<Record<string, EditorSelectionSession>>;
   suggestionStatuses: Readonly<
     Record<string, SuggestionArtifactStatus | undefined>
   >;
@@ -1001,7 +1004,9 @@ function workspaceDiscussionFromState(
         suggestion.id,
       );
       const conflictCode = discussion.suggestionConflictCodes[suggestion.id];
+      const sourceRequest = discussion.suggestionRequests[suggestion.id];
       return {
+        ...(sourceRequest == null ? {} : { sourceRequest }),
         artifact: {
           ...suggestion,
           status,
@@ -1291,7 +1296,6 @@ function discussionFromWorkspace(
     subject: discussion.subject,
     subjectLabel: discussionSubjectLabel(discussion.subject, t),
     sourceGeneration: discussion.sourceGeneration,
-    sourceSession: null,
     turns: discussion.turns,
     // Tool lines belong to the live stream; the stored workspace keeps turns.
     toolCalls: [],
@@ -1299,6 +1303,20 @@ function discussionFromWorkspace(
       ...entry.artifact,
       status: "unresolved",
     })),
+    suggestionRequests: Object.fromEntries(
+      discussion.suggestions
+        .map(
+          (entry) =>
+            [
+              entry.artifact.id,
+              entry.sourceRequest ?? discussion.subject?.sourceRequest,
+            ] as const,
+        )
+        .filter(
+          (entry): entry is readonly [string, AgentRequest] => entry[1] != null,
+        ),
+    ),
+    suggestionSessions: {},
     suggestionStatuses: Object.fromEntries(
       discussion.suggestions.map((entry) => [
         entry.artifact.id,
@@ -2531,14 +2549,22 @@ export function AiReviewerPanelView({
       ) {
         return null;
       }
+      let editorContext: EditorSelectionSessionContext;
       let liveContext: ReturnType<typeof readEditorSuggestionLiveContext>;
       try {
-        liveContext = readEditorSuggestionLiveContext(getSelectionContext());
+        editorContext = getSelectionContext();
+        liveContext = readEditorSuggestionLiveContext(editorContext);
       } catch {
         return null;
       }
+      const currentDocument = editorContext.currentDocument;
+      const shareDocument = currentDocument?.doc;
       if (
         liveContext.status === "conflict" ||
+        currentDocument == null ||
+        shareDocument == null ||
+        liveContext.context.currentDocument !== currentDocument ||
+        liveContext.context.shareDocument !== shareDocument ||
         liveContext.context.projectId !== request.projectId ||
         liveContext.context.documentId !== scope.documentId ||
         liveContext.context.path !== scope.path
@@ -2548,8 +2574,8 @@ export function AiReviewerPanelView({
       return Object.freeze({
         request,
         binding: Object.freeze({
-          currentDocument: liveContext.context.currentDocument,
-          shareDocument: liveContext.context.shareDocument,
+          currentDocument,
+          shareDocument,
           trackChanges: liveContext.context.trackChanges,
           connectionEpoch: liveContext.connectionEpoch,
         }),
@@ -3116,9 +3142,12 @@ export function AiReviewerPanelView({
         );
       }
       if (identity.discussionId != null) {
-        if (decision.status === "cancelled" || decision.status === "error") {
+        const decisionStatus = decision.status;
+        if (decisionStatus === "cancelled" || decisionStatus === "error") {
           return;
         }
+        const conflictCode =
+          decision.status === "conflict" ? decision.code : null;
         updateDiscussions((current) =>
           current.map((discussion) =>
             discussion.id === identity.discussionId
@@ -3126,15 +3155,15 @@ export function AiReviewerPanelView({
                   ...discussion,
                   suggestionStatuses: {
                     ...discussion.suggestionStatuses,
-                    [identity.suggestion.id]: decision.status,
+                    [identity.suggestion.id]: decisionStatus,
                   },
                   suggestionConflictCodes:
-                    decision.status === "conflict"
-                      ? {
+                    conflictCode == null
+                      ? discussion.suggestionConflictCodes
+                      : {
                           ...discussion.suggestionConflictCodes,
-                          [identity.suggestion.id]: decision.code,
-                        }
-                      : discussion.suggestionConflictCodes,
+                          [identity.suggestion.id]: conflictCode,
+                        },
                   updatedAt: now(),
                 }
               : discussion,
@@ -3231,11 +3260,11 @@ export function AiReviewerPanelView({
         subject,
         subjectLabel: discussionSubjectLabel(subject, t),
         sourceGeneration: runState.generation,
-        sourceSession:
-          runState.session ?? rebindSuggestionSession(runState.request),
         turns: [],
         toolCalls: [],
         suggestions: [],
+        suggestionRequests: {},
+        suggestionSessions: {},
         suggestionStatuses: {},
         suggestionConflictCodes: {},
         status: "idle",
@@ -3247,7 +3276,7 @@ export function AiReviewerPanelView({
       setActionNotice(null);
       setActiveDiscussionId(id);
     },
-    [createDiscussionId, now, rebindSuggestionSession, t, updateDiscussions],
+    [createDiscussionId, now, t, updateDiscussions],
   );
 
   const failDiscussionRequest = useCallback(
@@ -3307,10 +3336,11 @@ export function AiReviewerPanelView({
       subject: null,
       subjectLabel: discussionSubjectLabel(null, t),
       sourceGeneration: null,
-      sourceSession: null,
       turns: [],
       toolCalls: [],
       suggestions: [],
+      suggestionRequests: {},
+      suggestionSessions: {},
       suggestionStatuses: {},
       suggestionConflictCodes: {},
       status: "idle",
@@ -3326,7 +3356,7 @@ export function AiReviewerPanelView({
   }, [createDiscussionId, now, t, updateDiscussions]);
 
   const submitConversationMessage = useCallback(
-    (message: string) => {
+    async (message: string) => {
       const text = message.trim();
       if (text === "") {
         return;
@@ -3347,6 +3377,9 @@ export function AiReviewerPanelView({
       const discussionId = discussion.id;
       if (discussion.turns.length + 2 > AI_REVIEWER_WORKSPACE_TURN_LIMIT) {
         setActionNotice(t("ai_reviewer_workspace_limit_reached"));
+        return;
+      }
+      if (captureSelectionSession == null) {
         return;
       }
 
@@ -3378,45 +3411,6 @@ export function AiReviewerPanelView({
         role: "user",
         text,
       };
-      const subject = discussion.subject;
-      const sourceRequest = subject?.sourceRequest ?? null;
-      const subjectSummary =
-        subject == null ? "" : discussionSubjectSummary(subject);
-      // Capture both facts from one host snapshot so quoted text and a
-      // demonstrative cannot accidentally refer to different editor states.
-      const editorContext = currentEditorRequestContext(
-        getSelectionContext,
-        projectId,
-      );
-      // `instruction` is the message just sent, so `turns` carries only what was
-      // said before it. A pinned subject leads that history, while quoted
-      // editor material sits next to the message that refers to it.
-      const turns = [
-        ...(subjectSummary === ""
-          ? []
-          : [{ role: "assistant" as const, text: subjectSummary }]),
-        ...discussion.turns,
-        ...(editorContext.selectionTurn == null
-          ? []
-          : [editorContext.selectionTurn]),
-      ].slice(-DISCUSSION_CONTEXT_TURN_LIMIT);
-      // A typed request is governed by the premise visible beside the
-      // composer. Its range stays in the author's wording so the agent reads
-      // only the project files it actually needs.
-      const request: AgentRequest = {
-        requestId,
-        projectId,
-        action: sourceRequest?.action ?? "review",
-        instruction: text,
-        skill: selectedMode,
-        ...(editorContext.currentDocumentPath == null
-          ? {}
-          : { currentDocumentPath: editorContext.currentDocumentPath }),
-        ...(runModel == null
-          ? {}
-          : { connectionId: runModel.connectionId, model: runModel.id }),
-        ...(turns.length === 0 ? {} : { turns }),
-      };
       const active: ActiveDiscussionRequest = {
         discussionId,
         requestId,
@@ -3440,6 +3434,96 @@ export function AiReviewerPanelView({
             : candidate,
         ),
       );
+
+      let capture: EditorSelectionSessionResult;
+      try {
+        capture = await captureSelectionSession({
+          requestId,
+          action: "review",
+          instruction: text,
+          target: "document",
+        });
+      } catch {
+        failDiscussionRequest(active, t("ai_reviewer_error_capture_failed"));
+        if (activeDiscussionRequest.current === active) {
+          activeDiscussionRequest.current = null;
+        }
+        return;
+      }
+      if (
+        activeDiscussionRequest.current !== active ||
+        active.controller.signal.aborted
+      ) {
+        return;
+      }
+      if (capture.status === "conflict") {
+        failDiscussionRequest(
+          active,
+          t("ai_reviewer_error_capture_failed"),
+          capture.code,
+        );
+        if (activeDiscussionRequest.current === active) {
+          activeDiscussionRequest.current = null;
+        }
+        return;
+      }
+
+      const capturedSession = capture.session;
+      const capturedRequest = capturedSession.request;
+      if (
+        capturedRequest.requestId !== requestId ||
+        capturedRequest.projectId !== projectId ||
+        capturedRequest.action !== "review" ||
+        capturedRequest.instruction !== text ||
+        capturedRequest.scope?.kind !== "document"
+      ) {
+        failDiscussionRequest(
+          active,
+          t("ai_reviewer_error_capture_scope_invalid"),
+        );
+        if (activeDiscussionRequest.current === active) {
+          activeDiscussionRequest.current = null;
+        }
+        return;
+      }
+
+      const subject = discussion.subject;
+      const sourceRequest = subject?.sourceRequest ?? null;
+      const subjectSummary =
+        subject == null ? "" : discussionSubjectSummary(subject);
+      // This live selection is display/context only. The captured document
+      // above remains authoritative for the Agent request and later apply.
+      const editorContext = currentEditorRequestContext(
+        getSelectionContext,
+        projectId,
+      );
+      // `instruction` is the message just sent, so `turns` carries only what was
+      // said before it. A pinned subject leads that history, while quoted
+      // editor material sits next to the message that refers to it.
+      const turns = [
+        ...(subjectSummary === ""
+          ? []
+          : [{ role: "assistant" as const, text: subjectSummary }]),
+        ...discussion.turns,
+        ...(editorContext.selectionTurn == null
+          ? []
+          : [editorContext.selectionTurn]),
+      ].slice(-DISCUSSION_CONTEXT_TURN_LIMIT);
+      const request: AgentRequest = Object.freeze({
+        ...capturedRequest,
+        action: sourceRequest?.action ?? "review",
+        skill: selectedMode,
+        agentSessionId: discussionId,
+        currentDocumentPath: capturedRequest.scope.path,
+        ...(runModel == null
+          ? {}
+          : { connectionId: runModel.connectionId, model: runModel.id }),
+        ...(turns.length === 0 ? {} : { turns }),
+      });
+      const session = Object.freeze({
+        ...capturedSession,
+        request,
+      });
 
       const onEvent = (event: AgentEvent) => {
         if (
@@ -3523,6 +3607,14 @@ export function AiReviewerPanelView({
                 ? {
                     ...candidate,
                     suggestions: [...candidate.suggestions, event.suggestion],
+                    suggestionRequests: {
+                      ...candidate.suggestionRequests,
+                      [event.suggestion.id]: request,
+                    },
+                    suggestionSessions: {
+                      ...candidate.suggestionSessions,
+                      [event.suggestion.id]: session,
+                    },
                     suggestionStatuses: {
                       ...candidate.suggestionStatuses,
                       [event.suggestion.id]: "unresolved",
@@ -3613,6 +3705,7 @@ export function AiReviewerPanelView({
         });
     },
     [
+      captureSelectionSession,
       createDiscussionRequestId,
       failDiscussionRequest,
       getSelectionContext,
@@ -3702,13 +3795,13 @@ export function AiReviewerPanelView({
 
   const openDiscussionSuggestionPreview = useCallback(
     (discussion: Discussion, suggestion: UnresolvedSuggestion) => {
-      const sourceRequest = discussion.subject?.sourceRequest;
-      const sourceGeneration = discussion.sourceGeneration;
-      if (sourceRequest == null || sourceGeneration == null) {
+      const sourceRequest = discussion.suggestionRequests[suggestion.id];
+      if (sourceRequest == null) {
         return;
       }
       const session =
-        discussion.sourceSession ?? rebindSuggestionSession(sourceRequest);
+        discussion.suggestionSessions[suggestion.id] ??
+        rebindSuggestionSession(sourceRequest);
       if (
         persistenceConflictRef.current ||
         session == null ||
@@ -3728,13 +3821,16 @@ export function AiReviewerPanelView({
         return;
       }
 
-      if (discussion.sourceSession == null) {
+      if (discussion.suggestionSessions[suggestion.id] == null) {
         updateDiscussions((current) =>
           current.map((candidate) =>
             candidate.id === discussion.id
               ? {
                   ...candidate,
-                  sourceSession: session,
+                  suggestionSessions: {
+                    ...candidate.suggestionSessions,
+                    [suggestion.id]: session,
+                  },
                 }
               : candidate,
           ),
@@ -3745,7 +3841,7 @@ export function AiReviewerPanelView({
         cancellationReason("Another suggestion preview was selected."),
       );
       const identity: ActiveSuggestionPreview = {
-        generation: sourceGeneration,
+        generation: discussion.sourceGeneration ?? discussion.createdOrder,
         requestId: session.request.requestId,
         discussionId: discussion.id,
         session,
@@ -4966,7 +5062,7 @@ export function AiReviewerPanelView({
     suggestion: UnresolvedSuggestion,
     index: number,
   ) => {
-    const sourceRequest = discussion.subject?.sourceRequest ?? null;
+    const sourceRequest = discussion.suggestionRequests[suggestion.id] ?? null;
     const commentDraftKey = `discussion:${discussion.id}:suggestion:${suggestion.id}`;
     const status = suggestionStatus(
       discussion.suggestionStatuses,
@@ -5030,7 +5126,8 @@ export function AiReviewerPanelView({
                 onClick={() =>
                   openCommentDraft({
                     key: commentDraftKey,
-                    generation: discussion.sourceGeneration ?? 0,
+                    generation:
+                      discussion.sourceGeneration ?? discussion.createdOrder,
                     request: sourceRequest,
                     artifact: suggestion,
                     discussionId: discussion.id,
