@@ -450,6 +450,52 @@ Official references:
 - <https://developers.openai.com/codex/config-reference/>
 - <https://www.npmjs.com/package/@openai/codex>
 
+## Issue 014 toolkit-test outcome (2026-08-08)
+
+This result supersedes the researched fork and web-child proof topology where
+they conflict with the approved issue 014 implementation slice.
+
+- The runtime dependency is exactly `@openai/codex` 0.146.0. At the final
+  check, npm `latest` 0.147.0 and 0.146.1 were both younger than the repository's
+  three-day package-age gate; 0.146.0 was the newest eligible stable release.
+  The Yarn checksum is
+  `10c0/3e6cf877683904211f66d769d5a25a28eedc17341aaa98718b08097a26eb2c368b282589f5f6a5372659dad8d176db4b6229b784bfe34807b1094dabdacfd9b5`.
+  Registry integrity is
+  `sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==`
+  for the meta package and
+  `sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==`
+  for the Linux x86-64 artifact.
+- Commits `18c6e62d52`, `59f2377db1`, and `bbaf977047` implement the bounded
+  History checkpoint, non-Git workspace, concrete App Server runner, Unix
+  socket service, server-owned Mongo session/CAS lifecycle, existing NDJSON
+  and Suggestion adapter, and the state-symlink measurement fix.
+- `native` remains the default harness. Only toolkit-test selects `external`.
+  App Server runs in one dedicated runner container connected to web only by a
+  mode-0600 Unix socket. The runner is read-only, uid/gid 33, has no network,
+  and alone uses the explicitly approved `seccomp=unconfined` and
+  `apparmor=unconfined` settings.
+- Review uses one process per run. Agent uses an independent thread seeded from
+  the visible Review subject summary; it does not fork or inherit invisible
+  Review history. Normal Agent turns reuse the session process. A later turn
+  resumes the persisted thread from a new process after a runner restart.
+- On image `overleafcep/sharelatex:6.2.0-ai-agent-i014-r2`
+  (`sha256:d4f4d4acc7c53f1de8a370eb85f61865bfae341fc79a4eaffb5cc805f57a0f06`),
+  two isolated test users concurrently completed Review to detached preview to
+  manual Apply. Each then completed two Agent turns with identical process
+  IDs, followed by a third turn with new process IDs after runner-only restart
+  and the same logical session. Per-user recorder paths and authorization
+  hashes never crossed and no recorder request was rejected.
+- Owner reads, cross-session 404, cross-project 403, Resolve/archive,
+  Reopen/unarchive, stale-revision 409, and final Resolve were observed. The
+  user session DELETE route returned 404. Final runner state was two baseline
+  processes, zero turn-workspace entries, and zero exact credential matches
+  across 891 persistent-state files and all processes.
+
+This is a toolkit-test feasibility result, not a production-adoption decision.
+It does not claim Review-to-Agent fork, a Resolved-list UI, disk-watermark
+policy, administrator purge, production deployment, or another real-gateway
+request. Issue 015 and the production runner decision remain separate gates.
+
 ## Architecture questions after the spike
 
 1. **Runner placement**: isolated server-side job, internal worker service, or
@@ -483,7 +529,8 @@ credentials, concurrency, multi-document authority, lifecycle cleanup,
 Review/Agent coexistence, persistent resolved history, storage safety and
 the aggregate-only admin purge privacy boundary, plus error-budget enforcement. A
 single Review succeeding is not sufficient for adoption: the proof
-must also demonstrate Review-to-Agent fork and process-restart resume against a
-current History checkpoint. If those costs outweigh removal of the current
-harness, issue 012 should be fixed with per-file degradation and the existing
-harness should be retained with a narrower provider boundary.
+must also demonstrate an independently seeded Review-to-Agent session and
+process-restart resume against a current History checkpoint. If those costs
+outweigh removal of the current harness, issue 012 should be fixed with
+per-file degradation and the existing harness should be retained with a
+narrower provider boundary.
