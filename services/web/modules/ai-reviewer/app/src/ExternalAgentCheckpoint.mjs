@@ -7,7 +7,7 @@ import { createExternalAgentHistorySnapshot } from "./ExternalAgentWorkspace.mjs
 /**
  * @typedef {{
  *   ensureNoResyncPending: (projectId: string, options: { signal?: AbortSignal }) => Promise<unknown>,
- *   getLatestVersion: (projectId: string, options: { signal?: AbortSignal }) => Promise<number>,
+ *   getLatestVersionInfo: (projectId: string, options: { signal?: AbortSignal }) => Promise<{version: number, docVersions: unknown}>,
  *   getContentAtVersion: (projectId: string, version: number, options: { signal?: AbortSignal }) => Promise<unknown>,
  * }} ExternalAgentHistoryManager
  */
@@ -106,10 +106,10 @@ export async function createExternalAgentCheckpoint(input, options = {}) {
       throwIfAborted(signal);
       await historyManager.ensureNoResyncPending(request.projectId, { signal });
       throwIfAborted(signal);
-      const historyVersion = await historyManager.getLatestVersion(
-        request.projectId,
-        { signal },
-      );
+      const { version: historyVersion, docVersions } =
+        await historyManager.getLatestVersionInfo(request.projectId, {
+          signal,
+        });
       throwIfAborted(signal);
       const rawSnapshot = await historyManager.getContentAtVersion(
         request.projectId,
@@ -117,10 +117,19 @@ export async function createExternalAgentCheckpoint(input, options = {}) {
         { signal },
       );
       throwIfAborted(signal);
+      const snapshotRecord =
+        rawSnapshot != null && typeof rawSnapshot === "object"
+          ? /** @type {Record<string, unknown>} */ (rawSnapshot)
+          : {};
       snapshot = createExternalAgentHistorySnapshot({
         projectId: request.projectId,
         historyVersion,
-        rawSnapshot,
+        rawSnapshot: {
+          ...snapshotRecord,
+          v2DocVersions: Object.hasOwn(snapshotRecord, "v2DocVersions")
+            ? snapshotRecord.v2DocVersions
+            : docVersions,
+        },
       });
       await historyManager.ensureNoResyncPending(request.projectId, { signal });
       throwIfAborted(signal);

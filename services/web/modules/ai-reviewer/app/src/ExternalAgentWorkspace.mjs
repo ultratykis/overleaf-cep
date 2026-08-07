@@ -127,14 +127,20 @@ export function createExternalAgentHistorySnapshot(input) {
   let totalCharacters = 0;
   for (const [documentId, rawVersion] of Object.entries(rawVersions)) {
     const path = normalizedPath(rawVersion?.pathname);
-    const revision = rawVersion?.v;
+    const lastAppliedRevision = rawVersion?.v;
+    // History stores the operation's base revision; ShareJS advances after it.
+    const revision =
+      typeof lastAppliedRevision === "number"
+        ? lastAppliedRevision + 1
+        : Number.NaN;
     const file = snapshot.getFile(path) ?? snapshot.getFile(`/${path}`);
     const text = file?.getContent({ filterTrackedDeletes: true });
     if (
       documentId.length === 0 ||
-      typeof revision !== "number" ||
+      typeof lastAppliedRevision !== "number" ||
+      !Number.isSafeInteger(lastAppliedRevision) ||
+      lastAppliedRevision < 0 ||
       !Number.isSafeInteger(revision) ||
-      revision < 0 ||
       typeof text !== "string" ||
       text.length > MAX_DOCUMENT_CHARACTERS ||
       documentIds.has(documentId) ||

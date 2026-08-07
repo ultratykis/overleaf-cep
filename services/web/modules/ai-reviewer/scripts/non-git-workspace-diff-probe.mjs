@@ -39,7 +39,7 @@ try {
       v2DocVersions: {
         "document-introduction": {
           pathname: "sections/01_intro.tex",
-          v: 549,
+          v: 548,
         },
       },
       timestamp: "2026-08-07T00:00:00.000Z",

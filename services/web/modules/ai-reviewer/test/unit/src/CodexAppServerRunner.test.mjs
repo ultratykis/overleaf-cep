@@ -139,7 +139,7 @@ function historySnapshot(text = "Original text") {
       files: { "main.tex": { content: text } },
       projectVersion: "12.4",
       v2DocVersions: {
-        "document-main": { pathname: "main.tex", v: 7 },
+        "document-main": { pathname: "main.tex", v: 6 },
       },
       timestamp: "2026-08-07T00:00:00.000Z",
     },

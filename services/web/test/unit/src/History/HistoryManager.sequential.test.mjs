@@ -209,6 +209,31 @@ describe('HistoryManager', function () {
       )
     })
 
+    it('returns document versions from the same latest-version read', async function (ctx) {
+      const projectId = 'project-checkpoint-0001'
+      const signal = new AbortController().signal
+      const docVersions = {
+        'document-checkpoint-0001': {
+          pathname: '/main.tex',
+          v: 6,
+        },
+      }
+      ctx.FetchUtils.fetchJson.resolves({
+        version: 57,
+        docVersions,
+      })
+
+      expect(
+        await ctx.HistoryManager.promises.getLatestVersionInfo(projectId, {
+          signal,
+        })
+      ).to.deep.equal({ version: 57, docVersions })
+      expect(ctx.FetchUtils.fetchJson).to.have.been.calledWithExactly(
+        `${ctx.projectHistoryUrl}/project/${projectId}/version?includeDocVersions=true`,
+        { method: 'GET', signal }
+      )
+    })
+
     it('rejects an invalid latest version response', async function (ctx) {
       for (const body of [
         null,

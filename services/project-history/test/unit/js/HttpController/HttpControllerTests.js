@@ -24,6 +24,7 @@ describe('HttpController', function () {
     }
     this.SnapshotManager = {
       getFileSnapshotStream: sinon.stub(),
+      getLatestSnapshotFromChunk: sinon.stub(),
       getProjectSnapshot: sinon.stub(),
     }
     this.HealthChecker = {}
@@ -236,6 +237,7 @@ describe('HttpController', function () {
         params: {
           project_id: this.projectId,
         },
+        query: {},
       }
 
       this.version = 99
@@ -243,17 +245,25 @@ describe('HttpController', function () {
         v2Authors: ['1234'],
         timestamp: '2016-08-16T10:44:40.227Z',
       }
+      this.projectStructureAndDocVersions = {
+        project: '12.4',
+        docs: {
+          'mock-doc-id': { pathname: '/main.tex', v: 6 },
+        },
+      }
       this.versionInfo = {
         version: this.version,
         v2Authors: ['1234'],
         timestamp: '2016-08-16T10:44:40.227Z',
       }
+      this.mostRecentChunk = { chunk: {} }
       this.WebApiManager.getHistoryId.yields(null, this.historyId)
       this.HistoryStoreManager.getMostRecentVersion.yields(
         null,
         this.version,
-        {},
-        this.lastChange
+        this.projectStructureAndDocVersions,
+        this.lastChange,
+        this.mostRecentChunk
       )
       this.HttpController.latestVersion(this.req, this.res, this.next)
     })
@@ -278,6 +288,34 @@ describe('HttpController', function () {
 
     it('should return version number', function () {
       this.res.json.calledWith(this.versionInfo).should.equal(true)
+    })
+
+    it('should include snapshot doc versions only when requested', function () {
+      const docVersions = {
+        'mock-doc-id': { pathname: '/main.tex', v: 6 },
+      }
+      this.SnapshotManager.getLatestSnapshotFromChunk.returns({
+        snapshot: {
+          getV2DocVersions: () => ({ toRaw: () => docVersions }),
+        },
+      })
+
+      this.HttpController.latestVersion(
+        {
+          params: { project_id: this.projectId },
+          query: { includeDocVersions: 'true' },
+        },
+        this.res,
+        this.next
+      )
+
+      this.res.json.lastCall.args[0].should.deep.equal({
+        ...this.versionInfo,
+        docVersions,
+      })
+      this.SnapshotManager.getLatestSnapshotFromChunk
+        .calledWithExactly(this.mostRecentChunk)
+        .should.equal(true)
     })
   })
 

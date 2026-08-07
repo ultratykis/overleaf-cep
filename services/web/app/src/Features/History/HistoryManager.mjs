@@ -281,16 +281,19 @@ async function getContentAtVersion(projectId, version, options = {}) {
 }
 
 /**
- * Process pending project-history updates and return the resulting global
- * history version.
- *
  * @param {string} projectId
  * @param {{ signal?: AbortSignal }} [options]
- * @returns {Promise<number>}
+ * @param {boolean} [includeDocVersions]
  */
-async function getLatestVersion(projectId, options = {}) {
+async function readLatestVersion(
+  projectId,
+  options = {},
+  includeDocVersions = false
+) {
   const body = await fetchJson(
-    `${settings.apis.project_history.url}/project/${projectId}/version`,
+    `${settings.apis.project_history.url}/project/${projectId}/version${
+      includeDocVersions ? '?includeDocVersions=true' : ''
+    }`,
     { method: 'GET', signal: options.signal }
   )
   const version = body?.version
@@ -299,7 +302,35 @@ async function getLatestVersion(projectId, options = {}) {
       projectId,
     })
   }
-  return version
+  return body
+}
+
+/**
+ * Process pending project-history updates and return the resulting global
+ * history version.
+ *
+ * @param {string} projectId
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<number>}
+ */
+async function getLatestVersion(projectId, options = {}) {
+  return (await readLatestVersion(projectId, options)).version
+}
+
+/**
+ * Process pending updates and return H with the raw document versions computed
+ * from the same History chunk.
+ *
+ * @param {string} projectId
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<{version: number, docVersions: unknown}>}
+ */
+async function getLatestVersionInfo(projectId, options = {}) {
+  const body = await readLatestVersion(projectId, options, true)
+  return {
+    version: body.version,
+    docVersions: body?.docVersions,
+  }
 }
 
 /**
@@ -536,6 +567,7 @@ export default {
     getCurrentContent,
     getContentAtVersion,
     getLatestVersion,
+    getLatestVersionInfo,
     uploadBlobFromDisk,
     copyBlob,
     requestBlob,

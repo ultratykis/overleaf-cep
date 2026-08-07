@@ -177,10 +177,11 @@ function _getLatestProjectVersion(projectId, chunk, callback) {
 
 function _getLatestV2DocVersions(projectId, chunk, callback) {
   // find the initial doc versions (indexed by docId as this is immutable)
-  const v2DocVersions =
-    (chunk.chunk.history.snapshot &&
+  const v2DocVersions = {
+    ...((chunk.chunk.history.snapshot &&
       chunk.chunk.history.snapshot.v2DocVersions) ||
-    {}
+      {}),
+  }
   // keep track of any errors
   let error = null
   // iterate over the changes in the chunk to find the most recent doc versions

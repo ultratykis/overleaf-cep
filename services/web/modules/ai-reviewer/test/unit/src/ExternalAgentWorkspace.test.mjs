@@ -52,7 +52,7 @@ function rawHistorySnapshot(files) {
     v2DocVersions: Object.fromEntries(
       files.map(({ documentId, path, revision }) => [
         documentId,
-        { pathname: path, v: revision },
+        { pathname: path, v: revision - 1 },
       ]),
     ),
     timestamp: "2026-08-07T00:00:00.000Z",
@@ -68,6 +68,42 @@ function historySnapshot(files) {
 }
 
 describe("AI reviewer non-Git external agent workspace", function () {
+  it("converts the History operation base revision to the editor revision", function () {
+    const snapshot = historySnapshot([
+      {
+        documentId: "document-main",
+        path: "main.tex",
+        revision: 7,
+        text: "original",
+      },
+    ]);
+
+    expect(snapshot.documents[0].revision).toBe(7);
+  });
+
+  it.each([null, true, -1, Number.MAX_SAFE_INTEGER])(
+    "rejects invalid History operation revision %s",
+    function (revision) {
+      const rawSnapshot = rawHistorySnapshot([
+        {
+          documentId: "document-main",
+          path: "main.tex",
+          revision: 7,
+          text: "original",
+        },
+      ]);
+      rawSnapshot.v2DocVersions["document-main"].v = revision;
+
+      expect(() =>
+        createExternalAgentHistorySnapshot({
+          projectId: "project-external-agent-0001",
+          historyVersion: 1,
+          rawSnapshot,
+        }),
+      ).toThrow(ExternalAgentWorkspaceError);
+    },
+  );
+
   it.each([
     ".git/config",
     ".codex/config.toml",

@@ -412,10 +412,13 @@ const latestVersionSchema = z.object({
   params: z.object({
     project_id: zz.objectId().or(z.coerce.number()),
   }),
+  query: z.object({
+    includeDocVersions: z.stringbool().default(false),
+  }),
 })
 
 export function latestVersion(req, res, next) {
-  const { params } = parseReq(req, latestVersionSchema)
+  const { params, query } = parseReq(req, latestVersionSchema)
   const projectId = params.project_id
   logger.debug({ projectId }, 'compressing project history and getting version')
   UpdatesProcessor.processUpdatesForProject(projectId, error => {
@@ -429,12 +432,30 @@ export function latestVersion(req, res, next) {
       HistoryStoreManager.getMostRecentVersion(
         projectId,
         historyId,
-        (error, version, projectStructureAndDocVersions, lastChange) => {
+        (
+          error,
+          version,
+          _projectStructureAndDocVersions,
+          lastChange,
+          mostRecentChunk
+        ) => {
           if (error != null) {
             return next(OError.tag(error))
           }
+          let docVersions
+          if (query.includeDocVersions) {
+            try {
+              docVersions =
+                SnapshotManager.getLatestSnapshotFromChunk(mostRecentChunk)
+                  .snapshot.getV2DocVersions()
+                  ?.toRaw() ?? {}
+            } catch (error) {
+              return next(OError.tag(error))
+            }
+          }
           res.json({
             version,
+            ...(query.includeDocVersions ? { docVersions } : {}),
             timestamp: lastChange != null ? lastChange.timestamp : undefined,
             v2Authors: lastChange != null ? lastChange.v2Authors : undefined,
           })

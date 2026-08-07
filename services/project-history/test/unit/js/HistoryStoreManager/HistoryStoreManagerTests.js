@@ -115,10 +115,28 @@ describe('HistoryStoreManager', function () {
             history: {
               snapshot: {
                 files: {},
+                v2DocVersions: {
+                  mock_doc_id: {
+                    pathname: '/main.tex',
+                    v: 1,
+                  },
+                },
               },
               changes: [
-                { v2Authors: ['5678'], timestamp: '2017-10-17T10:44:40.227Z' },
-                { v2Authors: ['1234'], timestamp: '2017-10-16T10:44:40.227Z' },
+                {
+                  v2Authors: ['5678'],
+                  timestamp: '2017-10-17T10:44:40.227Z',
+                },
+                {
+                  v2Authors: ['1234'],
+                  timestamp: '2017-10-16T10:44:40.227Z',
+                  v2DocVersions: {
+                    mock_doc_id: {
+                      pathname: '/main.tex',
+                      v: 2,
+                    },
+                  },
+                },
               ],
             },
           },
@@ -139,9 +157,19 @@ describe('HistoryStoreManager', function () {
         expect(this.callback).to.have.been.calledWith(
           null,
           7,
-          { project: undefined, docs: {} },
+          {
+            project: undefined,
+            docs: { mock_doc_id: { pathname: '/main.tex', v: 2 } },
+          },
           { v2Authors: ['5678'], timestamp: '2017-10-17T10:44:40.227Z' }
         )
+      })
+
+      it('should not mutate the returned chunk while calculating doc versions', function () {
+        const returnedChunk = this.callback.lastCall.args[4]
+        expect(
+          returnedChunk.chunk.history.snapshot.v2DocVersions.mock_doc_id.v
+        ).to.equal(1)
       })
 
       it('should request latest history from the overleaf history service', function () {

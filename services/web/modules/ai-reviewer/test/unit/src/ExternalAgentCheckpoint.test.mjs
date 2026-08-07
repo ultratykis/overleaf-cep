@@ -18,7 +18,6 @@ function sha256(value) {
 function rawSnapshot({
   snapshotText = text,
   snapshotPath = path,
-  revision = 7,
   extraUnmappedFile = false,
 } = {}) {
   return {
@@ -29,10 +28,19 @@ function rawSnapshot({
         : {}),
     },
     projectVersion: "12.4",
-    v2DocVersions: {
-      [documentId]: { pathname: snapshotPath, v: revision },
-    },
     timestamp: "2026-08-07T00:00:00.000Z",
+  };
+}
+
+function versionInfo(
+  version = 57,
+  { snapshotDocumentId = documentId, snapshotPath = path, revision = 6 } = {},
+) {
+  return {
+    version,
+    docVersions: {
+      [snapshotDocumentId]: { pathname: snapshotPath, v: revision },
+    },
   };
 }
 
@@ -68,10 +76,10 @@ function request(kind = "document") {
   };
 }
 
-function historyManager(snapshot = rawSnapshot(), version = 57) {
+function historyManager(snapshot = rawSnapshot(), latest = versionInfo()) {
   return {
     ensureNoResyncPending: vi.fn().mockResolvedValue(undefined),
-    getLatestVersion: vi.fn().mockResolvedValue(version),
+    getLatestVersionInfo: vi.fn().mockResolvedValue(latest),
     getContentAtVersion: vi.fn().mockResolvedValue(snapshot),
   };
 }
@@ -91,9 +99,9 @@ describe("AI reviewer external History checkpoint", function () {
     const order = [];
     const history = {
       ensureNoResyncPending: vi.fn(async () => order.push("resync")),
-      getLatestVersion: vi.fn(async () => {
+      getLatestVersionInfo: vi.fn(async () => {
         order.push("latest");
-        return 57;
+        return versionInfo();
       }),
       getContentAtVersion: vi.fn(async () => {
         order.push("content");
@@ -129,7 +137,7 @@ describe("AI reviewer external History checkpoint", function () {
         signal,
       },
     );
-    expect(history.getLatestVersion).toHaveBeenCalledWith(projectId, {
+    expect(history.getLatestVersionInfo).toHaveBeenCalledWith(projectId, {
       signal,
     });
     expect(history.getContentAtVersion).toHaveBeenCalledWith(projectId, 57, {
@@ -148,11 +156,11 @@ describe("AI reviewer external History checkpoint", function () {
 
   it("repeats the complete checkpoint once after a queue race", async function () {
     const history = historyManager();
-    history.getLatestVersion
-      .mockResolvedValueOnce(57)
-      .mockResolvedValueOnce(58);
+    history.getLatestVersionInfo
+      .mockResolvedValueOnce(versionInfo(57, { revision: 5 }))
+      .mockResolvedValueOnce(versionInfo(58));
     history.getContentAtVersion
-      .mockResolvedValueOnce(rawSnapshot({ revision: 6 }))
+      .mockResolvedValueOnce(rawSnapshot())
       .mockResolvedValueOnce(rawSnapshot());
 
     const checkpoint = await createExternalAgentCheckpoint(request(), {
@@ -161,7 +169,7 @@ describe("AI reviewer external History checkpoint", function () {
 
     expect(checkpoint.historyVersion).toBe(58);
     expect(history.ensureNoResyncPending).toHaveBeenCalledTimes(4);
-    expect(history.getLatestVersion).toHaveBeenCalledTimes(2);
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(2);
     expect(history.getContentAtVersion).toHaveBeenCalledTimes(2);
   });
 
@@ -181,7 +189,7 @@ describe("AI reviewer external History checkpoint", function () {
         createExternalAgentCheckpoint(input, { historyManager: history }),
       ),
     ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_STALE" });
-    expect(history.getLatestVersion).toHaveBeenCalledTimes(2);
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed after two selection-text mismatches", async function () {
@@ -194,7 +202,7 @@ describe("AI reviewer external History checkpoint", function () {
         createExternalAgentCheckpoint(input, { historyManager: history }),
       ),
     ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_STALE" });
-    expect(history.getLatestVersion).toHaveBeenCalledTimes(2);
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(2);
   });
 
   it.each([undefined, { kind: "project" }])(
@@ -225,7 +233,7 @@ describe("AI reviewer external History checkpoint", function () {
       ),
     ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_UNAVAILABLE" });
     expect(history.ensureNoResyncPending).toHaveBeenCalledTimes(1);
-    expect(history.getLatestVersion).not.toHaveBeenCalled();
+    expect(history.getLatestVersionInfo).not.toHaveBeenCalled();
   });
 
   it("does not retry an incomplete History snapshot", async function () {
@@ -236,8 +244,43 @@ describe("AI reviewer external History checkpoint", function () {
         createExternalAgentCheckpoint(request(), { historyManager: history }),
       ),
     ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_UNAVAILABLE" });
-    expect(history.getLatestVersion).toHaveBeenCalledTimes(1);
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(1);
     expect(history.ensureNoResyncPending).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry missing document-version metadata", async function () {
+    const history = historyManager(rawSnapshot(), {
+      version: 57,
+      docVersions: {},
+    });
+
+    expect(
+      await captureError(
+        createExternalAgentCheckpoint(request(), { historyManager: history }),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_UNAVAILABLE" });
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(1);
+    expect(history.getContentAtVersion).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers document versions already bound to the content snapshot", async function () {
+    const snapshot = {
+      ...rawSnapshot(),
+      v2DocVersions: {
+        [documentId]: { pathname: path, v: 6 },
+      },
+    };
+    const history = historyManager(
+      snapshot,
+      versionInfo(57, { snapshotPath: "stale.tex" }),
+    );
+
+    const checkpoint = await createExternalAgentCheckpoint(request(), {
+      historyManager: history,
+    });
+
+    expect(checkpoint.documents[0].path).toBe(path);
+    expect(checkpoint.documents[0].revision).toBe(7);
   });
 
   it("stops before History I/O when already aborted", async function () {
