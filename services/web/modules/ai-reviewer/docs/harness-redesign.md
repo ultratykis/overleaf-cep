@@ -565,3 +565,17 @@ process-restart resume against a current History checkpoint. If those costs
 outweigh removal of the current harness, issue 012 should be fixed with
 per-file degradation and the existing harness should be retained with a
 narrower provider boundary.
+
+## Production adoption decision (2026-08-08)
+
+Do not adopt the external App Server harness in production while the official
+App Server command remains experimental and unsupported for production
+workloads. Keep the issue 014/015 implementation and toolkit-test evidence as a
+bounded proof, but retain the native reviewer as the production path and fix
+issue 012 at its shared project-snapshot boundary.
+
+This decision intentionally defers production runner operations, disk-watermark
+policy, a dedicated Resolved-list UI, Review-to-Agent history inheritance, and
+multi-document write authority. Re-open the adoption decision only after App
+Server has a production-supported contract and the remaining operational work
+has a concrete product need.
