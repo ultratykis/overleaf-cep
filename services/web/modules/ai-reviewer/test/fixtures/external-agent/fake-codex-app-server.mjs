@@ -266,6 +266,26 @@ function handleRequest(message) {
       result(message.id, { thread: threadValue(thread) });
       break;
     }
+    case "thread/delete":
+      if (!threads.delete(params.threadId)) {
+        send({
+          id: message.id,
+          error: {
+            code: -32600,
+            message: `no rollout found for thread id ${params.threadId}`,
+          },
+        });
+        break;
+      }
+      result(
+        message.id,
+        scenario("malformed-delete") ? { unexpected: true } : {},
+      );
+      send({
+        method: "thread/deleted",
+        params: { threadId: params.threadId },
+      });
+      break;
     case "turn/start": {
       assertTurnParams(params);
       const thread = ensureThread(params.threadId, params);

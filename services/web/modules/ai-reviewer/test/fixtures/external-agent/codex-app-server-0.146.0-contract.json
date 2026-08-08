@@ -81,6 +81,10 @@
       "params": ["threadId"],
       "result": ["thread.id"]
     },
+    "thread/delete": {
+      "params": ["threadId"],
+      "result": []
+    },
     "turn/start": {
       "params": [
         "threadId",
@@ -123,5 +127,5 @@
     "item/agentMessage/delta": ["threadId", "turnId", "itemId", "delta"],
     "turn/completed": ["threadId", "turn.id", "turn.status", "turn.error"]
   },
-  "excludedMethods": ["thread/fork", "thread/delete"]
+  "excludedMethods": ["thread/fork"]
 }

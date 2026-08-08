@@ -32,6 +32,9 @@ function pathValue(value, path) {
 }
 
 function matchesValue(actual, expected) {
+  if (actual instanceof Date && expected instanceof Date) {
+    return actual.getTime() === expected.getTime();
+  }
   if (
     expected != null &&
     typeof expected === "object" &&
@@ -93,6 +96,14 @@ function inMemoryModel() {
         return next;
       }),
     ),
+    findOneAndDelete: vi.fn((filter) =>
+      fakeQuery(() => {
+        const current = records.get(filter._id);
+        if (current == null || !matches(current, filter)) return null;
+        records.delete(filter._id);
+        return current;
+      }),
+    ),
   };
   return { model, records };
 }
@@ -127,6 +138,13 @@ function operationInput(session, type, overrides = {}) {
     clientSessionId: session.clientSessionId,
     type,
     expectedRevision: session.revision,
+    ...(type === "purge"
+      ? {
+          expectedStatus: session.status,
+          expectedLastActivityAt: session.lastActivityAt,
+          expectedThreadId: session.threadId,
+        }
+      : {}),
     ...overrides,
   };
 }
@@ -407,6 +425,16 @@ describe("ExternalAgentSessionStore", function () {
       await store.create(sessionInput()),
     );
     const lastUserActivity = session.lastActivityAt;
+    for (const staleCandidate of [
+      { expectedStatus: "resolved" },
+      { expectedLastActivityAt: new Date(0) },
+    ]) {
+      expect(
+        await captureError(
+          store.claim(operationInput(session, "purge", staleCandidate)),
+        ),
+      ).toBeInstanceOf(AiReviewerExternalAgentSessionConflictError);
+    }
     const claim = await store.claim(operationInput(session, "purge"));
     expect(claim).toMatchObject({
       revision: 3,
@@ -435,5 +463,64 @@ describe("ExternalAgentSessionStore", function () {
       revision: 5,
       operationClaim: { type: "purge" },
     });
+
+    const deletion = {
+      userId: retry.userId,
+      projectId: retry.projectId,
+      clientSessionId: retry.clientSessionId,
+      claimId: retry.operationClaim.id,
+      expectedRevision: retry.revision,
+      expectedStatus: retry.status,
+      expectedLastActivityAt: retry.lastActivityAt,
+      expectedThreadId: retry.threadId,
+      stateRootKey: retry.stateRootKey,
+    };
+    expect(
+      await captureError(
+        store.deleteClaimedPurge({ ...deletion, userId: otherUserId }),
+      ),
+    ).toBeInstanceOf(AiReviewerExternalAgentSessionNotFoundError);
+    expect(
+      await captureError(
+        store.deleteClaimedPurge({
+          ...deletion,
+          expectedRevision: retry.revision - 1,
+        }),
+      ),
+    ).toBeInstanceOf(AiReviewerExternalAgentSessionConflictError);
+
+    expect(await store.deleteClaimedPurge(deletion)).toMatchObject({
+      status: "purge_failed",
+      operationClaim: { type: "purge" },
+    });
+    expect(await captureError(store.load(sessionInput()))).toBeInstanceOf(
+      AiReviewerExternalAgentSessionNotFoundError,
+    );
+  });
+
+  it("claims and deletes a never-started threadless session", async function () {
+    const { store } = fixture();
+    const session = await store.create(sessionInput());
+    const claim = await store.claim(operationInput(session, "purge"));
+
+    expect(claim).toMatchObject({
+      threadId: null,
+      revision: 1,
+      operationClaim: { type: "purge" },
+    });
+    await store.deleteClaimedPurge({
+      userId: claim.userId,
+      projectId: claim.projectId,
+      clientSessionId: claim.clientSessionId,
+      claimId: claim.operationClaim.id,
+      expectedRevision: claim.revision,
+      expectedStatus: claim.status,
+      expectedLastActivityAt: claim.lastActivityAt,
+      expectedThreadId: null,
+      stateRootKey: claim.stateRootKey,
+    });
+    expect(await captureError(store.load(sessionInput()))).toBeInstanceOf(
+      AiReviewerExternalAgentSessionNotFoundError,
+    );
   });
 });

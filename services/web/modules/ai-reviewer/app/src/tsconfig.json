@@ -18,6 +18,7 @@
     "ExternalAgentGateway.mjs",
     "ExternalAgentRunnerService.mjs",
     "ExternalAgentSessionController.mjs",
+    "ExternalAgentSessionPurge.mjs",
     "ExternalAgentSessionStore.mjs",
     "ExternalAgentWorkspace.mjs",
     "LatexProjectRelations.mjs",

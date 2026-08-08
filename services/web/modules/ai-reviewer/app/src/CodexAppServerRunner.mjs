@@ -106,6 +106,17 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** @param {unknown} value @param {unknown} expectedThreadId */
+function isMissingThreadDeleteError(value, expectedThreadId) {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === 2 &&
+    value.code === -32600 &&
+    typeof expectedThreadId === "string" &&
+    value.message === `no rollout found for thread id ${expectedThreadId}`
+  );
+}
+
 function deferred() {
   /** @type {(value: any) => void} */
   let resolve = () => {};
@@ -159,11 +170,20 @@ function absolutePath(value, field) {
 /** @param {string} directory */
 async function ensurePrivateDirectory(directory) {
   await Fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-  const stat = await Fs.promises.lstat(directory);
+  let stat = await Fs.promises.lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new TypeError("The Codex state directory is invalid.");
   }
   await Fs.promises.chmod(directory, 0o700);
+  stat = await Fs.promises.lstat(directory);
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    (stat.mode & 0o077) !== 0 ||
+    (typeof process.getuid === "function" && stat.uid !== process.getuid())
+  ) {
+    throw new TypeError("The Codex state directory is invalid.");
+  }
 }
 
 /** @param {unknown} value */
@@ -182,6 +202,25 @@ async function privateRoot(value, field) {
   return await Fs.promises.realpath(root);
 }
 
+/** @param {unknown} value @param {string} field */
+async function existingPrivateRoot(value, field) {
+  const root = absolutePath(value, field);
+  const [stat, realRoot] = await Promise.all([
+    Fs.promises.lstat(root),
+    Fs.promises.realpath(root),
+  ]);
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    realRoot !== root ||
+    (stat.mode & 0o077) !== 0 ||
+    (typeof process.getuid === "function" && stat.uid !== process.getuid())
+  ) {
+    throw new TypeError(`${field} is invalid.`);
+  }
+  return root;
+}
+
 /** @param {string} root @param {string} key @param {string} kind */
 async function privateSessionDirectory(root, key, kind) {
   const directory = Path.join(root, key);
@@ -191,6 +230,61 @@ async function privateSessionDirectory(root, key, kind) {
     throw new TypeError(`The Codex ${kind} directory escaped its safe root.`);
   }
   return realDirectory;
+}
+
+/** @param {string} root @param {string} key */
+async function existingStateDirectory(root, key) {
+  const directory = Path.join(root, key);
+  let stat;
+  try {
+    stat = await Fs.promises.lstat(directory);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return null;
+    throw error;
+  }
+  const realDirectory = await Fs.promises.realpath(directory);
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    realDirectory !== directory ||
+    Path.dirname(realDirectory) !== root ||
+    (stat.mode & 0o077) !== 0 ||
+    (typeof process.getuid === "function" && stat.uid !== process.getuid())
+  ) {
+    throw new TypeError("The Codex state directory is invalid.");
+  }
+  return directory;
+}
+
+/** @param {{ stateRootKey: unknown, stateRootDirectory?: unknown }} options */
+async function stateDirectoryForRemoval(options) {
+  if (!isRecord(options)) {
+    throw new TypeError("The App Server state options are invalid.");
+  }
+  const root = await existingPrivateRoot(
+    options.stateRootDirectory ?? CODEX_APP_SERVER_STATE_ROOT,
+    "stateRootDirectory",
+  );
+  return await existingStateDirectory(root, stateRootKey(options.stateRootKey));
+}
+
+/** @param {{ stateRootKey: unknown, stateRootDirectory?: unknown }} options */
+export async function hasCodexAppServerState(options) {
+  return (await stateDirectoryForRemoval(options)) != null;
+}
+
+/** @param {{ stateRootKey: unknown, stateRootDirectory?: unknown }} options */
+export async function removeCodexAppServerState(options) {
+  const directory = await stateDirectoryForRemoval(options);
+  if (directory == null) return false;
+  await Fs.promises.rm(directory, { recursive: true });
+  try {
+    await Fs.promises.lstat(directory);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return true;
+    throw error;
+  }
+  throw new TypeError("The Codex state directory was not removed.");
 }
 
 /** @param {unknown} value @param {string} root */
@@ -679,7 +773,11 @@ export class CodexAppServerRunner {
     this.pending.delete(message.id);
     clearTimeout(pending.timer);
     if (hasError) {
-      pending.reject(new CodexAppServerProtocolError());
+      if (isMissingThreadDeleteError(message.error, pending.missingThreadId)) {
+        pending.resolve({});
+      } else {
+        pending.reject(new CodexAppServerProtocolError());
+      }
     } else {
       pending.resolve(message.result);
     }
@@ -830,7 +928,11 @@ export class CodexAppServerRunner {
       }
     }, timeoutMs);
     timer.unref?.();
-    this.pending.set(id, { ...response, timer });
+    this.pending.set(id, {
+      ...response,
+      timer,
+      missingThreadId: method === "thread/delete" ? params.threadId : null,
+    });
     try {
       await this.write({ id, method, params });
       return await response.promise;
@@ -970,6 +1072,18 @@ export class CodexAppServerRunner {
     if (!isRecord(result?.thread) || result.thread.id !== expectedThreadId) {
       throw new CodexAppServerProtocolError();
     }
+  }
+
+  /** @param {unknown} threadIdInput */
+  async deleteThread(threadIdInput) {
+    const expectedThreadId = threadId(threadIdInput);
+    const result = await this.request("thread/delete", {
+      threadId: expectedThreadId,
+    });
+    if (!isRecord(result) || Object.keys(result).length !== 0) {
+      throw new CodexAppServerProtocolError();
+    }
+    this.loadedThreadIds.delete(expectedThreadId);
   }
 
   /** @param {string} expectedThreadId */
@@ -1471,8 +1585,8 @@ export async function runCodexAppServerWorkspaceTurn({
 }
 
 /**
- * A runner-process-local registry for active Agent sessions. Review callers do
- * not register their one-shot process.
+ * A runner-process-local registry for active Agent sessions and control
+ * operations. Review callers do not register their one-shot process.
  *
  * @param {{ idleTimeoutMs?: number }} [options]
  */

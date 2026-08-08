@@ -359,6 +359,8 @@ export function createExternalAgentSessionStore({
      *   type: unknown,
      *   expectedRevision: unknown,
      *   expectedThreadId?: unknown,
+     *   expectedStatus?: unknown,
+     *   expectedLastActivityAt?: unknown,
      * }} input
      */
     async claim(input) {
@@ -375,10 +377,30 @@ export function createExternalAgentSessionStore({
       const expectedThreadId = hasExpectedThreadId
         ? nullableThreadId(input.expectedThreadId)
         : undefined;
+      const hasExpectedStatus = Object.hasOwn(input, "expectedStatus");
+      const hasExpectedLastActivityAt = Object.hasOwn(
+        input,
+        "expectedLastActivityAt",
+      );
+      const expectedStatus = hasExpectedStatus
+        ? status(input.expectedStatus)
+        : undefined;
+      const expectedLastActivityAt = hasExpectedLastActivityAt
+        ? date(input.expectedLastActivityAt)
+        : undefined;
       if (
         (type === "resolve" || type === "reopen") &&
         hasExpectedThreadId &&
         expectedThreadId == null
+      ) {
+        throw new AiReviewerExternalAgentSessionValidationError();
+      }
+      if (
+        (type === "purge" &&
+          (!hasExpectedThreadId ||
+            !hasExpectedStatus ||
+            !hasExpectedLastActivityAt)) ||
+        (type !== "purge" && (hasExpectedStatus || hasExpectedLastActivityAt))
       ) {
         throw new AiReviewerExternalAgentSessionValidationError();
       }
@@ -388,8 +410,9 @@ export function createExternalAgentSessionStore({
         projectId: checkedScope.projectId,
         clientSessionId: checkedScope.clientSessionId,
         revision: expectedRevision,
-        status: CLAIMABLE_STATUS[type],
+        status: type === "purge" ? expectedStatus : CLAIMABLE_STATUS[type],
         operationClaim: null,
+        ...(type === "purge" ? { lastActivityAt: expectedLastActivityAt } : {}),
         ...(type === "resolve" || type === "reopen"
           ? { threadId: hasExpectedThreadId ? expectedThreadId : { $ne: null } }
           : hasExpectedThreadId
@@ -476,6 +499,45 @@ export function createExternalAgentSessionStore({
           },
           { new: true, runValidators: true },
         ),
+      );
+      return storedSession(record, checkedScope) ?? failedCas(checkedScope);
+    },
+
+    /**
+     * @param {{
+     *   userId: unknown,
+     *   projectId: unknown,
+     *   clientSessionId: unknown,
+     *   claimId: unknown,
+     *   expectedRevision: unknown,
+     *   expectedStatus: unknown,
+     *   expectedLastActivityAt: unknown,
+     *   expectedThreadId: unknown,
+     *   stateRootKey: unknown,
+     * }} input
+     */
+    async deleteClaimedPurge(input) {
+      const checkedScope = scope(input);
+      const claimId = opaqueKey(input.claimId);
+      const expectedRevision = nonNegativeSafeInteger(input.expectedRevision);
+      const expectedStatus = status(input.expectedStatus);
+      const expectedLastActivityAt = date(input.expectedLastActivityAt);
+      const expectedThreadId = nullableThreadId(input.expectedThreadId);
+      const expectedStateRootKey = opaqueKey(input.stateRootKey);
+      const record = await lean(
+        model.findOneAndDelete({
+          _id: checkedScope.scopeId,
+          userId: checkedScope.userId,
+          projectId: checkedScope.projectId,
+          clientSessionId: checkedScope.clientSessionId,
+          revision: expectedRevision,
+          status: expectedStatus,
+          lastActivityAt: expectedLastActivityAt,
+          threadId: expectedThreadId,
+          stateRootKey: expectedStateRootKey,
+          "operationClaim.id": claimId,
+          "operationClaim.type": "purge",
+        }),
       );
       return storedSession(record, checkedScope) ?? failedCas(checkedScope);
     },

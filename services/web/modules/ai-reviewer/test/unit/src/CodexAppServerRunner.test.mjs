@@ -11,6 +11,8 @@ import {
   CODEX_APP_SERVER_VERSION,
   createCodexAppServerRegistry,
   createCodexAppServerRunner,
+  hasCodexAppServerState,
+  removeCodexAppServerState,
   runCodexAppServerWorkspaceTurn,
 } from "../../../app/src/CodexAppServerRunner.mjs";
 import { createExternalAgentHistorySnapshot } from "../../../app/src/ExternalAgentWorkspace.mjs";
@@ -321,12 +323,13 @@ describe("pinned Codex App Server runner", function () {
       "thread/read",
       "thread/archive",
       "thread/unarchive",
+      "thread/delete",
       "turn/start",
       "turn/interrupt",
       "thread/backgroundTerminals/clean",
       "thread/backgroundTerminals/list",
     ]);
-    expect(contract.excludedMethods).toEqual(["thread/fork", "thread/delete"]);
+    expect(contract.excludedMethods).toEqual(["thread/fork"]);
     expect(contract.securityInvariants).toEqual({
       environments: "omitted",
       projectDocMaxBytes: 0,
@@ -382,6 +385,9 @@ describe("pinned Codex App Server runner", function () {
     await appServer.archiveThread(threadId);
     expect(appServer.hasThread(threadId)).toBe(false);
     await appServer.unarchiveThread(threadId);
+    await appServer.deleteThread(threadId);
+    await appServer.deleteThread(threadId);
+    expect(appServer.hasThread(threadId)).toBe(false);
     expect(
       (
         await Fs.promises.lstat(
@@ -442,8 +448,71 @@ describe("pinned Codex App Server runner", function () {
     ).toBe(false);
   });
 
+  it("rejects a malformed thread/delete result", async function () {
+    const root = await temporaryRoot();
+    const appServer = await runner(root, "malformed-delete");
+    const threadId = await appServer.startThread(
+      await workDirectory(root, "delete-work"),
+    );
+
+    expect(await failureOf(appServer.deleteThread(threadId))).toMatchObject({
+      code: "AI_CODEX_APP_SERVER_PROTOCOL_ERROR",
+    });
+  });
+
+  it("removes only a canonical private state directory without following links", async function () {
+    const root = await temporaryRoot();
+    const stateRoot = await directory(root, "state-root");
+    const sessionState = await directory(stateRoot, "fixture-session");
+    const siblingState = await directory(stateRoot, "sibling-session");
+    const outside = await directory(root, "outside");
+    await Promise.all(
+      [stateRoot, sessionState, siblingState, outside].map((path) =>
+        Fs.promises.chmod(path, 0o700),
+      ),
+    );
+    const siblingMarker = Path.join(siblingState, "keep");
+    const outsideMarker = Path.join(outside, "keep");
+    await Promise.all([
+      Fs.promises.writeFile(siblingMarker, "sibling"),
+      Fs.promises.writeFile(outsideMarker, "outside"),
+      Fs.promises.symlink(outsideMarker, Path.join(sessionState, "link")),
+    ]);
+
+    const options = {
+      stateRootKey: "fixture-session",
+      stateRootDirectory: stateRoot,
+    };
+    expect(await hasCodexAppServerState(options)).toBe(true);
+    expect(await removeCodexAppServerState(options)).toBe(true);
+    expect(await hasCodexAppServerState(options)).toBe(false);
+    expect(await removeCodexAppServerState(options)).toBe(false);
+    expect(await Fs.promises.readFile(siblingMarker, "utf8")).toBe("sibling");
+    expect(await Fs.promises.readFile(outsideMarker, "utf8")).toBe("outside");
+    expect(Fs.existsSync(stateRoot)).toBe(true);
+
+    await Fs.promises.symlink(outside, Path.join(stateRoot, "linked-session"));
+    expect(
+      await failureOf(
+        removeCodexAppServerState({
+          stateRootKey: "linked-session",
+          stateRootDirectory: stateRoot,
+        }),
+      ),
+    ).toMatchObject({ message: "The Codex state directory is invalid." });
+    expect(
+      await failureOf(
+        removeCodexAppServerState({
+          stateRootKey: "../outside",
+          stateRootDirectory: stateRoot,
+        }),
+      ),
+    ).toMatchObject({ message: "stateRootKey is invalid." });
+    expect(await Fs.promises.readFile(outsideMarker, "utf8")).toBe("outside");
+  });
+
   realCodexIt(
-    "isolates the real App Server with the bundled outer bubblewrap",
+    "isolates the real App Server and deletes its thread without provider credentials",
     async function () {
       const root = await temporaryRoot();
       const stateRoot = await directory(root, "state-root");
@@ -533,6 +602,32 @@ describe("pinned Codex App Server runner", function () {
       expect(Fs.existsSync(sessionWork)).toBe(false);
       expect(Fs.existsSync(baseline)).toBe(false);
       expect(Fs.existsSync(Path.join(stateRoot, "fixture-session"))).toBe(true);
+
+      const deleteRunner = await createCodexAppServerRunner({
+        stateRootKey: "fixture-session",
+        stateRootDirectory: stateRoot,
+        workRootDirectory: workRoot,
+      });
+      runners.push(deleteRunner);
+      const deletePid = deleteRunner.pid;
+      expect(deleteRunner.destination).toBeNull();
+      await deleteRunner.deleteThread(threadId);
+      await deleteRunner.deleteThread(threadId);
+      await deleteRunner.close();
+      expect(processGroupExists(deletePid)).toBe(false);
+      expect(provider.requests).toHaveLength(2);
+      expect(
+        await removeCodexAppServerState({
+          stateRootKey: "fixture-session",
+          stateRootDirectory: stateRoot,
+        }),
+      ).toBe(true);
+      expect(Fs.existsSync(Path.join(stateRoot, "fixture-session"))).toBe(
+        false,
+      );
+      expect(await Fs.promises.readFile(siblingStateMarker, "utf8")).toBe(
+        "state-secret",
+      );
     },
     30_000,
   );

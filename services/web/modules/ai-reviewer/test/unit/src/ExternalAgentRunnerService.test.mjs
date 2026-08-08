@@ -87,8 +87,8 @@ function fakeRegistry() {
     async stop(key) {
       stops.push(key);
       const entry = entries.get(key);
-      entries.delete(key);
       await entry?.runner.close();
+      entries.delete(key);
     },
     async closeAll() {
       await Promise.all([...entries.keys()].map((key) => this.stop(key)));
@@ -110,6 +110,7 @@ function fakeHarness({ workspaceTurn } = {}) {
       closed: false,
       archives: [],
       unarchives: [],
+      deletes: [],
       hasThread(threadId) {
         return this.threads.has(threadId);
       },
@@ -118,6 +119,9 @@ function fakeHarness({ workspaceTurn } = {}) {
       },
       async unarchiveThread(threadId) {
         this.unarchives.push(threadId);
+      },
+      async deleteThread(threadId) {
+        this.deletes.push(threadId);
       },
       async measureStateBytes() {
         return 100 + id;
@@ -367,6 +371,170 @@ describe("external agent runner Unix socket", function () {
     ).toEqual({ stateBytes: 103 });
     expect(harness.runners[2].unarchives).toEqual([first.threadId]);
     expect(harness.runners[2].closed).toBe(true);
+  });
+
+  it("credentiallessly deletes a thread and only its verified state root", async function () {
+    const root = await temporaryRoot();
+    const harness = fakeHarness();
+    const { client, filename } = await start(root, harness);
+    const first = await client.turn(turnInput());
+    const active = harness.runners[0];
+    const stateRoot = Path.join(root, "state");
+    const sessionState = Path.join(stateRoot, "state-key-1");
+    const siblingState = Path.join(stateRoot, "sibling-state");
+    const outside = Path.join(root, "outside-state");
+    await Promise.all(
+      [stateRoot, sessionState, siblingState, outside].map(async (path) => {
+        await Fs.promises.mkdir(path, { recursive: true, mode: 0o700 });
+        await Fs.promises.chmod(path, 0o700);
+      }),
+    );
+    const siblingMarker = Path.join(siblingState, "keep");
+    const outsideMarker = Path.join(outside, "keep");
+    await Promise.all([
+      Fs.promises.writeFile(siblingMarker, "sibling"),
+      Fs.promises.writeFile(outsideMarker, "outside"),
+      Fs.promises.symlink(outsideMarker, Path.join(sessionState, "link")),
+    ]);
+
+    expect(
+      await client.purge({
+        stateRootKey: "state-key-1",
+        threadId: first.threadId,
+      }),
+    ).toEqual({});
+    const purgeRunner = harness.runners[1];
+    expect(active.closed).toBe(true);
+    expect(purgeRunner.options.destination).toBeUndefined();
+    expect(purgeRunner.deletes).toEqual([first.threadId]);
+    expect(purgeRunner.closed).toBe(true);
+    expect(await failureOf(Fs.promises.lstat(sessionState))).toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await Fs.promises.readFile(siblingMarker, "utf8")).toBe("sibling");
+    expect(await Fs.promises.readFile(outsideMarker, "utf8")).toBe("outside");
+
+    expect(
+      await client.purge({
+        stateRootKey: "state-key-1",
+        threadId: first.threadId,
+      }),
+    ).toEqual({});
+    expect(harness.runners).toHaveLength(2);
+
+    await Fs.promises.symlink(outside, Path.join(stateRoot, "linked-state"));
+    expect(
+      await failureOf(
+        client.purge({
+          stateRootKey: "linked-state",
+          threadId: first.threadId,
+        }),
+      ),
+    ).toMatchObject({
+      code: "AI_EXTERNAL_AGENT_RUNNER_FAILED",
+      message: "The external agent runner request failed.",
+    });
+    expect(harness.runners).toHaveLength(2);
+    expect(await Fs.promises.readFile(outsideMarker, "utf8")).toBe("outside");
+
+    for (const extra of [
+      { credential: "must-not-cross" },
+      { destination: turnInput().destination },
+      { path: "/var/lib/private" },
+    ]) {
+      const response = await rawRequest(
+        filename,
+        `${JSON.stringify({
+          operation: "purge",
+          stateRootKey: "state-key-1",
+          threadId: first.threadId,
+          ...extra,
+        })}\n`,
+      );
+      expect(JSON.parse(response)).toMatchObject({
+        ok: false,
+        error: { code: "AI_EXTERNAL_AGENT_RUNNER_FAILED" },
+      });
+      expect(response).not.toMatch(/must-not-cross|\/var\/lib\/private/iu);
+    }
+    expect(harness.runners).toHaveLength(2);
+  });
+
+  it("retries after thread deletion when state removal did not start", async function () {
+    const root = await temporaryRoot();
+    const harness = fakeHarness();
+    const createRunner = harness.runnerFactory;
+    let allowCleanup = false;
+    harness.runnerFactory = async (options) => {
+      const runner = await createRunner(options);
+      if (harness.runners.length === 1) {
+        runner.close = async function () {
+          if (!allowCleanup) {
+            throw new Error("cleanup confirmation failed");
+          }
+          runner.closed = true;
+        };
+      }
+      return runner;
+    };
+    const { client } = await start(root, harness);
+    const state = Path.join(root, "state", "state-key-1");
+    await Fs.promises.mkdir(state, { recursive: true, mode: 0o700 });
+
+    expect(
+      await failureOf(
+        client.purge({ stateRootKey: "state-key-1", threadId: "thread-1" }),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_AGENT_RUNNER_FAILED" });
+    expect(Fs.existsSync(state)).toBe(true);
+
+    expect(
+      await failureOf(
+        client.purge({
+          stateRootKey: "state-key-1",
+          threadId: "thread-1",
+        }),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_AGENT_RUNNER_FAILED" });
+    expect(harness.runners).toHaveLength(1);
+    expect(harness.registry.entries.size).toBe(1);
+    expect(Fs.existsSync(state)).toBe(true);
+
+    allowCleanup = true;
+    await harness.registry.stop("state-key-1");
+    expect(
+      await client.purge({ stateRootKey: "state-key-1", threadId: "thread-1" }),
+    ).toEqual({});
+    expect(harness.runners.map((runner) => runner.deletes)).toEqual([
+      ["thread-1"],
+      ["thread-1"],
+    ]);
+    expect(Fs.existsSync(state)).toBe(false);
+  });
+
+  it("purges a threadless session without starting an App Server", async function () {
+    const root = await temporaryRoot();
+    const harness = fakeHarness();
+    const { client } = await start(root, harness);
+
+    expect(
+      await failureOf(
+        client.purge({ stateRootKey: "never-started", threadId: null }),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_AGENT_RUNNER_FAILED" });
+    const stateRoot = Path.join(root, "state");
+    await Fs.promises.mkdir(stateRoot, { mode: 0o700 });
+    expect(
+      await client.purge({ stateRootKey: "never-started", threadId: null }),
+    ).toEqual({});
+    const state = Path.join(stateRoot, "threadless");
+    await Fs.promises.mkdir(state, { recursive: true, mode: 0o700 });
+    expect(
+      await client.purge({ stateRootKey: "threadless", threadId: null }),
+    ).toEqual({});
+
+    expect(harness.runners).toHaveLength(0);
+    expect(Fs.existsSync(state)).toBe(false);
   });
 
   it("retires an active Agent runner by state key only", async function () {

@@ -10,6 +10,8 @@ import {
   CODEX_APP_SERVER_WORK_ROOT,
   createCodexAppServerRegistry,
   createCodexAppServerRunner,
+  hasCodexAppServerState,
+  removeCodexAppServerState,
   runCodexAppServerWorkspaceTurn,
 } from "./CodexAppServerRunner.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
@@ -144,6 +146,14 @@ function request(value) {
       operation: "unarchive",
       stateRootKey: opaqueKey(value.stateRootKey),
       threadId: boundedString(value.threadId, "threadId", 500),
+    });
+  }
+  if (value.operation === "purge") {
+    exactKeys(value, ["operation", "stateRootKey", "threadId"]);
+    return Object.freeze({
+      operation: "purge",
+      stateRootKey: opaqueKey(value.stateRootKey),
+      threadId: optionalThreadId(value.threadId),
     });
   }
   throw new TypeError("The external agent runner operation is invalid.");
@@ -322,11 +332,16 @@ export async function listenExternalAgentRunnerService(options = {}) {
     if (input.operation === "archive" || input.operation === "unarchive") {
       await registry.stop(input.stateRootKey);
       if (signal.aborted) throw new Error("The runner request was cancelled.");
-      const runner = await runnerFactory({
-        stateRootKey: input.stateRootKey,
-        stateRootDirectory,
-        workRootDirectory,
-      });
+      const runner = await registry.acquire(
+        input.stateRootKey,
+        input.operation,
+        () =>
+          runnerFactory({
+            stateRootKey: input.stateRootKey,
+            stateRootDirectory,
+            workRootDirectory,
+          }),
+      );
       const onAbort = () => void runner.close().catch(() => {});
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -340,8 +355,41 @@ export async function listenExternalAgentRunnerService(options = {}) {
         return { stateBytes: await runner.measureStateBytes() };
       } finally {
         signal.removeEventListener("abort", onAbort);
-        await runner.close();
+        await registry.stop(input.stateRootKey);
       }
+    }
+    if (input.operation === "purge") {
+      await registry.stop(input.stateRootKey);
+      if (signal.aborted) throw new Error("The runner request was cancelled.");
+      const state = {
+        stateRootKey: input.stateRootKey,
+        stateRootDirectory,
+      };
+      if (!(await hasCodexAppServerState(state))) return {};
+      if (input.threadId != null) {
+        const runner = await registry.acquire(
+          input.stateRootKey,
+          input.operation,
+          () =>
+            runnerFactory({
+              stateRootKey: input.stateRootKey,
+              stateRootDirectory,
+              workRootDirectory,
+            }),
+        );
+        const onAbort = () => void runner.close().catch(() => {});
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          if (signal.aborted)
+            throw new Error("The runner request was cancelled.");
+          await runner.deleteThread(input.threadId);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+          await registry.stop(input.stateRootKey);
+        }
+      }
+      await removeCodexAppServerState(state);
+      return {};
     }
 
     const start = () =>
@@ -581,6 +629,12 @@ export class ExternalAgentRunnerClient {
       { ...input, operation: "unarchive" },
       options?.signal,
     );
+  }
+
+  /** @param {unknown} input @param {{ signal?: AbortSignal }} [options] */
+  async purge(input, options) {
+    if (!isRecord(input)) throw publicFailure();
+    return await this.#send({ ...input, operation: "purge" }, options?.signal);
   }
 
   /** @param {unknown} input */
