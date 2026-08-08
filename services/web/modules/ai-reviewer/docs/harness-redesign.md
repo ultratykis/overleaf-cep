@@ -405,25 +405,27 @@ suggestions, document paths or text, endpoint or model details. The same
 prohibition applies to HTML, audit records, metrics labels and ordinary logs.
 Identifiers needed to perform deletion remain internal to the worker.
 
-Every purge requires a dry run. The server stores the matching record ids and
-versions in a short-lived opaque plan but returns only the plan id, criteria,
-planned count and bytes, and expiry. Resolved state is the default; including
-active state requires a separate explicit confirmation. Inactivity and size
-criteria are server-defined coarse presets, not arbitrary numeric ranges; the
-admin cannot paginate, search or repeatedly bisect individual records through
-the aggregate API. Summary and dry-run requests are rate-limited. Execution
-rechecks record version, state and last activity, and skips anything reopened,
-updated, used for a new turn, or attached to a running process after the plan
-was made. The background job uses bounded batches, concurrency and a maximum
-item count. Its status and audit are aggregate-only.
+Every purge requires a dry run. Its ten-minute Express-session plan contains
+only criteria, creation time, count, bytes and an opaque nonce; it stores no
+matching identifiers. Active state requires the explicit phrase `PURGE ACTIVE`.
+Inactivity and size criteria are server-defined coarse presets, not arbitrary
+numeric ranges; there is no pagination, search or drill-down. Summary and purge
+requests are rate-limited.
 
-Successful live purge removes the App Server thread, its verified session state
-root and the Overleaf session record. Partial failures are quarantined without
-logging target identifiers. This does not retroactively remove copies from
-backups; backup retention and restore implications must be disclosed before
-confirmation. Issue 015 owns the detailed API, job, privacy and operations
-requirements. It is a production-adoption requirement, but its admin UI does
-not block the initial Review/Agent E2E proof.
+Execution re-runs the exact aggregate and returns 409 without deleting anything
+if count or bytes changed. It then uses the session store's existing Mongo CAS
+boundary to reject anything reopened, updated, claimed by a turn or otherwise
+changed. The first implementation intentionally runs at most ten candidates
+sequentially under one ten-second abort signal; anything remaining requires a
+new dry run. A durable executor is deferred unless a measured ten-item batch
+cannot fit the existing HTTP timeout.
+
+Successful live purge claims the record, deletes the App Server thread without
+provider credentials, removes the verified session state root, and finally
+deletes the Overleaf record. The claim itself writes the `purge_failed` fence so
+a crash or partial failure remains visible and retryable without logging target
+identifiers. This does not retroactively remove copies from backups; backup
+retention and restore implications are disclosed before confirmation.
 
 An Agent session pins its connection id and endpoint/model/provider fingerprint.
 Credential-value rotation is picked up when a process starts again. A changed
@@ -493,8 +495,36 @@ they conflict with the approved issue 014 implementation slice.
 
 This is a toolkit-test feasibility result, not a production-adoption decision.
 It does not claim Review-to-Agent fork, a Resolved-list UI, disk-watermark
-policy, administrator purge, production deployment, or another real-gateway
-request. Issue 015 and the production runner decision remain separate gates.
+policy, production deployment, or another real-gateway request. The issue 015
+outcome below closes the administrator-purge proof; the production runner
+decision remains separate.
+
+## Issue 015 toolkit-test outcome (2026-08-08)
+
+- Commits `f06c29078d` and `7e7d88695c` implement credentialless
+  `thread/delete`, verified state-root removal, the server-rendered aggregate
+  admin page, dedicated capability, fixed buckets, ten-minute dry run, CAS
+  execution, bounded synchronous batch, and aggregate-only audit.
+- Focused and regression tests passed 75 assertions, with the separate user
+  route registration check also passing. Selected ESLint, syntax and Pug
+  compilation checks passed.
+- Image `overleafcep/sharelatex:6.2.0-ai-agent-i015`
+  (`sha256:e7e892a876235ddc77302afa3910300b455ebcd0078372b24e472e412e669d3d`)
+  was deployed only to toolkit-test. The dedicated runner remained network
+  isolated, read-only and credential-free.
+- The admin HTML showed only the expected aggregates and rejected unauthenticated
+  and non-admin access. Missing CSRF returned 403, a changed confirmation count
+  returned 400 without consuming the plan, and replay of the consumed plan also
+  returned 400.
+- The fixed `resolved / 90d / any` dry run planned two dedicated fixtures and
+  3,721,580 bytes. Confirmation completed in 2.43 seconds with planned, matched
+  and deleted values equal; recovered, skipped, failed and remaining were all
+  zero.
+- The eight non-target records and non-target state had identical before/after
+  digests. Exactly two state roots disappeared, workspaces and App Server child
+  processes were zero, recorder requests were zero, and the three audit entries
+  contained aggregate fields only. Production remained on i007. Image rollback
+  does not restore the two purged toolkit-test fixtures.
 
 ## Architecture questions after the spike
 
@@ -515,7 +545,8 @@ request. Issue 015 and the production runner decision remain separate gates.
    reversible archive/unarchive and no hard delete. Storage recovery is a
    separate aggregate-only, site-admin purge with mandatory dry-run, race-safe
    batch execution and no per-session disclosure. Remaining work is to set the
-   disk watermark/operator alert threshold and purge batch limits, not a
+   disk watermark/operator alert threshold and to revisit the synchronous batch
+   only if a measured ten-item run cannot fit the HTTP timeout, not a
    retention-window decision.
 7. **Failure budget**: how the existing circuit breaker wraps runner-level
    retries and provider discovery rather than being bypassed by them.
