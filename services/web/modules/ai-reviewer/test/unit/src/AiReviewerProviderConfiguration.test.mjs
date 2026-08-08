@@ -3768,7 +3768,7 @@ describe("AI reviewer provider configuration", function () {
     },
   );
 
-  it("uses the just-saved configuration for selection reads across the project", async function () {
+  it("keeps selection reads working when another project file is oversized", async function () {
     const { modelDependency, records } = inMemoryModel();
     const configStore = createAiReviewerProviderConfigStore({
       model: modelDependency,
@@ -3806,6 +3806,11 @@ describe("AI reviewer provider configuration", function () {
         _id: "document-provider-0002",
         version: 3,
         lines: ["Appendix"],
+      },
+      "/acmart.dtx": {
+        _id: "document-provider-oversized",
+        version: 1,
+        lines: ["x".repeat(200_001)],
       },
     }));
     const requestScopeReader = createRequestScopeReader({
@@ -3855,6 +3860,12 @@ describe("AI reviewer provider configuration", function () {
         revision: 9,
         textHash: expect.any(String),
         text: "Full",
+        fileExclusions: [
+          expect.objectContaining({
+            path: "acmart.dtx",
+            reason: "document-too-large",
+          }),
+        ],
       },
       {
         path: "other.tex",
@@ -4115,6 +4126,7 @@ Cite \cite{missing}`;
     const reads = [];
     const searches = [];
     let capturedContext;
+    let excludedRead;
     const transport = {
       createAgentGateway: vi.fn(
         ({
@@ -4145,6 +4157,12 @@ Cite \cite{missing}`;
                 { request: agentRequest, signal },
               ),
             );
+            excludedRead = await captureError(
+              readProjectFile(
+                { path: "acmart.dtx" },
+                { request: agentRequest, signal },
+              ),
+            );
             searches.push(
               await searchZotero(
                 { query: "Synthetic 2026" },
@@ -4171,6 +4189,11 @@ Cite \cite{missing}`;
         _id: "document-provider-section",
         version: 2,
         lines: [String.raw`\section{Synthetic}`],
+      },
+      "/acmart.dtx": {
+        _id: "document-provider-oversized",
+        version: 1,
+        lines: ["x".repeat(200_001)],
       },
     }));
     const searchZoteroItems = vi.fn(async () => [
@@ -4210,7 +4233,11 @@ Cite \cite{missing}`;
     );
     expect(JSON.stringify(capturedContext)).not.toContain(mainText);
     expect(capturedContext).toMatchObject({
-      summary: { fileCount: 2, relationshipCount: 3 },
+      summary: {
+        fileCount: 2,
+        fileExclusionCount: 1,
+        relationshipCount: 3,
+      },
       files: [
         { path: "main.tex", textLength: mainText.length },
         {
@@ -4218,6 +4245,20 @@ Cite \cite{missing}`;
           textLength: String.raw`\section{Synthetic}`.length,
         },
       ],
+      fileExclusions: [
+        {
+          path: "acmart.dtx",
+          reason: "document-too-large",
+          textLength: 200_001,
+          maxTextLength: 200_000,
+        },
+      ],
+    });
+    expect(excludedRead).toMatchObject({
+      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+      message: expect.stringContaining(
+        '"acmart.dtx" was excluded because it has 200001 characters',
+      ),
     });
     expect(reads).toEqual([
       {
@@ -4241,7 +4282,13 @@ Cite \cite{missing}`;
         },
       ],
     ]);
-    expect(parseNdjson(response)).toEqual(streamEvents());
+    expect(parseNdjson(response)).toEqual(
+      streamEvents().map((event) =>
+        event.type === "completed"
+          ? { ...event, contextTruncated: true }
+          : event,
+      ),
+    );
   });
 
   it("does not hold a project conversation to the review read-coverage rule", async function () {
