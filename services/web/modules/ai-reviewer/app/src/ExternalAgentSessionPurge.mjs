@@ -15,15 +15,35 @@ function assertPurgeClaim(claim) {
   }
 }
 
+export class AiReviewerExternalAgentSessionPurgeError extends Error {
+  /** @param {unknown} cause */
+  constructor(cause) {
+    super("The external AI reviewer session purge failed.", { cause });
+    this.name = "AiReviewerExternalAgentSessionPurgeError";
+  }
+}
+
+async function finalizeFailedPurge(sessionStore, claimed) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await sessionStore.finalize({ ...claimed, type: "purge" });
+      return;
+    } catch (error) {
+      if (attempt === 1) throw error;
+    }
+  }
+}
+
 /**
  * Internal destructive boundary. No user route calls this function.
  *
- * @param {{ session: any, sessionStore: any, runnerClient: any }} input
+ * @param {{ session: any, sessionStore: any, runnerClient: any, signal?: AbortSignal }} input
  */
 export async function purgeExternalAgentSession({
   session,
   sessionStore,
   runnerClient,
+  signal,
 }) {
   const scope = {
     userId: session?.userId,
@@ -45,10 +65,13 @@ export async function purgeExternalAgentSession({
     expectedRevision: claim.revision,
   };
   try {
-    await runnerClient.purge({
-      stateRootKey: claim.stateRootKey,
-      threadId: claim.threadId,
-    });
+    await runnerClient.purge(
+      {
+        stateRootKey: claim.stateRootKey,
+        threadId: claim.threadId,
+      },
+      { signal },
+    );
     await sessionStore.deleteClaimedPurge({
       ...claimed,
       expectedStatus: claim.status,
@@ -57,7 +80,7 @@ export async function purgeExternalAgentSession({
       stateRootKey: claim.stateRootKey,
     });
   } catch (error) {
-    await sessionStore.finalize({ ...claimed, type: "purge" }).catch(() => {});
-    throw error;
+    await finalizeFailedPurge(sessionStore, claimed).catch(() => {});
+    throw new AiReviewerExternalAgentSessionPurgeError(error);
   }
 }

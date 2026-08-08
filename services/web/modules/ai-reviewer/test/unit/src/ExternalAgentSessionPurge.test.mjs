@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { purgeExternalAgentSession } from "../../../app/src/ExternalAgentSessionPurge.mjs";
+import {
+  AiReviewerExternalAgentSessionPurgeError,
+  purgeExternalAgentSession,
+} from "../../../app/src/ExternalAgentSessionPurge.mjs";
 
 const session = Object.freeze({
   userId: "000000000000000000000001",
@@ -15,8 +18,10 @@ const session = Object.freeze({
 
 function fixture({ candidate = session, failAt, failFinalize = false } = {}) {
   const calls = [];
+  let finalizeAttempts = 0;
   const claim = {
     ...candidate,
+    status: "purge_failed",
     revision: 7,
     operationClaim: { id: "purge-claim-1", type: "purge" },
   };
@@ -33,7 +38,13 @@ function fixture({ candidate = session, failAt, failFinalize = false } = {}) {
     }),
     finalize: vi.fn(async (input) => {
       calls.push(["purge-failed", input]);
-      if (failFinalize) throw new Error("fixed finalize failure");
+      finalizeAttempts += 1;
+      if (
+        failFinalize === true ||
+        (failFinalize === "once" && finalizeAttempts === 1)
+      ) {
+        throw new Error("fixed finalize failure");
+      }
     }),
   };
   const runnerClient = {
@@ -81,17 +92,20 @@ describe("ExternalAgentSessionPurge", function () {
       expectedLastActivityAt: session.lastActivityAt,
       expectedThreadId: session.threadId,
     });
-    expect(state.runnerClient.purge).toHaveBeenCalledWith({
-      stateRootKey: session.stateRootKey,
-      threadId: session.threadId,
-    });
+    expect(state.runnerClient.purge).toHaveBeenCalledWith(
+      {
+        stateRootKey: session.stateRootKey,
+        threadId: session.threadId,
+      },
+      { signal: undefined },
+    );
     expect(state.sessionStore.deleteClaimedPurge).toHaveBeenCalledWith({
       userId: session.userId,
       projectId: session.projectId,
       clientSessionId: session.clientSessionId,
       claimId: "purge-claim-1",
       expectedRevision: 7,
-      expectedStatus: session.status,
+      expectedStatus: "purge_failed",
       expectedLastActivityAt: session.lastActivityAt,
       expectedThreadId: session.threadId,
       stateRootKey: session.stateRootKey,
@@ -104,15 +118,15 @@ describe("ExternalAgentSessionPurge", function () {
     async function (failAt) {
       const state = fixture({ failAt, failFinalize: true });
 
-      expect(
-        await failureOf(
-          purgeExternalAgentSession({
-            session,
-            sessionStore: state.sessionStore,
-            runnerClient: state.runnerClient,
-          }),
-        ),
-      ).toBe(state.failure);
+      const error = await failureOf(
+        purgeExternalAgentSession({
+          session,
+          sessionStore: state.sessionStore,
+          runnerClient: state.runnerClient,
+        }),
+      );
+      expect(error).toBeInstanceOf(AiReviewerExternalAgentSessionPurgeError);
+      expect(error.cause).toBe(state.failure);
 
       expect(state.calls.at(-1)).toEqual([
         "purge-failed",
@@ -128,8 +142,25 @@ describe("ExternalAgentSessionPurge", function () {
       expect(state.sessionStore.deleteClaimedPurge).toHaveBeenCalledTimes(
         failAt === "delete-record" ? 1 : 0,
       );
+      expect(state.sessionStore.finalize).toHaveBeenCalledTimes(2);
     },
   );
+
+  it("retries one transient purge_failed finalization", async function () {
+    const state = fixture({ failAt: "runner-purge", failFinalize: "once" });
+
+    const error = await failureOf(
+      purgeExternalAgentSession({
+        session,
+        sessionStore: state.sessionStore,
+        runnerClient: state.runnerClient,
+      }),
+    );
+
+    expect(error).toBeInstanceOf(AiReviewerExternalAgentSessionPurgeError);
+    expect(error.cause).toBe(state.failure);
+    expect(state.sessionStore.finalize).toHaveBeenCalledTimes(2);
+  });
 
   it("does not reach the runner when the CAS claim loses", async function () {
     const state = fixture({ failAt: "claim" });
@@ -157,9 +188,12 @@ describe("ExternalAgentSessionPurge", function () {
       runnerClient: state.runnerClient,
     });
 
-    expect(state.runnerClient.purge).toHaveBeenCalledWith({
-      stateRootKey: candidate.stateRootKey,
-      threadId: null,
-    });
+    expect(state.runnerClient.purge).toHaveBeenCalledWith(
+      {
+        stateRootKey: candidate.stateRootKey,
+        threadId: null,
+      },
+      { signal: undefined },
+    );
   });
 });

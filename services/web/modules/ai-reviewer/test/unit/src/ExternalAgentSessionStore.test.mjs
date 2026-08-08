@@ -46,6 +46,9 @@ function matchesValue(actual, expected) {
     if (Object.hasOwn(expected, "$ne")) {
       return actual !== expected.$ne;
     }
+    if (Object.hasOwn(expected, "$lte")) {
+      return actual <= expected.$lte;
+    }
   }
   return actual === expected;
 }
@@ -437,6 +440,7 @@ describe("ExternalAgentSessionStore", function () {
     }
     const claim = await store.claim(operationInput(session, "purge"));
     expect(claim).toMatchObject({
+      status: "purge_failed",
       revision: 3,
       operationClaim: { type: "purge" },
     });
@@ -445,11 +449,12 @@ describe("ExternalAgentSessionStore", function () {
       await captureError(store.claim(operationInput(claim, "resolve"))),
     ).toBeInstanceOf(AiReviewerExternalAgentSessionConflictError);
 
-    session = await store.finalize({
+    const finalizeInput = {
       ...operationInput(claim, "purge"),
       claimId: claim.operationClaim.id,
       stateBytes: 80,
-    });
+    };
+    session = await store.finalize(finalizeInput);
     expect(session).toMatchObject({
       status: "purge_failed",
       stateBytes: 80,
@@ -457,6 +462,11 @@ describe("ExternalAgentSessionStore", function () {
       operationClaim: null,
     });
     expect(session.lastActivityAt).toEqual(lastUserActivity);
+    expect(await store.finalize(finalizeInput)).toMatchObject({
+      status: "purge_failed",
+      revision: 4,
+      operationClaim: null,
+    });
 
     const retry = await store.claim(operationInput(session, "purge"));
     expect(retry).toMatchObject({
@@ -505,6 +515,7 @@ describe("ExternalAgentSessionStore", function () {
 
     expect(claim).toMatchObject({
       threadId: null,
+      status: "purge_failed",
       revision: 1,
       operationClaim: { type: "purge" },
     });
@@ -522,5 +533,53 @@ describe("ExternalAgentSessionStore", function () {
     expect(await captureError(store.load(sessionInput()))).toBeInstanceOf(
       AiReviewerExternalAgentSessionNotFoundError,
     );
+  });
+
+  it("recovers only a stale purge claim and fences the old delete", async function () {
+    const { store } = fixture();
+    const session = await finishFirstTurn(
+      store,
+      await store.create(sessionInput()),
+    );
+    const claim = await store.claim(operationInput(session, "purge"));
+    const oldDelete = {
+      userId: claim.userId,
+      projectId: claim.projectId,
+      clientSessionId: claim.clientSessionId,
+      claimId: claim.operationClaim.id,
+      expectedRevision: claim.revision,
+      expectedStatus: claim.status,
+      expectedLastActivityAt: claim.lastActivityAt,
+      expectedThreadId: claim.threadId,
+      stateRootKey: claim.stateRootKey,
+    };
+    const staleAt = new Date(
+      claim.operationClaim.claimedAt.getTime() + 10 * 60 * 1_000,
+    );
+
+    expect(
+      await captureError(
+        store.recoverStalePurgeClaim({
+          session: claim,
+          plannedAt: new Date(staleAt.getTime() - 1),
+        }),
+      ),
+    ).toBeInstanceOf(AiReviewerExternalAgentSessionConflictError);
+
+    const recovered = await store.recoverStalePurgeClaim({
+      session: claim,
+      plannedAt: staleAt,
+    });
+    expect(recovered).toMatchObject({
+      status: "purge_failed",
+      revision: claim.revision + 1,
+      operationClaim: null,
+    });
+    expect(
+      await captureError(store.deleteClaimedPurge(oldDelete)),
+    ).toBeInstanceOf(AiReviewerExternalAgentSessionConflictError);
+
+    const retry = await store.claim(operationInput(recovered, "purge"));
+    expect(retry.operationClaim).toMatchObject({ type: "purge" });
   });
 });

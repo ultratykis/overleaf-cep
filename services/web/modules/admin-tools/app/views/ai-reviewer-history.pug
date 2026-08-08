@@ -1,0 +1,153 @@
+extends ../../../../app/views/layout-marketing
+
+block content
+	main#main-content.content.content-alt
+		.container
+			.row
+				.col-md-10.col-md-offset-1
+					.card
+						.card-body
+							.page-header
+								h1 AI history storage
+								p
+									a(href="/admin") Back to Admin Panel
+
+								p Only aggregate counts and stored bytes are shown. Active operations are counted but cannot be purged; abandoned purge claims are recovered without repeating deletion.
+							.alert.alert-danger(role="alert")
+								strong Purging is irreversible in live storage.
+								|
+								| Copies may remain in backups until the configured backup retention period expires.
+							p At most 10 sessions are purged per confirmation. Run a new dry run for anything remaining.
+
+							h2.h3 Current aggregate buckets
+							- const statusLabels = Object.fromEntries(options.statuses.map((option) => [option.value, option.label]));
+							- const inactivityLabels = Object.fromEntries(options.inactivity.map((option) => [option.value, option.label]));
+							- const sizeLabels = Object.fromEntries(options.minimumSize.map((option) => [option.value, option.label]));
+
+							h3.h4 Status
+							table.table.table-striped
+								thead
+									tr
+										th(scope="col") Bucket
+										th(scope="col") Count
+										th(scope="col") Bytes
+								tbody
+									each bucket in summary.statuses
+										tr
+											td= statusLabels[bucket.key]
+											td= bucket.count
+											td= bucket.bytes
+
+							h3.h4 Inactivity (cumulative)
+							table.table.table-striped
+								thead
+									tr
+										th(scope="col") Bucket
+										th(scope="col") Count
+										th(scope="col") Bytes
+								tbody
+									each bucket in summary.inactivity
+										tr
+											td= inactivityLabels[bucket.key]
+											td= bucket.count
+											td= bucket.bytes
+
+							h3.h4 Minimum size (cumulative)
+							table.table.table-striped
+								thead
+									tr
+										th(scope="col") Bucket
+										th(scope="col") Count
+										th(scope="col") Bytes
+								tbody
+									each bucket in summary.minimumSize
+										tr
+											td= sizeLabels[bucket.key]
+											td= bucket.count
+											td= bucket.bytes
+
+							hr
+							h2.h3 Purge dry run
+							form(method="post", action="/admin/ai-reviewer/history/dry-run")
+								input(name="_csrf", type="hidden", value=csrfToken)
+								.form-group
+									label.form-label(for="purge-status") Status
+									select#purge-status.form-control(name="status", required)
+										each option in options.statuses
+											option(
+												value=option.value,
+												selected=plan && plan.criteria.status === option.value
+											)= option.label
+								.form-group
+									label.form-label(for="purge-inactivity") Inactivity
+									select#purge-inactivity.form-control(name="inactivity", required)
+										each option in options.inactivity
+											option(
+												value=option.value,
+												selected=plan && plan.criteria.inactivity === option.value
+											)= option.label
+								.form-group
+									label.form-label(for="purge-size") Minimum stored size
+									select#purge-size.form-control(name="minimumSize", required)
+										each option in options.minimumSize
+											option(
+												value=option.value,
+												selected=plan && plan.criteria.minimumSize === option.value
+											)= option.label
+								button.btn.btn-secondary(type="submit") Dry run
+
+							if plan
+								hr
+								h2.h3 Dry-run plan
+								p Planned count: #[strong= plan.count]
+								p Planned bytes: #[strong= plan.bytes]
+								p This plan expires 10 minutes after it was created.
+								if plan.count > 0
+									- const confirmation = plan.criteria.status === "active" ? "PURGE ACTIVE" : "PURGE";
+									form(method="post", action="/admin/ai-reviewer/history/purge")
+										input(name="_csrf", type="hidden", value=csrfToken)
+										input(name="nonce", type="hidden", value=plan.nonce)
+										input(name="count", type="hidden", value=plan.count)
+										input(name="bytes", type="hidden", value=plan.bytes)
+										.form-group
+											label.form-label(for="purge-confirmation") Type #{ confirmation } to confirm
+											input#purge-confirmation.form-control(
+												name="confirmation",
+												type="text",
+												autocomplete="off",
+												required
+											)
+										button.btn.btn-danger(type="submit") Permanently purge this batch
+								else
+									p No sessions match this plan.
+
+							if result
+								hr
+								h2.h3 Purge result
+								if result.outcome === "stale"
+									.alert.alert-warning(role="alert") The aggregate changed after the dry run. Nothing was purged; run a new dry run.
+								table.table.table-striped
+									tbody
+										tr
+											th(scope="row") Planned
+											td #{ result.plannedCount } sessions / #{ result.plannedBytes } bytes
+										tr
+											th(scope="row") Matched at execute
+											td #{ result.matchedCount } sessions / #{ result.matchedBytes } bytes
+										tr
+											th(scope="row") Deleted
+											td #{ result.deletedCount } sessions / #{ result.deletedBytes } bytes
+										tr
+											th(scope="row") Recovered for retry
+											td= result.recoveredCount
+										tr
+											th(scope="row") Skipped
+											td= result.skippedCount
+										tr
+											th(scope="row") Failed
+											td= result.failedCount
+										tr
+											th(scope="row") Remaining
+											td #{ result.remainingCount } sessions / #{ result.remainingBytes } bytes
+								if result.remainingCount > 0
+									p Run a new dry run before attempting another batch.

@@ -1,4 +1,5 @@
 export type AdminCapability =
+  | 'ai-reviewer-history-purge'
   | 'clear-saml-data'
   | 'clear-session'
   | 'create-recurly-account'

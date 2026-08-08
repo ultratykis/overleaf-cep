@@ -7,10 +7,44 @@ import { AiReviewerExternalAgentSession as AiReviewerExternalAgentSessionModel }
 /** @typedef {"review" | "agent"} SessionMode */
 /** @typedef {"turn" | "resolve" | "reopen" | "purge"} OperationType */
 /** @typedef {"active" | "resolved" | "purge_failed"} SessionStatus */
+/** @typedef {{ status: SessionStatus, inactivity: "90d" | "180d" | "365d", minimumSize: "any" | "10mib" | "100mib" | "1gib" }} PurgeCriteria */
 
 const MODES = new Set(["review", "agent"]);
 const OPERATION_TYPES = new Set(["turn", "resolve", "reopen", "purge"]);
 const STATUSES = new Set(["active", "resolved", "purge_failed"]);
+export const EXTERNAL_AGENT_PURGE_OPTIONS = Object.freeze({
+  statuses: Object.freeze(["active", "resolved", "purge_failed"]),
+  inactivity: Object.freeze(["90d", "180d", "365d"]),
+  minimumSize: Object.freeze(["any", "10mib", "100mib", "1gib"]),
+});
+const DAY_MS = 24 * 60 * 60 * 1_000;
+export const EXTERNAL_AGENT_STALE_PURGE_CLAIM_MS = 10 * 60 * 1_000;
+const INACTIVITY_MS = Object.freeze({
+  "90d": 90 * DAY_MS,
+  "180d": 180 * DAY_MS,
+  "365d": 365 * DAY_MS,
+});
+const MINIMUM_SIZE_BYTES = Object.freeze({
+  any: 0,
+  "10mib": 10 * 1024 * 1024,
+  "100mib": 100 * 1024 * 1024,
+  "1gib": 1024 * 1024 * 1024,
+});
+const PURGE_PROJECTION = Object.freeze({
+  _id: 1,
+  userId: 1,
+  projectId: 1,
+  clientSessionId: 1,
+  mode: 1,
+  threadId: 1,
+  stateRootKey: 1,
+  connectionFingerprint: 1,
+  status: 1,
+  lastActivityAt: 1,
+  stateBytes: 1,
+  revision: 1,
+  operationClaim: 1,
+});
 const CLAIMABLE_STATUS = Object.freeze({
   turn: "active",
   resolve: "active",
@@ -125,7 +159,7 @@ function nonNegativeSafeInteger(value) {
 
 /**
  * @param {unknown} value
- * @param {1 | 2} remainingIncrements
+ * @param {1 | 2 | 3} remainingIncrements
  */
 function incrementableRevision(value, remainingIncrements) {
   const revision = nonNegativeSafeInteger(value);
@@ -148,6 +182,95 @@ function date(value) {
 /** @param {unknown} value */
 function nullableThreadId(value) {
   return value == null ? null : boundedIdentifier(value);
+}
+
+/** @param {unknown} value @returns {PurgeCriteria} */
+function purgeCriteria(value) {
+  if (
+    typeof value !== "object" ||
+    value == null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 3 ||
+    !Object.hasOwn(value, "status") ||
+    !Object.hasOwn(value, "inactivity") ||
+    !Object.hasOwn(value, "minimumSize")
+  ) {
+    throw new AiReviewerExternalAgentSessionValidationError();
+  }
+  const input = /** @type {any} */ (value);
+  const checkedStatus = status(input.status);
+  if (
+    !Object.hasOwn(INACTIVITY_MS, input.inactivity) ||
+    !Object.hasOwn(MINIMUM_SIZE_BYTES, input.minimumSize)
+  ) {
+    throw new AiReviewerExternalAgentSessionValidationError();
+  }
+  return {
+    status: checkedStatus,
+    inactivity: input.inactivity,
+    minimumSize: input.minimumSize,
+  };
+}
+
+/** @param {unknown} value */
+function aggregateValue(value) {
+  if (!Array.isArray(value) || value.length > 1) {
+    throw new AiReviewerExternalAgentSessionValidationError();
+  }
+  if (value.length === 0) return { count: 0, bytes: 0 };
+  return {
+    count: nonNegativeSafeInteger(value[0]?.count),
+    bytes: nonNegativeSafeInteger(value[0]?.bytes),
+  };
+}
+
+/** @param {unknown} value */
+function statusAggregate(value) {
+  if (!Array.isArray(value)) {
+    throw new AiReviewerExternalAgentSessionValidationError();
+  }
+  const totals = new Map();
+  for (const row of value) {
+    const key = status(row?._id);
+    if (totals.has(key)) {
+      throw new AiReviewerExternalAgentSessionValidationError();
+    }
+    totals.set(key, {
+      count: nonNegativeSafeInteger(row?.count),
+      bytes: nonNegativeSafeInteger(row?.bytes),
+    });
+  }
+  return EXTERNAL_AGENT_PURGE_OPTIONS.statuses.map((key) => ({
+    key,
+    ...(totals.get(key) ?? { count: 0, bytes: 0 }),
+  }));
+}
+
+/** @param {PurgeCriteria} criteria @param {Date} plannedAt */
+function purgeFilter(criteria, plannedAt) {
+  const minimumSize = MINIMUM_SIZE_BYTES[criteria.minimumSize];
+  return {
+    ...(criteria.status === "purge_failed"
+      ? {
+          $or: [
+            { operationClaim: null },
+            {
+              "operationClaim.type": "purge",
+              "operationClaim.claimedAt": {
+                $lte: new Date(
+                  plannedAt.getTime() - EXTERNAL_AGENT_STALE_PURGE_CLAIM_MS,
+                ),
+              },
+            },
+          ],
+        }
+      : { operationClaim: null }),
+    status: criteria.status,
+    lastActivityAt: {
+      $lte: new Date(plannedAt.getTime() - INACTIVITY_MS[criteria.inactivity]),
+    },
+    ...(minimumSize === 0 ? {} : { stateBytes: { $gte: minimumSize } }),
+  };
 }
 
 /**
@@ -352,6 +475,133 @@ export function createExternalAgentSessionStore({
     },
 
     /**
+     * Return only fixed aggregate buckets; never return session records.
+     * @param {{ at: unknown }} input
+     */
+    async summarizeForPurge({ at }) {
+      const summaryAt = date(at);
+      /** @param {number} days */
+      const cutoff = (days) => new Date(summaryAt.getTime() - days * DAY_MS);
+      const totals = [
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            bytes: { $sum: "$stateBytes" },
+          },
+        },
+        { $project: { _id: 0, count: 1, bytes: 1 } },
+      ];
+      const [result] = await model
+        .aggregate([
+          {
+            $facet: {
+              statuses: [
+                {
+                  $group: {
+                    _id: "$status",
+                    count: { $sum: 1 },
+                    bytes: { $sum: "$stateBytes" },
+                  },
+                },
+              ],
+              inactivity90d: [
+                { $match: { lastActivityAt: { $lte: cutoff(90) } } },
+                ...totals,
+              ],
+              inactivity180d: [
+                { $match: { lastActivityAt: { $lte: cutoff(180) } } },
+                ...totals,
+              ],
+              inactivity365d: [
+                { $match: { lastActivityAt: { $lte: cutoff(365) } } },
+                ...totals,
+              ],
+              sizeAny: [...totals],
+              size10mib: [
+                {
+                  $match: { stateBytes: { $gte: MINIMUM_SIZE_BYTES["10mib"] } },
+                },
+                ...totals,
+              ],
+              size100mib: [
+                {
+                  $match: {
+                    stateBytes: { $gte: MINIMUM_SIZE_BYTES["100mib"] },
+                  },
+                },
+                ...totals,
+              ],
+              size1gib: [
+                {
+                  $match: { stateBytes: { $gte: MINIMUM_SIZE_BYTES["1gib"] } },
+                },
+                ...totals,
+              ],
+            },
+          },
+        ])
+        .exec();
+      return {
+        statuses: statusAggregate(result?.statuses ?? []),
+        inactivity: [
+          { key: "90d", ...aggregateValue(result?.inactivity90d ?? []) },
+          { key: "180d", ...aggregateValue(result?.inactivity180d ?? []) },
+          { key: "365d", ...aggregateValue(result?.inactivity365d ?? []) },
+        ],
+        minimumSize: [
+          { key: "any", ...aggregateValue(result?.sizeAny ?? []) },
+          { key: "10mib", ...aggregateValue(result?.size10mib ?? []) },
+          { key: "100mib", ...aggregateValue(result?.size100mib ?? []) },
+          { key: "1gib", ...aggregateValue(result?.size1gib ?? []) },
+        ],
+      };
+    },
+
+    /** @param {{ criteria: unknown, plannedAt: unknown }} input */
+    async previewPurge(input) {
+      const criteria = purgeCriteria(input.criteria);
+      const plannedAt = date(input.plannedAt);
+      const rows = await model
+        .aggregate([
+          { $match: purgeFilter(criteria, plannedAt) },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              bytes: { $sum: "$stateBytes" },
+            },
+          },
+          { $project: { _id: 0, count: 1, bytes: 1 } },
+        ])
+        .exec();
+      return aggregateValue(rows);
+    },
+
+    /**
+     * Load at most one synchronous purge batch for internal execution.
+     * @param {{ criteria: unknown, plannedAt: unknown }} input
+     */
+    async loadPurgeBatch({
+      criteria: inputCriteria,
+      plannedAt: inputPlannedAt,
+    }) {
+      const criteria = purgeCriteria(inputCriteria);
+      const plannedAt = date(inputPlannedAt);
+      const records = await model
+        .find(purgeFilter(criteria, plannedAt), PURGE_PROJECTION)
+        .sort({ lastActivityAt: 1, _id: 1 })
+        .limit(10)
+        .read("primary")
+        .lean()
+        .exec();
+      if (!Array.isArray(records)) {
+        throw new AiReviewerExternalAgentSessionValidationError();
+      }
+      return records.map((record) => storedSession(record, scope(record)));
+    },
+
+    /**
      * @param {{
      *   userId: unknown,
      *   projectId: unknown,
@@ -425,7 +675,9 @@ export function createExternalAgentSessionStore({
           {
             $set: {
               operationClaim,
-              ...(type === "purge" ? {} : { lastActivityAt: claimedAt }),
+              ...(type === "purge"
+                ? { status: "purge_failed" }
+                : { lastActivityAt: claimedAt }),
             },
             $inc: { revision: 1 },
           },
@@ -436,7 +688,57 @@ export function createExternalAgentSessionStore({
     },
 
     /**
-     * Finalizing `purge` records a partial purge failure. Successful hard
+     * Normalize an abandoned purge claim without repeating external deletion.
+     * A later dry run can purge the resulting `purge_failed` session normally.
+     *
+     * @param {{ session: any, plannedAt: unknown }} input
+     */
+    async recoverStalePurgeClaim({ session, plannedAt: inputPlannedAt }) {
+      const checkedScope = scope(session);
+      const expectedRevision = incrementableRevision(session?.revision, 3);
+      const expectedStatus = status(session?.status);
+      const expectedLastActivityAt = date(session?.lastActivityAt);
+      const expectedThreadId = nullableThreadId(session?.threadId);
+      const expectedStateRootKey = opaqueKey(session?.stateRootKey);
+      const claimId = opaqueKey(session?.operationClaim?.id);
+      const claimType = operationType(session?.operationClaim?.type);
+      date(session?.operationClaim?.claimedAt);
+      const plannedAt = date(inputPlannedAt);
+      if (expectedStatus !== "purge_failed" || claimType !== "purge") {
+        throw new AiReviewerExternalAgentSessionValidationError();
+      }
+      const record = await lean(
+        model.findOneAndUpdate(
+          {
+            _id: checkedScope.scopeId,
+            userId: checkedScope.userId,
+            projectId: checkedScope.projectId,
+            clientSessionId: checkedScope.clientSessionId,
+            revision: expectedRevision,
+            status: expectedStatus,
+            lastActivityAt: expectedLastActivityAt,
+            threadId: expectedThreadId,
+            stateRootKey: expectedStateRootKey,
+            "operationClaim.id": claimId,
+            "operationClaim.type": "purge",
+            "operationClaim.claimedAt": {
+              $lte: new Date(
+                plannedAt.getTime() - EXTERNAL_AGENT_STALE_PURGE_CLAIM_MS,
+              ),
+            },
+          },
+          {
+            $set: { operationClaim: null, status: "purge_failed" },
+            $inc: { revision: 1 },
+          },
+          { new: true, runValidators: true },
+        ),
+      );
+      return storedSession(record, checkedScope) ?? failedCas(checkedScope);
+    },
+
+    /**
+     * Finalizing `purge` clears its write-ahead failure fence. Successful hard
      * deletion remains outside the user-facing Gate 2 store API.
      *
      * @param {{
@@ -500,7 +802,26 @@ export function createExternalAgentSessionStore({
           { new: true, runValidators: true },
         ),
       );
-      return storedSession(record, checkedScope) ?? failedCas(checkedScope);
+      const finalized = storedSession(record, checkedScope);
+      if (finalized != null) return finalized;
+      if (type === "purge") {
+        const alreadyFinalized = storedSession(
+          await lean(
+            model.findOne({
+              _id: checkedScope.scopeId,
+              userId: checkedScope.userId,
+              projectId: checkedScope.projectId,
+              clientSessionId: checkedScope.clientSessionId,
+              revision: expectedRevision + 1,
+              status: "purge_failed",
+              operationClaim: null,
+            }),
+          ),
+          checkedScope,
+        );
+        if (alreadyFinalized != null) return alreadyFinalized;
+      }
+      return failedCas(checkedScope);
     },
 
     /**

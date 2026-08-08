@@ -10,6 +10,8 @@ block content
 						.card-body
 							.page-header
 								h1 Admin Panel
+								if hasAdminCapability('ai-reviewer-history-purge', false)
+									a.btn.btn-secondary(href='/admin/ai-reviewer/history') AI history storage
 							.ol-tabs(data-ol-bookmarkable-tabset)
 								.nav-tabs-container
 									ul.nav.nav-tabs.align-left(role='tablist')

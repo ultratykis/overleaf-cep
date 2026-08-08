@@ -2,8 +2,39 @@ import logger from '@overleaf/logger'
 import UserListController from './UserListController.mjs'
 import ProjectListController from './ProjectListController.mjs'
 import AdminToolsController from './AdminToolsController.mjs'
+import AiReviewerHistoryAdminController from './AiReviewerHistoryAdminController.mjs'
 import AuthorizationMiddleware from '../../../../app/src/Features/Authorization/AuthorizationMiddleware.mjs'
 import AuthenticationController from '../../../../app/src/Features/Authentication/AuthenticationController.mjs'
+import AdminAuthorizationHelper from '../../../../app/src/Features/Helpers/AdminAuthorizationHelper.mjs'
+import HttpErrorHandler from '../../../../app/src/Features/Errors/HttpErrorHandler.mjs'
+import { RateLimiter } from '../../../../app/src/infrastructure/RateLimiter.mjs'
+import RateLimiterMiddleware from '../../../../app/src/Features/Security/RateLimiterMiddleware.mjs'
+
+const aiReviewerHistoryRateLimiter = new RateLimiter(
+  'ai-reviewer-history-admin',
+  { points: 10, duration: 60 }
+)
+const rateLimitAiReviewerHistory = RateLimiterMiddleware.rateLimit(
+  aiReviewerHistoryRateLimiter
+)
+
+export function ensureAiReviewerHistoryPurgeCapability(req, res, next) {
+  if (
+    AdminAuthorizationHelper.hasAdminCapability(
+      'ai-reviewer-history-purge',
+      false
+    )(req)
+  ) {
+    return next()
+  }
+  return HttpErrorHandler.notFound(req, res)
+}
+
+const aiReviewerHistoryMiddleware = [
+  AuthorizationMiddleware.ensureUserIsSiteAdmin,
+  ensureAiReviewerHistoryPurgeCapability,
+  rateLimitAiReviewerHistory,
+]
 
 export default {
   apply(webRouter) {
@@ -82,6 +113,22 @@ export default {
     webRouter.get('/admin/active-projects',
       AuthorizationMiddleware.ensureUserIsSiteAdmin,
       AdminToolsController.activeProjects,
+    )
+
+    webRouter.get(
+      '/admin/ai-reviewer/history',
+      ...aiReviewerHistoryMiddleware,
+      AiReviewerHistoryAdminController.show
+    )
+    webRouter.post(
+      '/admin/ai-reviewer/history/dry-run',
+      ...aiReviewerHistoryMiddleware,
+      AiReviewerHistoryAdminController.dryRun
+    )
+    webRouter.post(
+      '/admin/ai-reviewer/history/purge',
+      ...aiReviewerHistoryMiddleware,
+      AiReviewerHistoryAdminController.purge
     )
   },
 }
