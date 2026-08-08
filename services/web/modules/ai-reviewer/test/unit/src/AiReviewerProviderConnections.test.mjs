@@ -681,6 +681,31 @@ describe("AI reviewer provider connections", function () {
 
   it.each([
     {
+      name: "credential first set",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: geminiCredential,
+      },
+    },
+    {
+      name: "credential removal",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: geminiCredential,
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: null,
+      },
+    },
+    {
       name: "credential",
       initial: {
         provider: "openai-compatible",
@@ -742,31 +767,31 @@ describe("AI reviewer provider connections", function () {
         credential: azureConnection.credential,
       },
     },
-  ])("resets the circuit after a $name change", async function ({
-    initial,
-    update,
-  }) {
-    const { store } = storeFixture();
-    const created = await store.create(userId, initial);
-    const reset = vi.fn(async () => {});
-    const controller = createAiReviewerProviderController({
-      configStore: store,
-      providerService: {},
-      circuitBreakerStore: { reset },
-    });
-    const response = new FakeResponse();
+  ])(
+    "resets the circuit after a $name change",
+    async function ({ initial, update }) {
+      const { store } = storeFixture();
+      const created = await store.create(userId, initial);
+      const reset = vi.fn(async () => {});
+      const controller = createAiReviewerProviderController({
+        configStore: store,
+        providerService: {},
+        circuitBreakerStore: { reset },
+      });
+      const response = new FakeResponse();
 
-    await controller.updateConnection(
-      httpRequest({
-        body: { ...update, expectedRevision: created.revision },
-        params: { connection_id: created.id },
-      }),
-      response,
-    );
+      await controller.updateConnection(
+        httpRequest({
+          body: { ...update, expectedRevision: created.revision },
+          params: { connection_id: created.id },
+        }),
+        response,
+      );
 
-    expect(response.statusCode).toBe(200);
-    expect(reset).toHaveBeenCalledExactlyOnceWith(created.id);
-  });
+      expect(response.statusCode).toBe(200);
+      expect(reset).toHaveBeenCalledExactlyOnceWith(created.id);
+    },
+  );
 
   it("rejects changing a saved connection's provider without touching its destination", async function () {
     const { records, store } = storeFixture();

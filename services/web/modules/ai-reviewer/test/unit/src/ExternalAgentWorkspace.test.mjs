@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import Fs from "node:fs";
 import Os from "node:os";
 import Path from "node:path";
@@ -11,6 +12,7 @@ import {
   deriveExternalAgentTextEdits,
   ExternalAgentWorkspaceError,
   materializeExternalAgentWorkspace,
+  validateExternalAgentHistorySnapshot,
 } from "../../../app/src/ExternalAgentWorkspace.mjs";
 
 const temporaryRoots = [];
@@ -300,6 +302,137 @@ describe("AI reviewer non-Git external agent workspace", function () {
             "document-main": { pathname: "main.tex", v: 2 },
           },
         },
+      }),
+    ).toThrowError(ExternalAgentWorkspaceError);
+  });
+
+  it("omits oversized files with bounded metadata and keeps them outside agent authority", async function () {
+    const oversizedMarker = "oversized-body-must-not-cross";
+    const snapshot = historySnapshot([
+      {
+        documentId: "document-main",
+        path: "main.tex",
+        revision: 7,
+        text: "reviewable",
+      },
+      {
+        documentId: "document-oversized-template",
+        path: "acmart.dtx",
+        revision: 3,
+        text: oversizedMarker + "x".repeat(200_001),
+      },
+    ]);
+
+    expect(snapshot.documents.map(({ path }) => path)).toEqual(["main.tex"]);
+    expect(snapshot.fileExclusionCount).toBe(1);
+    expect(snapshot.fileExclusions).toEqual([
+      {
+        path: "acmart.dtx",
+        reason: "document-too-large",
+        textLength: oversizedMarker.length + 200_001,
+        maxTextLength: 200_000,
+      },
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain(oversizedMarker);
+
+    const workspace = await materializeExternalAgentWorkspace(
+      await temporaryRoot(),
+      snapshot,
+    );
+    expect(workspace.manifest.documents.map(({ path }) => path)).toEqual([
+      "main.tex",
+    ]);
+    expect(
+      await Fs.promises
+        .access(Path.join(workspace.workDirectory, "acmart.dtx"))
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
+
+    await Fs.promises.writeFile(
+      Path.join(workspace.workDirectory, "acmart.dtx"),
+      "agent-created",
+    );
+    expect(
+      await failureOf(collectExternalAgentWorkspaceEdits(workspace)),
+    ).toMatchObject({
+      code: "AI_EXTERNAL_WORKSPACE_UNSUPPORTED_CHANGE",
+      details: { unsupportedPaths: ["acmart.dtx"], missingPaths: [] },
+    });
+  });
+
+  it("rejects inconsistent serialized exclusion metadata", async function () {
+    const snapshot = structuredClone(
+      historySnapshot([
+        {
+          documentId: "document-main",
+          path: "main.tex",
+          revision: 7,
+          text: "reviewable",
+        },
+        {
+          documentId: "document-oversized-template",
+          path: "acmart.dtx",
+          revision: 3,
+          text: "x".repeat(200_001),
+        },
+      ]),
+    );
+    snapshot.fileExclusionCount = 2;
+
+    expect(
+      await failureOf(
+        materializeExternalAgentWorkspace(await temporaryRoot(), snapshot),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_WORKSPACE_INVALID_SNAPSHOT" });
+  });
+
+  it("caps reported oversized-file metadata at ten entries", function () {
+    const oversizedFiles = Array.from({ length: 11 }, (_, index) => ({
+      documentId: `document-oversized-${index}`,
+      path: `oversized-${String(index).padStart(2, "0")}.dtx`,
+      revision: 1,
+      text: `oversized-marker-${index}-` + "x".repeat(200_001),
+    }));
+
+    const snapshot = historySnapshot([
+      {
+        documentId: "document-main",
+        path: "main.tex",
+        revision: 1,
+        text: "reviewable",
+      },
+      ...oversizedFiles,
+    ]);
+
+    expect(snapshot.fileExclusionCount).toBe(11);
+    expect(snapshot.fileExclusions).toHaveLength(10);
+    expect(snapshot.fileExclusions.map(({ path }) => path)).toEqual(
+      oversizedFiles.slice(0, 10).map(({ path }) => path),
+    );
+    for (const { text } of oversizedFiles) {
+      expect(JSON.stringify(snapshot)).not.toContain(text.slice(0, 30));
+    }
+  });
+
+  it("rejects path-prefix collisions even across differently cased siblings", function () {
+    const document = (documentId, path) => ({
+      documentId,
+      path,
+      revision: 1,
+      text: path,
+      textHash: createHash("sha256").update(path).digest("hex"),
+    });
+
+    expect(() =>
+      validateExternalAgentHistorySnapshot({
+        projectId: "project-external-agent-0001",
+        historyVersion: 1,
+        documents: [
+          document("document-a", "a"),
+          document("document-upper-a", "A"),
+          document("document-child", "a/b"),
+        ],
       }),
     ).toThrowError(ExternalAgentWorkspaceError);
   });

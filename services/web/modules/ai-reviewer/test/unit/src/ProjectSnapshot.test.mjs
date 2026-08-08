@@ -327,6 +327,50 @@ describe("AI reviewer project snapshot", function () {
     ).toThrow(AgentGatewayError);
   });
 
+  it("skips an oversized document and explains a direct read", async function () {
+    const oversizedText = "x".repeat(200_001);
+    const snapshot = createSnapshot({
+      ...documents(),
+      "/acmart.dtx": {
+        _id: "document-oversized-template",
+        version: 1,
+        lines: [oversizedText],
+      },
+    });
+
+    expect(snapshot.manifest.map(({ path }) => path)).not.toContain(
+      "acmart.dtx",
+    );
+    expect(snapshot.context.fileExclusions).toEqual([
+      {
+        path: "acmart.dtx",
+        reason: "document-too-large",
+        textLength: 200_001,
+        maxTextLength: 200_000,
+      },
+    ]);
+    expect(snapshot.context.summary).toMatchObject({
+      fileCount: 3,
+      fileExclusionCount: 1,
+    });
+    expect(
+      await snapshot.readProjectFile(
+        { path: "main.tex", range: { from: 0, to: 4 } },
+        { request: request() },
+      ),
+    ).toMatchObject({ path: "main.tex", text: mainText.slice(0, 4) });
+    const error = await captureError(
+      snapshot.readProjectFile({ path: "acmart.dtx" }, { request: request() }),
+    );
+    expect(error).toMatchObject({ code: "AI_PROJECT_CONTENT_NOT_AVAILABLE" });
+    expect(error.message).toContain(
+      '"acmart.dtx" was excluded because it has 200001 characters',
+    );
+    expect(snapshot.readProjectFile.reviewCoverage()).toMatchObject({
+      fileExclusionCount: 1,
+    });
+  });
+
   it("caps relationship metadata before it reaches the model context", function () {
     const lines = Array.from(
       { length: 150 },

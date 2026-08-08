@@ -154,6 +154,77 @@ describe("AI reviewer external History checkpoint", function () {
     expect(checkpoint.documents[0].text).toBe(text);
   });
 
+  it("binds the target while omitting an unrelated oversized History file", async function () {
+    const oversizedMarker = "oversized-body-must-not-cross";
+    const snapshot = {
+      ...rawSnapshot(),
+      files: {
+        ...rawSnapshot().files,
+        "acmart.dtx": {
+          content: oversizedMarker + "x".repeat(200_001),
+        },
+      },
+      v2DocVersions: {
+        [documentId]: { pathname: path, v: 6 },
+        "document-oversized-template": { pathname: "acmart.dtx", v: 2 },
+      },
+    };
+    const history = historyManager(snapshot);
+
+    const checkpoint = await createExternalAgentCheckpoint(request(), {
+      historyManager: history,
+    });
+
+    expect(checkpoint.documents).toHaveLength(1);
+    expect(checkpoint.documents[0]).toMatchObject({
+      documentId,
+      path,
+      revision: 7,
+      textHash: sha256(text),
+    });
+    expect(checkpoint.fileExclusions).toEqual([
+      expect.objectContaining({
+        path: "acmart.dtx",
+        reason: "document-too-large",
+      }),
+    ]);
+    expect(JSON.stringify(checkpoint)).not.toContain(oversizedMarker);
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed after one retry when the requested document is oversized", async function () {
+    const oversizedText = "x".repeat(200_001);
+    const snapshot = {
+      ...rawSnapshot(),
+      files: {
+        ...rawSnapshot().files,
+        "acmart.dtx": { content: oversizedText },
+      },
+      v2DocVersions: {
+        [documentId]: { pathname: path, v: 6 },
+        "document-oversized-template": { pathname: "acmart.dtx", v: 2 },
+      },
+    };
+    const history = historyManager(snapshot);
+    const input = request();
+    Object.assign(input.scope, {
+      documentId: "document-oversized-template",
+      path: "acmart.dtx",
+      baseRevision: 3,
+      baseTextHash: sha256(oversizedText),
+      text: oversizedText,
+    });
+
+    expect(
+      await captureError(
+        createExternalAgentCheckpoint(input, { historyManager: history }),
+      ),
+    ).toMatchObject({ code: "AI_EXTERNAL_CHECKPOINT_STALE" });
+    expect(history.getLatestVersionInfo).toHaveBeenCalledTimes(2);
+    expect(history.getContentAtVersion).toHaveBeenCalledTimes(2);
+    expect(history.ensureNoResyncPending).toHaveBeenCalledTimes(4);
+  });
+
   it("repeats the complete checkpoint once after a queue race", async function () {
     const history = historyManager();
     history.getLatestVersionInfo

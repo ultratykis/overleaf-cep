@@ -19,6 +19,7 @@ import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
 export const PROJECT_SNAPSHOT_DOCUMENT_LIMIT = 200;
 const MAX_DOCUMENT_CHARACTERS = 200_000;
 const MAX_PROJECT_CHARACTERS = 2_000_000;
+const MAX_REPORTED_FILE_EXCLUSIONS = 10;
 const MAX_RELATIONSHIPS = 100;
 const MAX_CITATION_AUDIT_ISSUES = 25;
 const REQUIRED_BIBLIOGRAPHY_FIELDS = new Map([
@@ -47,14 +48,23 @@ const REQUIRED_BIBLIOGRAPHY_FIELDS = new Map([
   ["unpublished", [["author"], ["title"], ["note"]]],
 ]);
 
-function unavailable() {
-  return new AgentGatewayError(
-    "The requested project content is unavailable.",
-    {
-      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
-      category: "configuration",
-      retryable: false,
-    },
+/** @param {string} [message] */
+function unavailable(
+  message = "The requested project content is unavailable.",
+) {
+  return new AgentGatewayError(message, {
+    code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+    category: "configuration",
+    retryable: false,
+  });
+}
+
+/** @param {{ path: string, textLength: number, maxTextLength: number }} exclusion */
+function excludedDocument(exclusion) {
+  return unavailable(
+    `The project file ${JSON.stringify(exclusion.path)} was excluded because ` +
+      `it has ${exclusion.textLength} characters; the per-file limit is ` +
+      `${exclusion.maxTextLength}.`,
   );
 }
 
@@ -325,6 +335,9 @@ export function createProjectSnapshot(
   }
 
   const documents = new Map();
+  const seenPaths = new Set();
+  /** @type {Array<Readonly<{ path: string, reason: "document-too-large", textLength: number, maxTextLength: number }>>} */
+  const fileExclusions = [];
   let totalCharacters = 0;
   for (const [rawPath, rawDocument] of entries) {
     const path = normalizedPath(rawPath);
@@ -337,10 +350,21 @@ export function createProjectSnapshot(
       documentId.length === 0 ||
       !Number.isSafeInteger(revision) ||
       revision < 0 ||
-      text.length > MAX_DOCUMENT_CHARACTERS ||
-      documents.has(path)
+      seenPaths.has(path)
     ) {
       throw unavailable();
+    }
+    seenPaths.add(path);
+    if (text.length > MAX_DOCUMENT_CHARACTERS) {
+      fileExclusions.push(
+        Object.freeze({
+          path,
+          reason: "document-too-large",
+          textLength: text.length,
+          maxTextLength: MAX_DOCUMENT_CHARACTERS,
+        }),
+      );
+      continue;
     }
     totalCharacters += text.length;
     if (totalCharacters > MAX_PROJECT_CHARACTERS) {
@@ -353,6 +377,12 @@ export function createProjectSnapshot(
       text,
       textHash: createHash("sha256").update(text).digest("hex"),
     });
+  }
+  if (documents.size === 0) {
+    const [firstExclusion] = fileExclusions;
+    throw firstExclusion == null
+      ? unavailable()
+      : excludedDocument(firstExclusion);
   }
 
   const currentDocument =
@@ -373,6 +403,10 @@ export function createProjectSnapshot(
     );
   const contextFiles = manifest.map(({ path, textLength }) =>
     Object.freeze({ path, textLength }),
+  );
+  fileExclusions.sort((left, right) => left.path.localeCompare(right.path));
+  const reportedFileExclusions = Object.freeze(
+    fileExclusions.slice(0, MAX_REPORTED_FILE_EXCLUSIONS),
   );
   const relationships = [];
   const relationshipExclusions = [];
@@ -429,16 +463,27 @@ export function createProjectSnapshot(
   let context;
   /** @type {number} */
   let modelInputCharacters;
+  const exposesProjectContext =
+    promptRequest.scope == null || promptRequest.scope.kind === "project";
   while (true) {
     context = Object.freeze({
       summary: Object.freeze({
         fileCount: manifest.length,
+        ...(fileExclusions.length === 0
+          ? {}
+          : { fileExclusionCount: fileExclusions.length }),
+        ...(fileExclusions.length > reportedFileExclusions.length
+          ? { fileExclusionsTruncated: true }
+          : {}),
         characterCount: totalCharacters,
         relationshipCount: relationships.length,
         relationshipExclusionCount: relationshipExclusions.length,
         relationshipsTruncated,
       }),
       files: frozenContextFiles,
+      ...(fileExclusions.length === 0
+        ? {}
+        : { fileExclusions: reportedFileExclusions }),
       // A stale editor fact must not discard an otherwise valid review.
       ...(currentDocument == null ? {} : { currentDocument }),
       relationships: Object.freeze([...relationships]),
@@ -448,10 +493,7 @@ export function createProjectSnapshot(
     // The authorization request may be project-shaped even when the visible
     // request is scoped. Budget the exact prompt the gateway will send, and add
     // project context only on the paths where the gateway exposes it.
-    const modelProjectContext =
-      promptRequest.scope == null || promptRequest.scope.kind === "project"
-        ? context
-        : null;
+    const modelProjectContext = exposesProjectContext ? context : null;
     modelInputCharacters = formatAgentPrompt(
       promptRequest,
       modelProjectContext,
@@ -468,6 +510,7 @@ export function createProjectSnapshot(
     relationshipsTruncated = true;
   }
 
+  let fileExclusionsReported = exposesProjectContext;
   const snapshot = {
     manifest: Object.freeze(manifest),
     context,
@@ -485,6 +528,12 @@ export function createProjectSnapshot(
       }
       const document = documents.get(parsed.data.path);
       if (document == null) {
+        const exclusion = fileExclusions.find(
+          ({ path }) => path === parsed.data.path,
+        );
+        if (exclusion != null) {
+          throw excludedDocument(exclusion);
+        }
         throw unavailable();
       }
       const range = parsed.data.range ?? {
@@ -494,12 +543,17 @@ export function createProjectSnapshot(
       if (range.to > document.text.length) {
         throw unavailable();
       }
+      const reportFileExclusions =
+        !fileExclusionsReported && reportedFileExclusions.length > 0;
       const result = Object.freeze({
         path: document.path,
         range: Object.freeze({ ...range }),
         revision: document.revision,
         textHash: document.textHash,
         text: document.text.slice(range.from, range.to),
+        ...(reportFileExclusions
+          ? { fileExclusions: reportedFileExclusions }
+          : {}),
       });
       const resultCharacters = JSON.stringify(result).length;
       if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
@@ -507,6 +561,7 @@ export function createProjectSnapshot(
         throw modelContextTooSmall(contextLength, contextLengthSource);
       }
       modelInputCharacters += resultCharacters;
+      fileExclusionsReported ||= reportFileExclusions;
       successfulReadCount += 1;
       return result;
     },
@@ -544,6 +599,9 @@ export function createProjectSnapshot(
   snapshot.readProjectFile.reviewCoverage = () =>
     Object.freeze({
       successfulReadCount,
+      ...(fileExclusions.length === 0
+        ? {}
+        : { fileExclusionCount: fileExclusions.length }),
       modelInputBudgetFailureCount,
       relationshipsTruncated,
     });

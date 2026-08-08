@@ -271,6 +271,88 @@ describe("ExternalAgentGateway", function () {
     );
   });
 
+  it("reports oversized-file coverage without forwarding the omitted body", async function () {
+    const fileExclusions = Array.from({ length: 10 }, (_, index) => ({
+      path: `oversized-${index}.dtx`,
+      reason: "document-too-large",
+      textLength: 200_001 + index,
+      maxTextLength: 200_000,
+    }));
+    const test = fixture({
+      snapshot: snapshot({
+        fileExclusionCount: 11,
+        fileExclusions,
+      }),
+    });
+
+    const events = await collect(test.gateway);
+    const runnerInput = test.runnerClient.turn.mock.calls[0][0];
+
+    expect(runnerInput.snapshot.documents.map(({ path }) => path)).toEqual([
+      "main.tex",
+    ]);
+    expect(runnerInput.prompt).toContain("oversized-0.dtx");
+    expect(runnerInput.prompt).toContain("document-too-large");
+    expect(runnerInput.prompt).toContain("200001");
+    expect(runnerInput.prompt).toContain("200000");
+    expect(runnerInput.prompt).toContain("fileExclusionsTruncated");
+    expect(runnerInput.prompt).not.toContain("oversized-body-must-not-cross");
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      contextTruncated: true,
+    });
+  });
+
+  it("drops exclusion metadata before it can overflow the runner prompt", async function () {
+    const largeText = "x".repeat(190_000);
+    const largeHash = createHash("sha256").update(largeText).digest("hex");
+    const largeRequest = request({
+      scope: {
+        kind: "document",
+        documentId: "document-1",
+        path: "main.tex",
+        baseRevision: 7,
+        baseTextHash: largeHash,
+        text: largeText,
+      },
+    });
+    const longPath = "p".repeat(1_000);
+    const test = fixture({
+      request: largeRequest,
+      snapshot: snapshot({
+        documents: [
+          {
+            documentId: "document-1",
+            path: "main.tex",
+            revision: 7,
+            text: largeText,
+            textHash: largeHash,
+          },
+        ],
+        fileExclusionCount: 10,
+        fileExclusions: Array.from({ length: 10 }, (_, index) => ({
+          path: `${longPath}${index}.dtx`,
+          reason: "document-too-large",
+          textLength: 200_001,
+          maxTextLength: 200_000,
+        })),
+      }),
+      result: result({
+        changes: { projectId, historyVersion: 11, edits: [] },
+      }),
+    });
+
+    const events = await collect(test.gateway, largeRequest);
+    const { prompt } = test.runnerClient.turn.mock.calls[0][0];
+
+    expect(prompt.length).toBeLessThanOrEqual(200_000);
+    expect(prompt).not.toContain(longPath);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      contextTruncated: true,
+    });
+  });
+
   it("resumes only the claimed Agent thread and bounds text deltas", async function () {
     const text = "x".repeat(100_001);
     const agentRequest = request({ agentSessionId });

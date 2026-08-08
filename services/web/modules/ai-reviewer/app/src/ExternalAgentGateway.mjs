@@ -16,11 +16,13 @@ import {
 } from "./AgentGateway.mjs";
 import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
+import { validateExternalAgentHistorySnapshot } from "./ExternalAgentWorkspace.mjs";
 
 /** @import { AgentEvent, AgentGateway, AgentRequest } from '../../shared/contract-types' */
 
 const MAX_TEXT_DELTA_CHARACTERS = 100_000;
 const MAX_RUNNER_TEXT_CHARACTERS = 200_000;
+const MAX_RUNNER_PROMPT_CHARACTERS = 200_000;
 const MAX_EDITS = 100;
 const EDIT_RATIONALE = "Proposed by the external AI reviewer.";
 const PROMPT_PREFIX = [
@@ -188,6 +190,7 @@ export function createExternalAgentGateway({
   now = () => new Date().toISOString(),
 }) {
   let checkedRequest;
+  let checkedSnapshot;
   /** @type {string} */
   let checkedUserId;
   /** @type {string} */
@@ -196,6 +199,7 @@ export function createExternalAgentGateway({
   let checkedClientSessionId;
   try {
     checkedRequest = AgentRequestSchema.parse(request);
+    checkedSnapshot = validateExternalAgentHistorySnapshot(snapshot);
     checkedUserId = identifier(userId);
     checkedProjectId = identifier(projectId);
     checkedClientSessionId = identifier(clientSessionId);
@@ -210,8 +214,7 @@ export function createExternalAgentGateway({
       checkedRequest.projectId !== checkedProjectId ||
       checkedRequest.scope == null ||
       checkedRequest.scope.kind === "project" ||
-      snapshot?.projectId !== checkedProjectId ||
-      !Number.isSafeInteger(snapshot?.historyVersion) ||
+      checkedSnapshot.projectId !== checkedProjectId ||
       !hasExactKeys(configuration, configurationKeys) ||
       configuration.provider !== "openai-compatible" ||
       typeof configuration.baseUrl !== "string" ||
@@ -278,7 +281,37 @@ export function createExternalAgentGateway({
       ? {}
       : { credential: checkedConfiguration.credential }),
   });
-  const prompt = `${PROMPT_PREFIX}\n\n${formatAgentPrompt(checkedRequest, null)}`;
+  const fileExclusions = checkedSnapshot.fileExclusions ?? Object.freeze([]);
+  const projectContext =
+    checkedSnapshot.fileExclusionCount == null
+      ? null
+      : Object.freeze({
+          summary: Object.freeze({
+            fileCount: checkedSnapshot.documents.length,
+            fileExclusionCount: checkedSnapshot.fileExclusionCount,
+            ...(checkedSnapshot.fileExclusionCount > fileExclusions.length
+              ? { fileExclusionsTruncated: true }
+              : {}),
+          }),
+          fileExclusions,
+        });
+  const promptWithoutProjectContext = `${PROMPT_PREFIX}\n\n${formatAgentPrompt(
+    checkedRequest,
+    null,
+  )}`;
+  const promptWithProjectContext =
+    projectContext == null
+      ? promptWithoutProjectContext
+      : `${PROMPT_PREFIX}\n\n${formatAgentPrompt(
+          checkedRequest,
+          projectContext,
+        )}`;
+  // Exclusion metadata must not make a request that previously fit the
+  // runner protocol fail after its session claim.
+  const prompt =
+    promptWithProjectContext.length <= MAX_RUNNER_PROMPT_CHARACTERS
+      ? promptWithProjectContext
+      : promptWithoutProjectContext;
   const requestIdentity = JSON.stringify(checkedRequest);
   let used = false;
   /** @type {Promise<void> | null} */
@@ -326,7 +359,7 @@ export function createExternalAgentGateway({
         rawResult = await runnerClient.turn(
           {
             mode,
-            snapshot,
+            snapshot: checkedSnapshot,
             prompt,
             stateRootKey,
             fingerprint,
@@ -357,7 +390,7 @@ export function createExternalAgentGateway({
             rawResult,
             { mode, threadId: sessionThreadId },
             checkedRequest,
-            snapshot,
+            checkedSnapshot,
           );
           const createdAt = now();
           let sequence = 0;
@@ -439,6 +472,9 @@ export function createExternalAgentGateway({
               sequence: sequence++,
               createdAt,
               finishReason: "stop",
+              ...(checkedSnapshot.fileExclusionCount == null
+                ? {}
+                : { contextTruncated: true }),
             }),
           );
           events.forEach((event, index) =>

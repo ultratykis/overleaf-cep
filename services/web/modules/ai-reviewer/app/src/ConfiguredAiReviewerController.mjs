@@ -119,6 +119,7 @@ function enforceProjectReviewCoverage(gateway, scope, context) {
           );
         }
         const contextTruncated =
+          (coverage.fileExclusionCount ?? 0) > 0 ||
           coverage.relationshipsTruncated ||
           coverage.modelInputBudgetFailureCount > 0;
         yield contextTruncated ? { ...event, contextTruncated: true } : event;

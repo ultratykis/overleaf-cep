@@ -12,6 +12,7 @@ import { ProjectRelativePathSchema } from "../../shared/contracts.mjs";
 const DOCUMENT_LIMIT = 200;
 const MAX_DOCUMENT_CHARACTERS = 200_000;
 const MAX_PROJECT_CHARACTERS = 2_000_000;
+const MAX_REPORTED_FILE_EXCLUSIONS = 10;
 const EDIT_LIMIT = 100;
 const INLINE_EQUALITY_MERGE_LIMIT = 32;
 const MANIFEST_VERSION = 1;
@@ -29,6 +30,25 @@ const AGENT_CONTROL_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
  *   text: string,
  *   textHash: string,
  * }} ExternalAgentHistoryDocument
+ */
+
+/**
+ * @typedef {{
+ *   path: string,
+ *   reason: "document-too-large",
+ *   textLength: number,
+ *   maxTextLength: number,
+ * }} ExternalAgentFileExclusion
+ */
+
+/**
+ * @typedef {{
+ *   projectId: string,
+ *   historyVersion: number,
+ *   documents: ReadonlyArray<Readonly<ExternalAgentHistoryDocument>>,
+ *   fileExclusionCount?: number,
+ *   fileExclusions?: ReadonlyArray<Readonly<ExternalAgentFileExclusion>>,
+ * }} ExternalAgentHistorySnapshot
  */
 
 /**
@@ -85,6 +105,14 @@ function normalizedPath(value) {
   return parsed.data;
 }
 
+/** @param {Iterable<string>} paths */
+function hasPathPrefixCollision(paths) {
+  const sorted = [...paths].sort();
+  return sorted.some(
+    (path, index) => sorted[index + 1]?.startsWith(`${path}/`) === true,
+  );
+}
+
 /**
  * Convert Overleaf's history representation into the exact editable document
  * state that an external agent may see. The history version is deliberately
@@ -95,6 +123,7 @@ function normalizedPath(value) {
  *   historyVersion: unknown,
  *   rawSnapshot: unknown,
  * }} input
+ * @returns {Readonly<ExternalAgentHistorySnapshot>}
  */
 export function createExternalAgentHistorySnapshot(input) {
   const { projectId, historyVersion, rawSnapshot } = input;
@@ -122,6 +151,8 @@ export function createExternalAgentHistorySnapshot(input) {
 
   /** @type {ExternalAgentHistoryDocument[]} */
   const documents = [];
+  /** @type {Array<Readonly<ExternalAgentFileExclusion>>} */
+  const fileExclusions = [];
   const documentIds = new Set();
   const paths = new Set();
   let totalCharacters = 0;
@@ -142,18 +173,28 @@ export function createExternalAgentHistorySnapshot(input) {
       lastAppliedRevision < 0 ||
       !Number.isSafeInteger(revision) ||
       typeof text !== "string" ||
-      text.length > MAX_DOCUMENT_CHARACTERS ||
       documentIds.has(documentId) ||
       paths.has(path)
     ) {
       throw invalidSnapshot();
     }
+    documentIds.add(documentId);
+    paths.add(path);
+    if (text.length > MAX_DOCUMENT_CHARACTERS) {
+      fileExclusions.push(
+        Object.freeze({
+          path,
+          reason: "document-too-large",
+          textLength: text.length,
+          maxTextLength: MAX_DOCUMENT_CHARACTERS,
+        }),
+      );
+      continue;
+    }
     totalCharacters += text.length;
     if (totalCharacters > MAX_PROJECT_CHARACTERS) {
       throw invalidSnapshot();
     }
-    documentIds.add(documentId);
-    paths.add(path);
     documents.push(
       Object.freeze({
         documentId,
@@ -177,23 +218,16 @@ export function createExternalAgentHistorySnapshot(input) {
     .map(normalizedPath);
   if (
     documents.length === 0 ||
-    documents.length > DOCUMENT_LIMIT ||
-    editablePaths.length !== documents.length ||
+    documentIds.size > DOCUMENT_LIMIT ||
+    editablePaths.length !== paths.size ||
     editablePaths.some((path) => !paths.has(path))
   ) {
     throw invalidSnapshot();
   }
 
   documents.sort((left, right) => left.path.localeCompare(right.path));
-  if (
-    documents.some((document, index) =>
-      documents.some(
-        (candidate, candidateIndex) =>
-          candidateIndex !== index &&
-          candidate.path.startsWith(`${document.path}/`),
-      ),
-    )
-  ) {
+  fileExclusions.sort((left, right) => left.path.localeCompare(right.path));
+  if (hasPathPrefixCollision(paths)) {
     throw invalidSnapshot();
   }
 
@@ -201,10 +235,21 @@ export function createExternalAgentHistorySnapshot(input) {
     projectId,
     historyVersion,
     documents: Object.freeze(documents),
+    ...(fileExclusions.length === 0
+      ? {}
+      : {
+          fileExclusionCount: fileExclusions.length,
+          fileExclusions: Object.freeze(
+            fileExclusions.slice(0, MAX_REPORTED_FILE_EXCLUSIONS),
+          ),
+        }),
   });
 }
 
-/** @param {unknown} value */
+/**
+ * @param {unknown} value
+ * @returns {Readonly<ExternalAgentHistorySnapshot>}
+ */
 export function validateExternalAgentHistorySnapshot(value) {
   const input = /** @type {any} */ (value);
   if (
@@ -223,7 +268,8 @@ export function validateExternalAgentHistorySnapshot(value) {
   const documentIds = new Set();
   const paths = new Set();
   let totalCharacters = 0;
-  const documents = input.documents.map((document) => {
+  /** @type {ExternalAgentHistoryDocument[]} */
+  const documents = input.documents.map((/** @type {any} */ document) => {
     if (
       typeof document !== "object" ||
       document == null ||
@@ -257,21 +303,65 @@ export function validateExternalAgentHistorySnapshot(value) {
     });
   });
   documents.sort((left, right) => left.path.localeCompare(right.path));
-  if (
-    documents.some((document, index) =>
-      documents.some(
-        (candidate, candidateIndex) =>
-          candidateIndex !== index &&
-          candidate.path.startsWith(`${document.path}/`),
-      ),
-    )
-  ) {
+  const hasFileExclusionCount = Object.hasOwn(input, "fileExclusionCount");
+  const hasFileExclusions = Object.hasOwn(input, "fileExclusions");
+  if (hasFileExclusionCount !== hasFileExclusions) {
+    throw invalidSnapshot();
+  }
+  let fileExclusionCount = 0;
+  /** @type {Array<Readonly<ExternalAgentFileExclusion>>} */
+  let fileExclusions = [];
+  if (hasFileExclusions) {
+    fileExclusionCount = input.fileExclusionCount;
+    if (
+      !Number.isSafeInteger(fileExclusionCount) ||
+      fileExclusionCount <= 0 ||
+      documents.length + fileExclusionCount > DOCUMENT_LIMIT ||
+      !Array.isArray(input.fileExclusions) ||
+      input.fileExclusions.length !==
+        Math.min(fileExclusionCount, MAX_REPORTED_FILE_EXCLUSIONS)
+    ) {
+      throw invalidSnapshot();
+    }
+    fileExclusions = input.fileExclusions.map(
+      (/** @type {any} */ exclusion) => {
+        if (
+          typeof exclusion !== "object" ||
+          exclusion == null ||
+          Object.keys(exclusion).length !== 4 ||
+          typeof exclusion.path !== "string" ||
+          normalizedPath(exclusion.path) !== exclusion.path ||
+          exclusion.reason !== "document-too-large" ||
+          !Number.isSafeInteger(exclusion.textLength) ||
+          exclusion.textLength <= MAX_DOCUMENT_CHARACTERS ||
+          exclusion.maxTextLength !== MAX_DOCUMENT_CHARACTERS ||
+          paths.has(exclusion.path)
+        ) {
+          throw invalidSnapshot();
+        }
+        paths.add(exclusion.path);
+        return Object.freeze({
+          path: exclusion.path,
+          reason: /** @type {const} */ ("document-too-large"),
+          textLength: exclusion.textLength,
+          maxTextLength: MAX_DOCUMENT_CHARACTERS,
+        });
+      },
+    );
+  }
+  if (hasPathPrefixCollision(paths)) {
     throw invalidSnapshot();
   }
   return Object.freeze({
     projectId: input.projectId,
     historyVersion: input.historyVersion,
     documents: Object.freeze(documents),
+    ...(fileExclusionCount === 0
+      ? {}
+      : {
+          fileExclusionCount,
+          fileExclusions: Object.freeze(fileExclusions),
+        }),
   });
 }
 
