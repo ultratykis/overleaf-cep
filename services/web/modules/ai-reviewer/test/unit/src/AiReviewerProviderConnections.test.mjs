@@ -681,6 +681,31 @@ describe("AI reviewer provider connections", function () {
 
   it.each([
     {
+      name: "credential first set",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: geminiCredential,
+      },
+    },
+    {
+      name: "credential removal",
+      initial: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: geminiCredential,
+      },
+      update: {
+        provider: "openai-compatible",
+        baseUrl: "https://api.example.com/v1",
+        credential: null,
+      },
+    },
+    {
       name: "credential",
       initial: {
         provider: "openai-compatible",
