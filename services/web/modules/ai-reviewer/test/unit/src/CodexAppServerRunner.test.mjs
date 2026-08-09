@@ -336,13 +336,13 @@ describe("pinned Codex App Server runner", function () {
       projectDocFallbackFilenames: [],
       skillInstructions: false,
       requestCompression: false,
-      providerEndpoints: "local-only",
-      providerCredentials: "https-local-env-key-only",
+      providerEndpoints: "configured-http-or-https",
+      providerCredentials: "https-env-key-only",
       providerRequestRetries: 0,
       providerStreamRetries: 0,
       processIsolation: "outer-bundled-bwrap",
       sessionFilesystem: "state-work-bind-fd-only",
-      outerNetworkNamespace: "shared-local-provider-only",
+      outerNetworkNamespace: "shared-provider-network",
       threadSandbox: "danger-full-access",
       turnSandbox: "externalSandbox",
       turnNetworkAccess: "restricted",
@@ -721,34 +721,22 @@ describe("pinned Codex App Server runner", function () {
     );
   });
 
-  it("rejects remote providers before starting a process", async function () {
+  it("accepts a remote HTTPS provider", async function () {
     const root = await temporaryRoot();
-    const spawnProcess = vi.fn();
+    const appServer = await runner(root, "remote-provider", {
+      destination: {
+        provider: "openai-compatible",
+        baseUrl: "https://fixture.example/v1",
+        model: "fixture-model",
+      },
+    });
 
-    expect(
-      await failureOf(
-        createCodexAppServerRunner({
-          stateRootKey: "remote-test",
-          stateRootDirectory: await directory(root, "state-root"),
-          workRootDirectory: await directory(root, "work-root"),
-          destination: {
-            provider: "openai-compatible",
-            baseUrl: "https://fixture.example/v1",
-            model: "fixture-model",
-          },
-          command: process.execPath,
-          args: [FIXTURE],
-          spawnProcess,
-        }),
-      ),
-    ).toMatchObject({ code: "AI_OPENAI_COMPATIBLE_ENDPOINT_NOT_ALLOWED" });
-    expect(spawnProcess).not.toHaveBeenCalled();
-    expect(Fs.existsSync(Path.join(root, "state-root", "remote-test"))).toBe(
-      false,
-    );
-    expect(Fs.existsSync(Path.join(root, "work-root", "remote-test"))).toBe(
-      false,
-    );
+    expect(appServer.destination).toEqual({
+      baseUrl: "https://fixture.example/v1",
+      model: "fixture-model",
+      credentialPresent: false,
+    });
+    await appServer.startThread(await workDirectory(root, "remote-work"));
   });
 
   it("rejects overlapping state and work roots before starting a process", async function () {

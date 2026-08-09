@@ -14,7 +14,6 @@ import {
 import { parseAiReviewerProviderCredential } from "./AiReviewerProviderConfig.mjs";
 import {
   assertOpenAiCompatibleCredentialTransport,
-  OpenAiCompatibleEndpointPolicyError,
   parseOpenAiCompatibleBaseUrl,
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
@@ -316,9 +315,6 @@ function normalizeDestination(value) {
   const credential = Object.hasOwn(value, "credential")
     ? parseAiReviewerProviderCredential(value.credential)
     : null;
-  if (endpoint.classification !== "local") {
-    throw new OpenAiCompatibleEndpointPolicyError();
-  }
   assertOpenAiCompatibleCredentialTransport(
     endpoint.baseUrl,
     credential != null,
@@ -469,7 +465,7 @@ function bubblewrapArguments(
     "--unshare-pid",
     "--unshare-ipc",
     "--unshare-uts",
-    // Network stays shared so the loopback-only provider remains reachable;
+    // Network stays shared so the configured provider remains reachable;
     // externalSandbox's restricted value is a protocol declaration, not a
     // bubblewrap firewall.
     "--ro-bind",

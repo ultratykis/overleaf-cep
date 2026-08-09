@@ -77,6 +77,13 @@ function assertThreadParams(params) {
   );
   fixtureAssertion(provider?.request_max_retries === 0, "request retries");
   fixtureAssertion(provider?.stream_max_retries === 0, "stream retries");
+  if (scenario("remote-provider")) {
+    fixtureAssertion(
+      provider?.base_url === "https://fixture.example/v1",
+      "provider base URL",
+    );
+  }
+  fixtureAssertion(provider?.wire_api === "responses", "provider wire API");
   fixtureAssertion(
     credential == null
       ? !Object.hasOwn(provider, "env_key")

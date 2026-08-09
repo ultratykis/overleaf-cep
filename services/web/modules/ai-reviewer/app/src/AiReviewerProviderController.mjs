@@ -549,26 +549,12 @@ export function createAiReviewerProviderController(dependencies) {
       return sendError(response, 409, "missing");
     }
     if (externalHarnessEnabled) {
-      return response.json({
-        models: connections.flatMap((/** @type {any} */ connection) =>
-          (connection.models ?? []).map(
-            (/** @type {string} */ id) => ({
-              id,
-              displayName: id,
-              connectionId: connection.id,
-              connectionLabel: connection.label,
-              contextLength: connection.contextLengthOverride ?? null,
-              contextLengthSource:
-                connection.contextLengthOverride == null
-                  ? "unavailable"
-                  : "override",
-            }),
-          ),
-        ),
-        failures: [],
-      });
+      connections = connections.filter(
+        (connection) =>
+          connection.provider === "openai-compatible" &&
+          connection.apiVersion == null,
+      );
     }
-
     const startedAt = readElapsedNow(elapsedNow);
     const disconnected = new AbortController();
     const timeout = modelTimeoutSignalFactory();
@@ -586,6 +572,23 @@ export function createAiReviewerProviderController(dependencies) {
           try {
             if (connection.credentialLoadFailed === true) {
               return { connection, credentialLoadFailed: true };
+            }
+            if (
+              externalHarnessEnabled &&
+              (connection.models?.length ?? 0) > 0
+            ) {
+              return {
+                connection,
+                models: connection.models.map((id) => ({
+                  id,
+                  displayName: id,
+                  contextLength: connection.contextLengthOverride ?? null,
+                  contextLengthSource:
+                    connection.contextLengthOverride == null
+                      ? "unavailable"
+                      : "override",
+                })),
+              };
             }
             await circuitBreakerStore?.assertRequestAllowed(connection.id);
             const cacheKey = aiReviewerModelCacheKey(

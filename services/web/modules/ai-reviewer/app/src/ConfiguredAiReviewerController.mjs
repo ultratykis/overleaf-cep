@@ -221,10 +221,7 @@ function externalRunConfiguration(connection, request) {
   }
   if (
     connection?.provider !== "openai-compatible" ||
-    endpoint.classification !== "local" ||
-    connection.apiVersion != null ||
-    !Array.isArray(connection.models) ||
-    !connection.models.includes(model)
+    connection.apiVersion != null
   ) {
     throw invalidExternalHarnessConfiguration();
   }
@@ -443,6 +440,9 @@ export function createConfiguredAiReviewerController({
           context.request,
         );
         context.setFailureProvider(configuration.provider, configuration.model);
+        if (!(connection.models ?? []).includes(configuration.model)) {
+          await resolveRunModel(connection, context, providerService, userId);
+        }
         if (externalSessionStore == null || externalRunnerClient == null) {
           throw invalidExternalHarnessConfiguration();
         }

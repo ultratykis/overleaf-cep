@@ -1292,6 +1292,54 @@ describe("AI reviewer unified model list", function () {
     expect(providerService.resolveContextLength).not.toHaveBeenCalled();
   });
 
+  it("discovers only external connections without fallback models", async function () {
+    const { controller, providerService, store } = modelListFixture({
+      externalHarnessEnabled: true,
+    });
+    const configured = await store.create(userId, {
+      ...localConnection,
+      models: [localModel],
+      contextLengthOverride: contextLength,
+    });
+    const discovered = await store.create(userId, {
+      ...localConnection,
+      baseUrl: "https://api.example.com/v1",
+      models: [],
+    });
+    await store.create(userId, geminiConnection);
+    await store.create(userId, {
+      ...localConnection,
+      baseUrl: "https://versioned.example.com/v1",
+      apiVersion: openAiCompatibleApiVersion,
+      models: ["versioned-model"],
+    });
+    const response = new FakeResponse();
+
+    await controller.listModels(httpRequest(), response);
+
+    expect(response.body.models).toEqual([
+      {
+        id: localModel,
+        displayName: localModel,
+        connectionId: configured.id,
+        connectionLabel: "127.0.0.1:11434",
+        contextLength,
+        contextLengthSource: "override",
+      },
+      ...[localModel, sharedModel].map((id) => ({
+        id,
+        displayName: id,
+        connectionId: discovered.id,
+        connectionLabel: "api.example.com",
+        contextLength,
+        contextLengthSource: "detected",
+      })),
+    ]);
+    expect(response.body.failures).toEqual([]);
+    expect(providerService.listModels).toHaveBeenCalledOnce();
+    expect(providerService.listModels.mock.calls[0][0].id).toBe(discovered.id);
+  });
+
   it("keeps a reachable connection's models when another connection fails", async function () {
     const rawProviderBody = "RAW_PROVIDER_FAILURE_BODY";
     const { controller, store } = modelListFixture({

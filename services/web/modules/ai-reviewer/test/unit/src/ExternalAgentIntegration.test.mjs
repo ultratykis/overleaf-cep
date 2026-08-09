@@ -369,36 +369,56 @@ describe("AI reviewer: configured external harness", function () {
     );
   });
 
-  it("rejects non-local or plaintext credential destinations before session CAS", async function () {
-    for (const connection of [
-      {
+  it("discovers a selected model and accepts a remote HTTPS destination", async function () {
+    const test = fixture({
+      connection: {
         id: connectionId,
         provider: "openai-compatible",
         baseUrl: "https://api.example.com/v1",
-        models: [model],
       },
-      {
+    });
+    test.providerService.listModels.mockResolvedValue([
+      { id: model, displayName: model },
+    ]);
+    const response = new FakeResponse();
+
+    await test.controller.stream(httpRequest(test.request), response);
+
+    expect(parseEvents(response).at(-1)?.type).toBe("completed");
+    expect(test.providerService.listModels).toHaveBeenCalledOnce();
+    expect(test.externalGatewayFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        configuration: {
+          provider: "openai-compatible",
+          baseUrl: "https://api.example.com/v1",
+          model,
+        },
+      }),
+    );
+  });
+
+  it("rejects a plaintext credential destination before session CAS", async function () {
+    const test = fixture({
+      connection: {
         id: connectionId,
         provider: "openai-compatible",
         baseUrl: "http://127.0.0.1:8765/v1",
         models: [model],
         credential: "must-not-reach-runner",
       },
-    ]) {
-      const test = fixture({ connection });
-      const response = new FakeResponse();
+    });
+    const response = new FakeResponse();
 
-      await test.controller.stream(httpRequest(test.request), response);
+    await test.controller.stream(httpRequest(test.request), response);
 
-      expect(parseEvents(response).at(-1)).toMatchObject({
-        type: "error",
-        error: { category: "configuration", retryable: false },
-      });
-      expect(test.externalSessionStore.create).not.toHaveBeenCalled();
-      expect(test.externalGatewayFactory).not.toHaveBeenCalled();
-      expect(
-        JSON.stringify(test.externalGatewayFactory.mock.calls),
-      ).not.toContain("must-not-reach-runner");
-    }
+    expect(parseEvents(response).at(-1)).toMatchObject({
+      type: "error",
+      error: { category: "configuration", retryable: false },
+    });
+    expect(test.externalSessionStore.create).not.toHaveBeenCalled();
+    expect(test.externalGatewayFactory).not.toHaveBeenCalled();
+    expect(JSON.stringify(test.externalGatewayFactory.mock.calls)).not.toContain(
+      "must-not-reach-runner",
+    );
   });
 });
