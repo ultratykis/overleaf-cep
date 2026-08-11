@@ -35,7 +35,7 @@ const AGENT_CONTROL_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
 /**
  * @typedef {{
  *   path: string,
- *   reason: "document-too-large",
+ *   reason: "document-too-large" | "document-unversioned",
  *   textLength: number,
  *   maxTextLength: number,
  * }} ExternalAgentFileExclusion
@@ -216,11 +216,37 @@ export function createExternalAgentHistorySnapshot(input) {
       }
     })
     .map(normalizedPath);
+  const editablePathSet = new Set(editablePaths);
+  for (const path of editablePathSet) {
+    if (paths.has(path)) {
+      continue;
+    }
+    const file = snapshot.getFile(path) ?? snapshot.getFile(`/${path}`);
+    const text = file?.getContent({ filterTrackedDeletes: true });
+    if (typeof text !== "string") {
+      throw invalidSnapshot();
+    }
+    // A requested unversioned document intentionally falls through as stale.
+    fileExclusions.push(
+      Object.freeze({
+        path,
+        reason: "document-unversioned",
+        textLength: text.length,
+        maxTextLength: MAX_DOCUMENT_CHARACTERS,
+      }),
+    );
+    paths.add(path);
+  }
+  const includedPaths = new Set([
+    ...documents.map(({ path }) => path),
+    ...fileExclusions.map(({ path }) => path),
+  ]);
   if (
     documents.length === 0 ||
     documentIds.size > DOCUMENT_LIMIT ||
-    editablePaths.length !== paths.size ||
-    editablePaths.some((path) => !paths.has(path))
+    paths.size > DOCUMENT_LIMIT ||
+    editablePaths.length !== editablePathSet.size ||
+    editablePaths.some((path) => !includedPaths.has(path))
   ) {
     throw invalidSnapshot();
   }
@@ -331,9 +357,12 @@ export function validateExternalAgentHistorySnapshot(value) {
           Object.keys(exclusion).length !== 4 ||
           typeof exclusion.path !== "string" ||
           normalizedPath(exclusion.path) !== exclusion.path ||
-          exclusion.reason !== "document-too-large" ||
+          (exclusion.reason !== "document-too-large" &&
+            exclusion.reason !== "document-unversioned") ||
           !Number.isSafeInteger(exclusion.textLength) ||
-          exclusion.textLength <= MAX_DOCUMENT_CHARACTERS ||
+          (exclusion.reason === "document-too-large"
+            ? exclusion.textLength <= MAX_DOCUMENT_CHARACTERS
+            : exclusion.textLength < 0) ||
           exclusion.maxTextLength !== MAX_DOCUMENT_CHARACTERS ||
           paths.has(exclusion.path)
         ) {
@@ -342,7 +371,9 @@ export function validateExternalAgentHistorySnapshot(value) {
         paths.add(exclusion.path);
         return Object.freeze({
           path: exclusion.path,
-          reason: /** @type {const} */ ("document-too-large"),
+          reason: /** @type {"document-too-large" | "document-unversioned"} */ (
+            exclusion.reason
+          ),
           textLength: exclusion.textLength,
           maxTextLength: MAX_DOCUMENT_CHARACTERS,
         });

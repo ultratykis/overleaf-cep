@@ -288,22 +288,45 @@ describe("AI reviewer non-Git external agent workspace", function () {
     );
   });
 
-  it("rejects an incomplete history document mapping", function () {
-    expect(() =>
-      createExternalAgentHistorySnapshot({
-        projectId: "project-external-agent-0001",
-        historyVersion: 1,
-        rawSnapshot: {
-          files: {
-            "main.tex": { content: "mapped" },
-            "unmapped.tex": { content: "not represented in v2DocVersions" },
-          },
-          v2DocVersions: {
-            "document-main": { pathname: "main.tex", v: 2 },
-          },
+  it("excludes unversioned editable files from the agent workspace", async function () {
+    const snapshot = createExternalAgentHistorySnapshot({
+      projectId: "project-external-agent-0001",
+      historyVersion: 1,
+      rawSnapshot: {
+        files: {
+          "main.tex": { content: "mapped" },
+          "sample.bib": { content: "unversioned reference" },
         },
-      }),
-    ).toThrowError(ExternalAgentWorkspaceError);
+        v2DocVersions: {
+          "document-main": { pathname: "main.tex", v: 2 },
+        },
+      },
+    });
+
+    expect(snapshot.documents.map(({ path }) => path)).toEqual(["main.tex"]);
+    expect(snapshot.fileExclusionCount).toBe(1);
+    expect(snapshot.fileExclusions).toEqual([
+      {
+        path: "sample.bib",
+        reason: "document-unversioned",
+        textLength: "unversioned reference".length,
+        maxTextLength: 200_000,
+      },
+    ]);
+
+    const workspace = await materializeExternalAgentWorkspace(
+      await temporaryRoot(),
+      snapshot,
+    );
+    expect(workspace.manifest.documents.map(({ path }) => path)).toEqual([
+      "main.tex",
+    ]);
+    expect(
+      await Fs.promises
+        .access(Path.join(workspace.workDirectory, "sample.bib"))
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
   });
 
   it("omits oversized files with bounded metadata and keeps them outside agent authority", async function () {
