@@ -381,14 +381,24 @@ function childEnvironment(stateDirectory, source, credential) {
 }
 
 function defaultExecutables() {
-  if (process.platform !== "linux" || process.arch !== "x64") {
+  const runtime = {
+    x64: {
+      vendorPackage: "@openai/codex-linux-x64",
+      target: "x86_64-unknown-linux-musl",
+    },
+    arm64: {
+      vendorPackage: "@openai/codex-linux-arm64",
+      target: "aarch64-unknown-linux-musl",
+    },
+  }[process.arch];
+  if (process.platform !== "linux" || runtime == null) {
     throw new TypeError("The pinned App Server runtime is unsupported.");
   }
-  const target = "x86_64-unknown-linux-musl";
+  const { target, vendorPackage } = runtime;
   let vendorRoot;
   try {
     vendorRoot = Path.join(
-      Path.dirname(require.resolve("@openai/codex-linux-x64/package.json")),
+      Path.dirname(require.resolve(`${vendorPackage}/package.json`)),
       "vendor",
     );
   } catch {
