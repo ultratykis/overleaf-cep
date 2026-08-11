@@ -644,7 +644,7 @@ const configuredRequestTimeoutMs = Number.isSafeInteger(
   Settings.aiReviewer?.requestTimeoutMs,
 )
   ? Math.max(1_000, Settings.aiReviewer.requestTimeoutMs)
-  : 60_000;
+  : 300_000;
 const configuredController = createConfiguredAiReviewerController({
   configStore,
   providerService,

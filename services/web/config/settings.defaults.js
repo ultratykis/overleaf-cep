@@ -494,9 +494,13 @@ module.exports = {
       'OVERLEAF_AI_REVIEWER_DEBUG_PROVIDER_ERRORS',
       false
     ),
-    // Whole-request budget for one review/agent turn. Local models routinely
-    // exceed the 60s default, so development environments raise this.
-    requestTimeoutMs: intFromEnv('OVERLEAF_AI_REVIEWER_REQUEST_TIMEOUT_MS', 60_000),
+    // Whole-request budget for one review/agent turn. Reasoning modes pass
+    // one minute easily and survey-style prompts pass three, so the default
+    // leaves room for them; local models need it too.
+    requestTimeoutMs: intFromEnv(
+      'OVERLEAF_AI_REVIEWER_REQUEST_TIMEOUT_MS',
+      300_000
+    ),
   },
 
   quotaGrants: {
