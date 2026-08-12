@@ -1,3 +1,7 @@
+const { createHash } = require("node:crypto");
+
+const { EditorState } = require("@codemirror/state");
+const { EditorView } = require("@codemirror/view");
 const { expect } = require("chai");
 const sinon = require("sinon");
 
@@ -6,12 +10,18 @@ require("../../../../test/frontend/cut-log-noise");
 const {
   postAiReviewerArtifactComment,
 } = require("../../frontend/js/services/editor-artifact-comment-posting");
+const {
+  navigateToEditorEvidence,
+} = require("../../frontend/js/services/editor-evidence-navigation");
+const {
+  extension: documentIdentityExtension,
+} = require("../../frontend/js/extensions/document-identity");
 
 const projectId = "project-0001";
 const documentId = "document-0001";
 const path = "main.tex";
 const baseText = "Alpha beta gamma.";
-const baseTextHash = "a".repeat(64);
+const baseTextHash = createHash("sha256").update(baseText).digest("hex");
 const range = {
   from: 6,
   to: 10,
@@ -138,6 +148,69 @@ function postingFixture({ text = baseText } = {}) {
   };
 }
 
+function livePostingFixture({ text = baseText, revision = 8 } = {}) {
+  const parent = document.createElement("div");
+  document.body.appendChild(parent);
+  const shareDocument = {
+    connection: {
+      state: "ok",
+    },
+    getVersion: sinon.stub().returns(revision),
+  };
+  const currentDocument = {
+    doc_id: documentId,
+    joined: true,
+    doc: shareDocument,
+    getSnapshot: sinon.stub().returns(text),
+    hasBufferedOps: sinon.stub().returns(false),
+  };
+  const view = new EditorView({
+    parent,
+    state: EditorState.create({
+      doc: text,
+      extensions: [
+        documentIdentityExtension({
+          currentDoc: {
+            currentDocument,
+          },
+        }),
+      ],
+    }),
+  });
+  currentDocument.cm6 = { view };
+  const context = {
+    view,
+    projectId,
+    currentDocumentId: documentId,
+    path,
+    currentDocument,
+    permissions: {
+      read: true,
+    },
+    sourceMode: true,
+    connected: true,
+  };
+  return {
+    getContext: sinon.stub().returns(context),
+    resolveDocument: sinon.stub().returns({ documentId, path }),
+    openDocument: sinon.stub().resolves(),
+    navigateEvidence: (options) =>
+      navigateToEditorEvidence({
+        ...options,
+        hashText: async (value) =>
+          createHash("sha256").update(value).digest("hex"),
+      }),
+    postComment: sinon.stub().resolves({
+      commentId: "thread-0001",
+    }),
+    signal: new AbortController().signal,
+    dispose() {
+      view.destroy();
+      parent.remove();
+    },
+  };
+}
+
 describe("AI reviewer: artifact comment posting", function () {
   it("posts an ordinary finding through the injected comment path", async function () {
     const fixture = postingFixture();
@@ -187,6 +260,57 @@ describe("AI reviewer: artifact comment posting", function () {
       text: "beta",
       content: editedBody,
     });
+  });
+
+  it("posts after the revision advances when the captured content still matches", async function () {
+    const fixture = livePostingFixture();
+
+    try {
+      const result = await postAiReviewerArtifactComment({
+        request: request(),
+        artifact: suggestion(),
+        content: "Please replace this phrase.",
+        ...fixture,
+      });
+
+      expect(result).to.deep.equal({
+        status: "posted",
+        commentId: "thread-0001",
+      });
+      expect(fixture.postComment).to.have.been.calledOnceWithExactly({
+        projectId,
+        documentId,
+        from: range.from,
+        to: range.to,
+        text: "beta",
+        content: "Please replace this phrase.",
+      });
+    } finally {
+      fixture.dispose();
+    }
+  });
+
+  it("rejects posting after the revision advances when the captured content differs", async function () {
+    const fixture = livePostingFixture({
+      text: "Alpha zeta gamma.",
+    });
+
+    try {
+      const result = await postAiReviewerArtifactComment({
+        request: request(),
+        artifact: suggestion(),
+        content: "Please replace this phrase.",
+        ...fixture,
+      });
+
+      expect(result).to.deep.equal({
+        status: "conflict",
+        code: "AI_COMMENT_RANGE_STALE",
+      });
+      expect(fixture.postComment).not.to.have.been.called;
+    } finally {
+      fixture.dispose();
+    }
   });
 
   it("rejects a citation finding before invoking the comment path", async function () {

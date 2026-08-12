@@ -231,11 +231,12 @@ export function preflightSingleDocumentSuggestion({
   if (!snapshot.connected) {
     return conflict("AI_EDITOR_OFFLINE");
   }
-  if (snapshot.revision !== suggestion.baseRevision) {
-    return conflict("AI_SUGGESTION_REVISION_STALE");
-  }
   if (snapshot.textHash !== suggestion.baseTextHash) {
-    return conflict("AI_SUGGESTION_HASH_STALE");
+    return conflict(
+      snapshot.revision === suggestion.baseRevision
+        ? "AI_SUGGESTION_HASH_STALE"
+        : "AI_SUGGESTION_REVISION_STALE",
+    );
   }
   if (
     suggestion.range.to > snapshot.text.length ||

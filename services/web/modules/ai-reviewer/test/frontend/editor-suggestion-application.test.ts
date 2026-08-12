@@ -304,6 +304,30 @@ describe("AI reviewer: single document Editor application", function () {
     expect(context.realtimeText).to.equal(baseText);
   });
 
+  it("applies after the revision advances when the captured content still matches", async function () {
+    context.revision = 8;
+
+    const result = await applySingleDocumentSuggestion({
+      view,
+      request: request(),
+      suggestion: suggestion(),
+      binding: {
+        currentDocument: documentA,
+        shareDocument: documentA.doc,
+        trackChanges: false,
+      },
+      getContext: () => ({ ...context }),
+      hashText: async () => baseTextHash,
+    });
+
+    expect(result).to.deep.equal({
+      status: "applied",
+    });
+    expect(view.state.doc.toString()).to.equal("Alpha clear gamma.");
+    expect(aiTransactions).to.have.length(1);
+    expect(documentTransactions).to.have.length(1);
+  });
+
   it("binds the CodeMirror state to the exact document object", function () {
     expect(view.state.facet(aiReviewerDocumentIdentity)).to.deep.equal({
       documentId: "document-0001",
@@ -1407,12 +1431,11 @@ describe("AI reviewer: single document selected-hunk application", function () {
     resolveCompile();
 
     expect(await application).to.deep.equal({
-      status: "conflict",
-      code: "AI_SUGGESTION_REVISION_STALE",
+      status: "applied",
     });
-    expect(view.state.doc.toString()).to.equal(multiHunkText);
-    expect(aiTransactions).to.deep.equal([]);
-    expect(documentTransactions).to.deep.equal([]);
+    expect(view.state.doc.toString()).to.equal(multiHunkReplacement);
+    expect(aiTransactions).to.have.length(1);
+    expect(documentTransactions).to.have.length(1);
   });
 
   it("dispatches synchronously after final preflight before queued Editor work", async function () {

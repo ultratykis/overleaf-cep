@@ -1158,13 +1158,6 @@ describe("AI reviewer: single document evidence navigation", function () {
       },
     },
     {
-      name: "a changed revision",
-      code: "AI_EVIDENCE_STATE_STALE",
-      mutate(fixture) {
-        fixture.shareDocument.version += 1;
-      },
-    },
-    {
       name: "a disconnected context",
       code: "AI_EVIDENCE_STATE_STALE",
       mutate(fixture) {
@@ -1242,6 +1235,25 @@ describe("AI reviewer: single document evidence navigation", function () {
       expect(fixture.submitOp.called).to.equal(false);
     });
   }
+
+  it("navigates after the revision advances when the captured content still matches", async function () {
+    const fixture = createFixture();
+    const hashText = sinon.stub().resolves(baseTextHash);
+    fixture.shareDocument.version += 1;
+
+    const result = await navigateToEditorEvidence(
+      navigationOptions(fixture, {
+        hashText,
+      }),
+    );
+
+    expect(result).to.deep.equal({
+      status: "navigated",
+    });
+    expect(hashText.calledOnceWithExactly(baseText)).to.equal(true);
+    expect(fixture.navigationTransactions).to.have.length(1);
+    expect(fixture.submitOp.called).to.equal(false);
+  });
 
   it("returns a typed stale conflict when a live accessor throws", async function () {
     const fixture = createFixture();
@@ -1342,6 +1354,21 @@ describe("AI reviewer: single document evidence navigation", function () {
 });
 
 describe("AI reviewer: cross-file project evidence navigation", function () {
+  it("selects verified project evidence after only its revision advances", async function () {
+    const fixture = createProjectFixture({
+      openedRevision: projectRevision + 1,
+    });
+
+    const result = await navigateToEditorEvidence(fixture.options);
+
+    expect(result).to.deep.equal({
+      status: "navigated",
+    });
+    expect(fixture.hashText.calledOnceWithExactly(projectText)).to.equal(true);
+    expect(fixture.opened.navigationTransactions).to.have.length(1);
+    expect(fixture.opened.submitOp.called).to.equal(false);
+  });
+
   it("opens an exact current-project document and selects its verified range without editing", async function () {
     const fixture = createProjectFixture();
     const initialText = fixture.initial.view.state.doc.toString();
@@ -1442,7 +1469,9 @@ describe("AI reviewer: cross-file project evidence navigation", function () {
     expect(fixture.opened.navigationTransactions).to.have.length(0);
     expect(fixture.opened.documentTransactions).to.have.length(0);
     expect(fixture.opened.submitOp.called).to.equal(false);
-    expect(fixture.hashText.called).to.equal(false);
+    expect(
+      fixture.hashText.calledOnceWithExactly("Other changed! text."),
+    ).to.equal(true);
   });
 
   it("opens range-only project evidence without selecting an unverified range", async function () {

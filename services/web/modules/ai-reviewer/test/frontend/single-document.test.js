@@ -130,6 +130,27 @@ describe("AI reviewer: single document", function () {
 });
 
 describe("AI reviewer: OT safety", function () {
+  it("allows an advanced revision when the captured content still matches", function () {
+    const result = preflightSingleDocumentSuggestion({
+      request: request(),
+      suggestion: prepareSingleDocumentSuggestion({
+        request: request(),
+        suggestion: suggestion(),
+      }),
+      snapshot: snapshot({ revision: 8 }),
+    });
+
+    expect(result).to.deep.equal({
+      status: "ready",
+      change: {
+        from: 6,
+        to: 10,
+        insert: "clear",
+      },
+      userEvent: "input.ai-reviewer.accept",
+    });
+  });
+
   const staleCases = [
     [
       "project",
@@ -142,7 +163,11 @@ describe("AI reviewer: OT safety", function () {
       "AI_SUGGESTION_DOCUMENT_CHANGED",
     ],
     ["path", { path: "other.tex" }, "AI_SUGGESTION_DOCUMENT_CHANGED"],
-    ["revision", { revision: 8 }, "AI_SUGGESTION_REVISION_STALE"],
+    [
+      "content after an advanced revision",
+      { revision: 8, textHash: "b".repeat(64) },
+      "AI_SUGGESTION_REVISION_STALE",
+    ],
     ["hash", { textHash: "b".repeat(64) }, "AI_SUGGESTION_HASH_STALE"],
     ["range", { text: "Alpha be" }, "AI_SUGGESTION_ORIGINAL_STALE"],
     ["offline state", { connected: false }, "AI_EDITOR_OFFLINE"],

@@ -619,7 +619,6 @@ function captureLiveEvidenceContextUnsafe(
     !Number.isSafeInteger(revisionBefore) ||
     revisionBefore < 0 ||
     revisionAfter !== revisionBefore ||
-    revisionBefore !== target.baseRevision ||
     typeof text !== "string" ||
     hasBufferedOps !== false ||
     currentDocument.doc !== shareDocument
@@ -1212,11 +1211,7 @@ async function navigateToProjectEditorEvidence({
   }
 
   const before = openedContext.snapshot;
-  if (
-    (target.revision === undefined && target.textHash === undefined) ||
-    target.range.to > before.text.length ||
-    (target.revision !== undefined && target.revision !== before.revision)
-  ) {
+  if (target.textHash === undefined || target.range.to > before.text.length) {
     return {
       status: "opened",
     };
