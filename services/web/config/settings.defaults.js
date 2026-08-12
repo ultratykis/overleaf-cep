@@ -1282,10 +1282,14 @@ module.exports = {
       ),
     ],
     railEntries: [
-      Path.resolve(
-        __dirname,
-        '../modules/ai-reviewer/frontend/js/components/ai-reviewer-rail-entry.tsx'
-      ),
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/components/ai-reviewer-rail-entry.tsx'
+            ),
+          ]
+        : []),
     ],
     railPopovers: [],
     railActions: [],
