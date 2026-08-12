@@ -756,6 +756,15 @@ describe("AI reviewer: persisted review workspace", function () {
     const summary = await screen.findByRole("article", {
       name: "Discussion summary",
     });
+    const summaryDelete = within(summary).getByRole("button", {
+      name: "Delete discussion",
+    });
+    expect(
+      summaryDelete.querySelector(".material-symbols")?.textContent,
+    ).to.equal("delete");
+    expect(
+      summaryDelete.closest(".ai-reviewer-discussion-title-row"),
+    ).not.to.equal(null);
     fireEvent.click(
       within(summary).getByRole("button", {
         name: "No subject",
@@ -763,11 +772,16 @@ describe("AI reviewer: persisted review workspace", function () {
     );
     expect(await screen.findByText("Keep this open question.")).to.exist;
     expect(screen.getByText("This answer must survive a reload.")).to.exist;
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Delete discussion",
-      }),
-    );
+    const activeDelete = screen.getByRole("button", {
+      name: "Delete discussion",
+    });
+    expect(
+      activeDelete.querySelector(".material-symbols")?.textContent,
+    ).to.equal("delete");
+    expect(
+      activeDelete.closest(".ai-reviewer-discussion-title-row"),
+    ).not.to.equal(null);
+    fireEvent.click(activeDelete);
     confirmDeleteDiscussion();
 
     await waitFor(() => {

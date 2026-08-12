@@ -78,7 +78,7 @@ const discussionLayoutSelectors = [
   ".ai-reviewer-panel-body",
   ".ai-reviewer-discussion-thread",
   ".ai-reviewer-discussion-header",
-  ".ai-reviewer-discussion-header-actions",
+  ".ai-reviewer-discussion-title-row",
   ".ai-reviewer-discussion-turns",
   ".ai-reviewer-discussion-quote",
   ".ai-reviewer-panel-footer",

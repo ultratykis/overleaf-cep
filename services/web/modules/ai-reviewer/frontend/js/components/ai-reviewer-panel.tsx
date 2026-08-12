@@ -14,7 +14,6 @@ import OLButton from "@/shared/components/ol/ol-button";
 import OLDropdownMenuItem from "@/shared/components/ol/ol-dropdown-menu-item";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
-import OLIconButton from "@/shared/components/ol/ol-icon-button";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
 import { useProjectContext } from "@/shared/context/project-context";
 import type { TFunction } from "i18next";
@@ -140,14 +139,12 @@ function AiReviewerTooltipIconButton({
   id,
   label,
   icon,
-  variant,
   disabled = false,
   onClick,
 }: {
   id: string;
   label: string;
   icon: string;
-  variant: "secondary" | "ghost";
   disabled?: boolean;
   onClick: () => void;
 }) {
@@ -158,15 +155,16 @@ function AiReviewerTooltipIconButton({
       overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
     >
       <span className="ai-reviewer-tooltip-icon-button">
-        <OLIconButton
+        <button
           type="button"
-          variant={variant}
-          size="sm"
-          accessibilityLabel={label}
-          icon={icon}
+          tabIndex={0}
+          className="btn"
+          aria-label={label}
           disabled={disabled}
           onClick={onClick}
-        />
+        >
+          <MaterialIcon type={icon} />
+        </button>
       </span>
     </OLTooltip>
   );
@@ -521,6 +519,25 @@ function selectionActionLabel(
     case "shorten":
       return t("ai_reviewer_shorten_selection");
   }
+}
+
+function runTitle(
+  runState: SelectionWorkspaceState,
+  t: TFunction<"translation">,
+) {
+  if (runState.status === "error") {
+    return t("ai_reviewer_response_failed");
+  }
+  if (runState.subject != null) {
+    return runState.subject;
+  }
+  if (
+    runState.request?.action === "rewrite" ||
+    runState.request?.action === "shorten"
+  ) {
+    return runState.request.instruction;
+  }
+  return t("ai_reviewer_discussion_no_subject");
 }
 
 function agentErrorGuidance(
@@ -4638,7 +4655,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discuss`}
               label={t("ai_reviewer_discuss_finding")}
               icon="forum"
-              variant="secondary"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -4657,7 +4673,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_finding_as_comment")}
               icon="add_comment"
-              variant="secondary"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -4677,7 +4692,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discard`}
               label={t("ai_reviewer_discard_finding")}
               icon="delete"
-              variant="ghost"
               disabled={
                 persistenceConflict || commentDraft?.key === commentDraftKey
               }
@@ -4748,7 +4762,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discuss`}
               label={t("ai_reviewer_discuss_citation_finding")}
               icon="forum"
-              variant="secondary"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -4767,7 +4780,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-copy`}
               label={t("ai_reviewer_copy_proposed_text")}
               icon="content_copy"
-              variant="secondary"
               disabled={persistenceConflict || copyNotice?.status === "copying"}
               onClick={() => copyCitationProposedText(runState, finding)}
             />
@@ -4777,7 +4789,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discard`}
               label={t("ai_reviewer_discard_citation_finding")}
               icon="delete"
-              variant="ghost"
               disabled={persistenceConflict}
               onClick={() => discardFinding(runState, finding)}
             />
@@ -4858,7 +4869,6 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discuss`}
             label={t("ai_reviewer_discuss_suggestion")}
             icon="forum"
-            variant="secondary"
             onClick={() =>
               openDiscussion(
                 runState,
@@ -4881,7 +4891,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_suggestion_as_comment")}
               icon="add_comment"
-              variant="secondary"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -4901,7 +4910,6 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discard`}
             label={t("ai_reviewer_discard_suggestion")}
             icon="delete"
-            variant="ghost"
             disabled={
               persistenceConflict || commentDraft?.key === commentDraftKey
             }
@@ -5001,24 +5009,41 @@ export function AiReviewerPanelView({
     >
       <header className="ai-reviewer-run-header">
         <div className="ai-reviewer-run-heading">
-          <h3 className="ai-reviewer-run-title">
-            {runState.status === "error"
-              ? t("ai_reviewer_response_failed")
-              : (runState.subject ?? t("ai_reviewer_discussion_no_subject"))}
-            {runState.group != null &&
-              ` ${runState.group.position}/${runState.group.total}`}
-          </h3>
+          <div className="ai-reviewer-run-title-row">
+            <h3 className="ai-reviewer-run-title">
+              {runTitle(runState, t)}
+              {runState.group != null &&
+                ` ${runState.group.position}/${runState.group.total}`}
+            </h3>
+            {runState.provider != null && runState.model != null && (
+              <OLTooltip
+                id={`ai-reviewer-run-${runState.generation}-model`}
+                description={t("ai_reviewer_run_model", {
+                  provider: runState.provider,
+                  model: runState.model,
+                })}
+                overlayProps={{
+                  placement: "top",
+                  trigger: ["hover", "focus"],
+                }}
+              >
+                <span
+                  className="ai-reviewer-run-model"
+                  role="img"
+                  tabIndex={0}
+                  aria-label={t("ai_reviewer_run_model", {
+                    provider: runState.provider,
+                    model: runState.model,
+                  })}
+                >
+                  <MaterialIcon type="info" className="icon-small" />
+                </span>
+              </OLTooltip>
+            )}
+          </div>
           <span className="ai-reviewer-run-status" aria-live="polite">
             {runStatusLabel(runState.status, t)}
           </span>
-          {runState.provider != null && runState.model != null && (
-            <span className="ai-reviewer-run-model">
-              {t("ai_reviewer_run_model", {
-                provider: runState.provider,
-                model: runState.model,
-              })}
-            </span>
-          )}
         </div>
         <div
           className="ai-reviewer-run-header-action"
@@ -5041,7 +5066,6 @@ export function AiReviewerPanelView({
               id={`ai-reviewer-run-${runState.generation}-discuss`}
               label={t("ai_reviewer_discuss_run")}
               icon="forum"
-              variant="secondary"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -5196,7 +5220,6 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_suggestion_as_comment")}
               icon="add_comment"
-              variant="secondary"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -5218,7 +5241,6 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discard`}
             label={t("ai_reviewer_discard_suggestion")}
             icon="delete"
-            variant="ghost"
             disabled={
               persistenceConflict || commentDraft?.key === commentDraftKey
             }
@@ -5251,22 +5273,40 @@ export function AiReviewerPanelView({
           aria-label={t("ai_reviewer_discussion_summary")}
           className="ai-reviewer-discussion-row"
         >
-          <OLTooltip
-            id={`ai-reviewer-discussion-${discussion.id}-subject`}
-            description={discussion.subjectLabel}
-            overlayProps={{ placement: "right" }}
-          >
-            <span className="ai-reviewer-discussion-row-subject-wrap">
-              <OLButton
-                type="button"
-                variant="link"
-                className="ai-reviewer-discussion-row-subject"
-                onClick={() => setActiveDiscussionId(discussion.id)}
-              >
-                {discussion.subjectLabel}
-              </OLButton>
-            </span>
-          </OLTooltip>
+          <div className="ai-reviewer-discussion-title-row">
+            <OLTooltip
+              id={`ai-reviewer-discussion-${discussion.id}-subject`}
+              description={discussion.subjectLabel}
+              overlayProps={{ placement: "right" }}
+            >
+              <span className="ai-reviewer-discussion-row-subject-wrap">
+                <OLButton
+                  type="button"
+                  variant="link"
+                  className="ai-reviewer-discussion-row-subject"
+                  onClick={() => setActiveDiscussionId(discussion.id)}
+                >
+                  {discussion.subjectLabel}
+                </OLButton>
+              </span>
+            </OLTooltip>
+            <AiReviewerTooltipIconButton
+              id={`ai-reviewer-discussion-${discussion.id}-delete`}
+              label={t("ai_reviewer_delete_discussion")}
+              icon="delete"
+              disabled={
+                busy ||
+                persistenceSaveFailed ||
+                discussion.status === "streaming"
+              }
+              onClick={() =>
+                setDiscussionPendingDeletion({
+                  projectId,
+                  discussionId: discussion.id,
+                })
+              }
+            />
+          </div>
           <span className="ai-reviewer-discussion-row-status">
             {discussion.status === "streaming"
               ? t("ai_reviewer_discussion_status_responding")
@@ -5281,22 +5321,6 @@ export function AiReviewerPanelView({
               updatedAt: discussion.updatedAt,
             })}
           </time>
-          <OLButton
-            type="button"
-            variant="danger-ghost"
-            size="sm"
-            disabled={
-              busy || persistenceSaveFailed || discussion.status === "streaming"
-            }
-            onClick={() =>
-              setDiscussionPendingDeletion({
-                projectId,
-                discussionId: discussion.id,
-              })
-            }
-          >
-            {t("ai_reviewer_delete_discussion")}
-          </OLButton>
         </article>
       );
     }
@@ -5314,28 +5338,18 @@ export function AiReviewerPanelView({
         className="ai-reviewer-discussion-thread"
       >
         <header className="ai-reviewer-discussion-header">
-          <h3
-            className="ai-reviewer-discussion-subject"
-            data-testid="discussion-subject"
-            title={discussion.subjectLabel}
-          >
-            {discussion.subjectLabel}
-          </h3>
-          <div className="ai-reviewer-discussion-header-actions">
-            {discussion.status === "streaming" && (
-              <OLButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={stopActiveWork}
-              >
-                {t("ai_reviewer_stop")}
-              </OLButton>
-            )}
-            <OLButton
-              type="button"
-              variant="danger-ghost"
-              size="sm"
+          <div className="ai-reviewer-discussion-title-row">
+            <h3
+              className="ai-reviewer-discussion-subject"
+              data-testid="discussion-subject"
+              title={discussion.subjectLabel}
+            >
+              {discussion.subjectLabel}
+            </h3>
+            <AiReviewerTooltipIconButton
+              id={`ai-reviewer-discussion-${discussion.id}-delete`}
+              label={t("ai_reviewer_delete_discussion")}
+              icon="delete"
               disabled={
                 busy ||
                 persistenceSaveFailed ||
@@ -5347,10 +5361,20 @@ export function AiReviewerPanelView({
                   discussionId: discussion.id,
                 })
               }
-            >
-              {t("ai_reviewer_delete_discussion")}
-            </OLButton>
+            />
           </div>
+          {discussion.status === "streaming" && (
+            <div className="ai-reviewer-discussion-header-actions">
+              <OLButton
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={stopActiveWork}
+              >
+                {t("ai_reviewer_stop")}
+              </OLButton>
+            </div>
+          )}
         </header>
         {quote != null && (
           <div

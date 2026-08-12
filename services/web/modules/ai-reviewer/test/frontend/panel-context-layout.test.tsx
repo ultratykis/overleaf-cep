@@ -1212,9 +1212,9 @@ describe("AI reviewer: context-driven panel", function () {
         name: "Selected model — Claude Sonnet. Context length — 200,000 tokens · provider-detected value",
       }),
     ).to.exist;
-    expect(
-      within(run).getByText("Model used for this run: fake · deterministic-v1"),
-    ).to.exist;
+    const modelUsed = "Model used for this run: fake · deterministic-v1";
+    expect(within(run).getByLabelText(modelUsed)).to.exist;
+    expect(within(run).queryByText(modelUsed)).not.to.exist;
   });
 
   it("distinguishes a pending compatible probe from unavailable Azure metadata", async function () {

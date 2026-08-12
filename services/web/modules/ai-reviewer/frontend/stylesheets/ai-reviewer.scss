@@ -910,6 +910,22 @@
   gap: var(--spacing-02);
 }
 
+.ai-reviewer-run-title-row,
+.ai-reviewer-discussion-title-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: 100%;
+  gap: var(--spacing-02);
+}
+
+.ai-reviewer-run-title-row > .ai-reviewer-run-title,
+.ai-reviewer-discussion-title-row > .ai-reviewer-discussion-subject,
+.ai-reviewer-discussion-title-row > .ai-reviewer-discussion-row-subject-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
 .ai-reviewer-run-header-action {
   align-self: flex-start;
 
@@ -939,6 +955,12 @@
   color: var(--content-secondary-themed);
   font-size: var(--font-size-01);
   line-height: var(--line-height-01);
+}
+
+.ai-reviewer-run-model {
+  display: inline-flex;
+  flex: none;
+  cursor: help;
 }
 
 .ai-reviewer-artifact {
@@ -990,6 +1012,31 @@
 
 .ai-reviewer-tooltip-icon-button {
   display: inline-flex;
+  align-items: center;
+
+  // Borderless icon chrome, matching the editor's review panel. Kept local
+  // so a rename there cannot silently strip these buttons.
+  .btn {
+    width: 24px;
+    height: 24px;
+    padding: var(--spacing-01);
+    border-width: 0;
+    background-color: transparent;
+    color: var(--content-primary);
+
+    &:hover,
+    &:focus {
+      background-color: var(--neutral-20);
+    }
+
+    &:disabled {
+      opacity: 0.5;
+    }
+  }
+
+  .material-symbols {
+    font-size: var(--font-size-05);
+  }
 }
 
 .ai-reviewer-artifact-apply {

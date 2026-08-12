@@ -281,7 +281,7 @@ function selectionCapture() {
         instruction,
       }: {
         requestId: string;
-        action: "review";
+        action: "review" | "rewrite" | "shorten";
         instruction: string;
       }) => ({
         status: "ready" as const,
@@ -291,7 +291,7 @@ function selectionCapture() {
             projectId,
             action,
             instruction,
-            skill: "referee-review",
+            skill: action === "review" ? "referee-review" : "line-edit",
             scope: Object.freeze({
               kind: "selection" as const,
               documentId: "document-1",
@@ -456,11 +456,10 @@ describe("AI reviewer: panel layout", function () {
     expect(streamRequest.firstCall.args[0].request.connectionId).to.equal(
       localConnection.id,
     );
-    expect(
-      screen.getByText(
-        `Model used for this run: openai-compatible · ${selectedModel}`,
-      ),
-    ).to.exist;
+    const run = screen.getByRole("article", { name: "Review run 1" });
+    const modelUsed = `Model used for this run: openai-compatible · ${selectedModel}`;
+    expect(within(run).getByLabelText(modelUsed)).to.exist;
+    expect(within(run).queryByText(modelUsed)).not.to.exist;
   });
 
   it("offers the models of every connection in one dropdown", async function () {
@@ -797,12 +796,15 @@ describe("AI reviewer: panel layout", function () {
     const discussRun = within(headerAction).getByRole("button", {
       name: "Discuss this run",
     });
-    expect(discussRun.textContent).to.equal("forum");
+    expect(discussRun.querySelector(".material-symbols")?.textContent).to.equal(
+      "forum",
+    );
+    expect(discussRun.className).to.equal("btn");
     expect(within(run).getByRole("heading", { name: "Claim support" })).to
       .exist;
   });
 
-  it("shows No subject when a completed review emitted none", async function () {
+  it("keeps No subject when a completed review emitted none", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       call.onEvent({
         type: "completed",
@@ -819,6 +821,29 @@ describe("AI reviewer: panel layout", function () {
     const run = await screen.findByRole("article", { name: "Review run 1" });
 
     expect(within(run).getByRole("heading", { name: "No subject" })).to.exist;
+  });
+
+  it("uses the instruction as the missing subject fallback for a transform run", async function () {
+    const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
+      call.onEvent({
+        type: "completed",
+        eventId: "panel-transform-no-subject-completed",
+        requestId: call.request.requestId,
+        sequence: 0,
+        createdAt,
+        finishReason: "stop",
+      });
+    });
+    renderReviewPanel({ streamRequest });
+
+    fireEvent.click(screen.getByRole("button", { name: "Rewrite selection" }));
+    const run = await screen.findByRole("article", { name: "Review run 1" });
+
+    expect(
+      within(run).getByRole("heading", {
+        name: "Rewrite the selected phrase.",
+      }),
+    ).to.exist;
   });
 
   it("shows when a completed review did not call the offered finding tool", async function () {
@@ -1012,7 +1037,9 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
 
     const run = await screen.findByRole("article", { name: "Review run 1" });
-    expect(within(run).getByText("Error")).to.exist;
+    // The run reaches its terminal state asynchronously, so wait for the
+    // status rather than sampling it while the capture is still in flight.
+    expect(await within(run).findByText("Error")).to.exist;
     expect(
       within(run).getByText(modelContextUnknownGuidance),
     ).to.exist;
@@ -1055,9 +1082,9 @@ describe("AI reviewer: panel layout", function () {
         "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
       ),
     ).to.exist;
-    expect(
-      within(run).getByText("Model used for this run: azure · gpt-5.6-luna"),
-    ).to.exist;
+    const modelUsed = "Model used for this run: azure · gpt-5.6-luna";
+    expect(within(run).getByLabelText(modelUsed)).to.exist;
+    expect(within(run).queryByText(modelUsed)).not.to.exist;
   });
 
   it("keeps both terminal error paths when translation resources refresh", async function () {
