@@ -579,3 +579,53 @@ policy, a dedicated Resolved-list UI, Review-to-Agent history inheritance, and
 multi-document write authority. Re-open the adoption decision only after App
 Server has a production-supported contract and the remaining operational work
 has a concrete product need.
+
+## Freeze decision (2026-08-12)
+
+The external harness is frozen as future work. The native reviewer remains
+the production path. This extends the 2026-08-08 adoption decision with new
+first-hand evidence gathered on a local Apple Silicon environment (workspace
+issues #101/#102; issue numbers below refer to the workspace tracker).
+
+What was proven before freezing:
+
+- The full pipeline works: web → Unix socket → runner → Codex App Server
+  0.146.0 → local OpenAI-compatible endpoint, including multi-turn Agent
+  threads and thread resume across a runner container restart (#101).
+- A real-browser Review selection run completes end to end and renders the
+  model's critique in the panel (#102).
+- The edit-collection boundary is sound: a manual work-tree change comes back
+  as one anchored edit (documentId, baseRevision, baseTextHash, UTF-16 range).
+
+Why it is frozen rather than adopted:
+
+- `wire_api` is pinned to `"responses"` (#108), so the one production-grade
+  connection actually available (an OpenAI-compatible Chat Completions
+  gateway) cannot drive it at all.
+- Small local models complete turns but never invoke Codex's tools, so the
+  edit path cannot be exercised in day-to-day local verification (#113); the
+  tools are offered correctly, the models simply cannot ride a 9-tool,
+  20KB-instruction agent loop.
+- Running Codex's inner bubblewrap sandbox requires relaxing the runner
+  container's seccomp profile (#111), an isolation trade-off that deserves
+  its own decision before production.
+- The runner intentionally reports failures as one opaque error and logs
+  nothing (#110), which made every diagnosis in #101/#102 require bypassing
+  the socket boundary.
+- Checkpointing requires per-document History versions; imported projects
+  whose documents were never edited in the editor cannot checkpoint at all
+  (#118; the mixed case was fixed as `document-unversioned` exclusions).
+- The App Server command remains officially experimental.
+
+Fixes landed during the spike that stand regardless of harness:
+
+- Architecture-aware App Server runtime resolution for linux/arm64.
+- A configurable whole-turn timeout, default five minutes.
+- Unversioned-document exclusions in external snapshots.
+- Consistent frontend import gating for the module.
+
+Conditions for unfreezing, in order: a production-supported App Server
+contract upstream; Chat Completions support or a Responses-capable strong
+model actually reachable from this deployment (#108); then #110, #111 and
+#118 resolved deliberately. Until then no new code lands on the external
+path; its tests stay as they are.
