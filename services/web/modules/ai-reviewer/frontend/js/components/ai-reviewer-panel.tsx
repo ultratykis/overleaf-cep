@@ -314,6 +314,41 @@ type Discussion = {
   updatedAt: string;
 };
 
+function isRunBusy(run: SelectionWorkspaceState) {
+  return (
+    run.status === "capturing" ||
+    run.status === "streaming" ||
+    run.status === "finalizing"
+  );
+}
+
+function discussionBelongsToRun(
+  discussion: Discussion,
+  run: SelectionWorkspaceState,
+) {
+  return (
+    discussion.sourceGeneration === run.generation ||
+    (run.requestId != null &&
+      discussion.subject?.sourceRequest.requestId === run.requestId)
+  );
+}
+
+function shouldAutoDeleteTransformRun(
+  run: SelectionWorkspaceState,
+  discussions: Discussion[],
+) {
+  return (
+    run.status === "completed" &&
+    (run.request?.action === "rewrite" || run.request?.action === "shorten") &&
+    run.suggestions.length > 0 &&
+    run.suggestions.every((suggestion) => {
+      const status = suggestionStatus(run.suggestionStatuses, suggestion.id);
+      return status === "applied" || status === "discarded";
+    }) &&
+    !discussions.some((discussion) => discussionBelongsToRun(discussion, run))
+  );
+}
+
 type ActiveDiscussionRequest = {
   discussionId: string;
   requestId: string;
@@ -1108,6 +1143,7 @@ function persistedWorkspaceFromState(
   }
   return {
     runs: workspace.runs
+      .filter((run) => !shouldAutoDeleteTransformRun(run, discussions))
       .map(workspaceRunFromState)
       .filter((run): run is WorkspaceRun => run != null),
     discussions: discussions.map(workspaceDiscussionFromState),
@@ -1581,7 +1617,11 @@ export function AiReviewerPanelView({
       activeCircuitReset.current = controller;
       setCircuitResetPending(connectionId);
       setCircuitResetError(null);
-      void resetProviderCircuit(projectId, connectionId, controller.signal).then(
+      void resetProviderCircuit(
+        projectId,
+        connectionId,
+        controller.signal,
+      ).then(
         () => {
           if (
             !controller.signal.aborted &&
@@ -1605,12 +1645,7 @@ export function AiReviewerPanelView({
         },
       );
     },
-    [
-      projectId,
-      refreshProviderCatalog,
-      resetProviderCircuit,
-      t,
-    ],
+    [projectId, refreshProviderCatalog, resetProviderCircuit, t],
   );
   const recoverMissingProviderConnection = useCallback(() => {
     setSelectedModel(null);
@@ -1647,6 +1682,10 @@ export function AiReviewerPanelView({
   const [discussionPendingDeletion, setDiscussionPendingDeletion] = useState<{
     projectId: string;
     discussionId: string;
+  } | null>(null);
+  const [runPendingDeletion, setRunPendingDeletion] = useState<{
+    projectId: string;
+    generation: number;
   } | null>(null);
   const [activeSuggestionApplication, setActiveSuggestionApplication] =
     useState<ActiveSuggestionApplication | null>(null);
@@ -1724,8 +1763,7 @@ export function AiReviewerPanelView({
     const controller = new AbortController();
     const refreshModels =
       providerCatalogRequest.refreshModels &&
-      consumedModelRefreshRevision.current !==
-        providerCatalogRequest.revision;
+      consumedModelRefreshRevision.current !== providerCatalogRequest.revision;
     if (refreshModels) {
       consumedModelRefreshRevision.current = providerCatalogRequest.revision;
     }
@@ -2128,6 +2166,23 @@ export function AiReviewerPanelView({
     workspace,
     workspacePersistence,
   ]);
+
+  useEffect(() => {
+    const autoDeletedGenerations = new Set(
+      workspace.runs
+        .filter((run) => shouldAutoDeleteTransformRun(run, discussions))
+        .map((run) => run.generation),
+    );
+    if (autoDeletedGenerations.size === 0) {
+      return;
+    }
+    dispatch({
+      type: "retain-runs",
+      generations: workspace.runs
+        .filter((run) => !autoDeletedGenerations.has(run.generation))
+        .map((run) => run.generation),
+    });
+  }, [discussions, workspace.runs]);
 
   const invalidateRun = useCallback((run: ActiveRun, reason: unknown) => {
     run.invalidated = true;
@@ -3081,12 +3136,7 @@ export function AiReviewerPanelView({
     updateDiscussions,
   ]);
 
-  const runInProgress = workspace.runs.some(
-    (run) =>
-      run.status === "capturing" ||
-      run.status === "streaming" ||
-      run.status === "finalizing",
-  );
+  const runInProgress = workspace.runs.some(isRunBusy);
   const answerStreaming = discussions.some(
     (discussion) => discussion.status === "streaming",
   );
@@ -4019,6 +4069,162 @@ export function AiReviewerPanelView({
     [disposeActiveSuggestion, now, updateDiscussions],
   );
 
+  const deleteRun = useCallback(
+    (generation: number) => {
+      const run = workspaceRef.current.runs.find(
+        (candidate) => candidate.generation === generation,
+      );
+      if (run == null) {
+        return;
+      }
+      const attachedDiscussions = discussionsRef.current.filter((discussion) =>
+        discussionBelongsToRun(discussion, run),
+      );
+      if (
+        persistenceSaveFailedRef.current ||
+        persistenceConflictRef.current ||
+        persistenceMutationPendingRef.current ||
+        busy ||
+        isRunBusy(run) ||
+        attachedDiscussions.some(
+          (discussion) => discussion.status === "streaming",
+        )
+      ) {
+        return;
+      }
+
+      const attachedDiscussionIds = new Set(
+        attachedDiscussions.map((discussion) => discussion.id),
+      );
+      const activeApplication = activeSuggestionApplicationRef.current;
+      if (
+        activeApplication?.generation === generation ||
+        (activeApplication?.discussionId != null &&
+          attachedDiscussionIds.has(activeApplication.discussionId))
+      ) {
+        disposeActiveSuggestion(cancellationReason("The run was deleted."));
+      }
+      if (activeEvidenceNavigation.current?.generation === generation) {
+        disposeActiveEvidenceNavigation(
+          cancellationReason("The run was deleted."),
+        );
+      }
+      if (activeCitationCopy.current?.generation === generation) {
+        clearCitationCopy();
+      }
+      setCommentDraft((current) => {
+        if (
+          current == null ||
+          !(
+            (current.discussionId == null &&
+              current.generation === generation) ||
+            (current.discussionId != null &&
+              attachedDiscussionIds.has(current.discussionId))
+          )
+        ) {
+          return current;
+        }
+        if (activeCommentPosting.current?.key === current.key) {
+          activeCommentPosting.current.controller.abort(
+            cancellationReason("The run was deleted."),
+          );
+          activeCommentPosting.current = null;
+        }
+        return null;
+      });
+      const discussionRequest = activeDiscussionRequest.current;
+      if (
+        discussionRequest != null &&
+        attachedDiscussionIds.has(discussionRequest.discussionId)
+      ) {
+        activeDiscussionRequest.current = null;
+        discussionRequest.controller.abort(
+          cancellationReason("The run was deleted."),
+        );
+      }
+      setContextTruncatedRuns((current) => {
+        if (!current.has(generation)) return current;
+        const next = new Set(current);
+        next.delete(generation);
+        return next;
+      });
+      setFindingToolNotCalledRuns((current) => {
+        if (!current.has(generation)) return current;
+        const next = new Set(current);
+        next.delete(generation);
+        return next;
+      });
+      if (pendingStartedRunScroll.current === generation) {
+        pendingStartedRunScroll.current = null;
+      }
+      dispatch({
+        type: "retain-runs",
+        generations: workspaceRef.current.runs
+          .filter((candidate) => candidate.generation !== generation)
+          .map((candidate) => candidate.generation),
+      });
+      updateDiscussions((current) =>
+        current.filter(
+          (discussion) => !attachedDiscussionIds.has(discussion.id),
+        ),
+      );
+      if (
+        activeDiscussionIdRef.current != null &&
+        attachedDiscussionIds.has(activeDiscussionIdRef.current)
+      ) {
+        setActiveDiscussionId(null);
+      }
+      lastQueuedWorkspace.current = null;
+    },
+    [
+      busy,
+      clearCitationCopy,
+      disposeActiveEvidenceNavigation,
+      disposeActiveSuggestion,
+      updateDiscussions,
+    ],
+  );
+
+  const requestRunDeletion = useCallback(
+    (run: SelectionWorkspaceState) => {
+      if (
+        persistenceSaveFailedRef.current ||
+        persistenceConflictRef.current ||
+        persistenceMutationPendingRef.current ||
+        busy ||
+        isRunBusy(run) ||
+        !workspaceRef.current.runs.some(
+          (candidate) => candidate.generation === run.generation,
+        )
+      ) {
+        return;
+      }
+      const hasAttachedDiscussions = discussionsRef.current.some((discussion) =>
+        discussionBelongsToRun(discussion, run),
+      );
+      if (hasAttachedDiscussions) {
+        setRunPendingDeletion({
+          projectId,
+          generation: run.generation,
+        });
+      } else {
+        deleteRun(run.generation);
+      }
+    },
+    [busy, deleteRun, projectId],
+  );
+
+  const confirmRunDeletion = useCallback(() => {
+    const generation =
+      runPendingDeletion?.projectId === projectId
+        ? runPendingDeletion.generation
+        : null;
+    setRunPendingDeletion(null);
+    if (generation != null) {
+      deleteRun(generation);
+    }
+  }, [deleteRun, projectId, runPendingDeletion]);
+
   const finishDiscussionDeletion = useCallback(
     (
       discussionId: string,
@@ -4542,9 +4748,7 @@ export function AiReviewerPanelView({
               {title != null && (
                 <span className="ai-reviewer-artifact-title">{title}</span>
               )}
-              <span className="ai-reviewer-artifact-status">
-                {statusLabel}
-              </span>
+              <span className="ai-reviewer-artifact-status">{statusLabel}</span>
             </span>
           </summary>
           <div className="ai-reviewer-artifact-body">{body}</div>
@@ -5055,6 +5259,22 @@ export function AiReviewerPanelView({
                 </span>
               </OLTooltip>
             )}
+            <AiReviewerTooltipIconButton
+              id={`ai-reviewer-run-${runState.generation}-delete`}
+              label={t("ai_reviewer_delete_run")}
+              icon="delete"
+              disabled={
+                busy ||
+                persistenceSaveFailed ||
+                isRunBusy(runState) ||
+                discussions.some(
+                  (discussion) =>
+                    discussionBelongsToRun(discussion, runState) &&
+                    discussion.status === "streaming",
+                )
+              }
+              onClick={() => requestRunDeletion(runState)}
+            />
           </div>
           <span className="ai-reviewer-run-status" aria-live="polite">
             {runStatusLabel(runState.status, t)}
@@ -5064,9 +5284,7 @@ export function AiReviewerPanelView({
           className="ai-reviewer-run-header-action"
           data-testid="ai-reviewer-run-header-action"
         >
-          {(runState.status === "capturing" ||
-            runState.status === "streaming" ||
-            runState.status === "finalizing") && (
+          {isRunBusy(runState) && (
             <OLButton
               type="button"
               variant="ghost"
@@ -6054,6 +6272,17 @@ export function AiReviewerPanelView({
             setShowDeleteWorkspaceConfirmation(false);
             deleteWorkspace();
           }}
+        />
+      )}
+      {runPendingDeletion != null && (
+        <GenericConfirmModal
+          show
+          title={t("ai_reviewer_delete_run_confirmation_title")}
+          message={t("ai_reviewer_delete_run_confirmation_message")}
+          confirmLabel={t("delete")}
+          primaryVariant="danger"
+          onHide={() => setRunPendingDeletion(null)}
+          onConfirm={confirmRunDeletion}
         />
       )}
       {discussionPendingDeletion != null && (

@@ -6,12 +6,15 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { expect } from "chai";
 import fetchMock from "fetch-mock";
 import React from "react";
 import sinon from "sinon";
 
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
+import { aiReviewerDocumentIdentity } from "../../frontend/js/extensions/document-identity";
 import {
   AiReviewerWorkspacePersistenceError,
   deleteAiReviewerDiscussion,
@@ -460,6 +463,105 @@ function workspaceWithFinding({
   });
 }
 
+function workspaceWithSuggestions({
+  projectId,
+  action = "review",
+  suggestionCount = 1,
+  includeDiscussion = false,
+}: {
+  projectId: string;
+  action?: AgentRequest["action"];
+  suggestionCount?: number;
+  includeDiscussion?: boolean;
+}): AiReviewerWorkspace {
+  const request = {
+    ...sourceRequest(projectId),
+    action,
+  };
+  const suggestions = Array.from({ length: suggestionCount }, (_, index) => ({
+    artifact: sourceSuggestion(request, `${projectId}-suggestion-${index + 1}`),
+  }));
+  return AiReviewerWorkspaceSchema.parse({
+    runs: [
+      {
+        generation: 1,
+        createdOrder: 1,
+        request,
+        text: "Stored transform text",
+        findings: [],
+        suggestions,
+      },
+    ],
+    discussions: includeDiscussion
+      ? [
+          {
+            id: `${projectId}-discussion`,
+            createdOrder: 2,
+            subjectKey: "1:scope",
+            subject: {
+              kind: "scope",
+              sourceRequest: request,
+            },
+            sourceGeneration: 1,
+            turns: [],
+            suggestions: [],
+            updatedAt: createdAt,
+          },
+        ]
+      : [],
+  });
+}
+
+function selectionContextForRequest(
+  request: AgentRequest,
+): EditorSelectionSessionContext {
+  if (request.scope.kind === "project") {
+    throw new Error("The selection context fixture requires a document scope.");
+  }
+  const shareDocument = {
+    connection: { state: "ok" },
+    getVersion: () => request.scope.baseRevision,
+  };
+  const currentDocument = {
+    doc_id: request.scope.documentId,
+    joined: true,
+    doc: shareDocument,
+    getSnapshot: () => "Alpha beta gamma.",
+    hasBufferedOps: () => false,
+    getTrackingChanges: () => false,
+    cm6: undefined as { view: EditorView } | undefined,
+  };
+  const view = new EditorView({
+    state: EditorState.create({
+      doc: "Alpha beta gamma.",
+      extensions: [
+        aiReviewerDocumentIdentity.of({
+          documentId: request.scope.documentId,
+          currentDocument,
+        }),
+      ],
+    }),
+  });
+  currentDocument.cm6 = { view };
+  return {
+    view,
+    projectId: request.projectId,
+    currentDocumentId: request.scope.documentId,
+    path: request.scope.path,
+    currentDocument,
+    sourceMode: true,
+    connected: true,
+    connectionEpoch: 1,
+    permissions: {
+      read: true,
+      write: true,
+      trackedWrite: true,
+    },
+    trackChanges: false,
+    wantTrackChanges: false,
+  };
+}
+
 function panel(
   projectId: string,
   workspacePersistence: AiReviewerWorkspacePersistence,
@@ -558,6 +660,194 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(persistence.read(projectId).runs[0]?.subject).to.equal(
       "Persisted claim support",
     );
+  });
+
+  it("auto-deletes a transform run only after all suggestions are applied", async function () {
+    const projectId = "transform-auto-delete-project";
+    const initial = workspaceWithSuggestions({
+      projectId,
+      action: "rewrite",
+      suggestionCount: 2,
+    });
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: initial,
+    });
+    const request = initial.runs[0].request;
+
+    render(
+      panel(projectId, persistence, {
+        getSelectionContext: () => selectionContextForRequest(request),
+        getSuggestionHunkIds: sinon.stub().resolves(["ai-hunk-v1-transform"]),
+        applySelectionSuggestion: sinon.stub().resolves({ status: "applied" }),
+      }),
+    );
+
+    const applyButtons = await screen.findAllByRole("button", {
+      name: "Apply",
+    });
+    fireEvent.click(applyButtons[0]);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Review run 1")).to.exist;
+      expect(persistence.read(projectId).runs).to.have.length(1);
+      expect(
+        persistence.read(projectId).runs[0]?.suggestions[0].artifact.status,
+      ).to.equal("applied");
+    });
+
+    const remainingApply = screen
+      .getAllByRole("button", { name: "Apply" })
+      .find((button) => !button.hasAttribute("disabled"));
+    if (remainingApply == null) {
+      throw new Error(
+        "The second transform suggestion must remain applicable.",
+      );
+    }
+    fireEvent.click(remainingApply);
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Review run 1")).not.to.exist;
+      expect(persistence.read(projectId).runs).to.deep.equal([]);
+    });
+  });
+
+  it("keeps a terminal transform run that has an attached discussion", async function () {
+    const projectId = "transform-discussion-project";
+    const initial = workspaceWithSuggestions({
+      projectId,
+      action: "shorten",
+      includeDiscussion: true,
+    });
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: initial,
+    });
+    const request = initial.runs[0].request;
+
+    render(
+      panel(projectId, persistence, {
+        getSelectionContext: () => selectionContextForRequest(request),
+        getSuggestionHunkIds: sinon.stub().resolves(["ai-hunk-v1-transform"]),
+        applySelectionSuggestion: sinon.stub().resolves({ status: "applied" }),
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+    await waitFor(() => {
+      expect(
+        persistence.read(projectId).runs[0]?.suggestions[0].artifact.status,
+      ).to.equal("applied");
+    });
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    expect(persistence.read(projectId).runs).to.have.length(1);
+    expect(persistence.read(projectId).discussions).to.have.length(1);
+  });
+
+  it("renders an error run without persisting it", async function () {
+    const projectId = "error-run-project";
+    const persistence = new MemoryWorkspacePersistence({});
+    const save = sinon.spy(persistence, "save");
+    const request = sourceRequest(projectId);
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ConversationStreamCall) => {
+        call.onEvent({
+          type: "error",
+          eventId: "error-run-terminal",
+          requestId: call.request.requestId,
+          sequence: 0,
+          createdAt,
+          error: {
+            category: "provider",
+            code: "AI_PROVIDER_ERROR",
+            message: "The provider failed.",
+          },
+        });
+      });
+
+    render(
+      panel(projectId, persistence, {
+        createRequestId: () => request.requestId,
+        captureSelectionSession: async ({
+          requestId,
+          action,
+          instruction,
+        }) => ({
+          status: "ready",
+          session: Object.freeze({
+            request: Object.freeze({
+              ...request,
+              requestId,
+              action,
+              instruction,
+            }),
+            binding: Object.freeze({
+              currentDocument: {},
+              shareDocument: {},
+              trackChanges: false,
+              connectionEpoch: 1,
+            }),
+          }),
+        }),
+        streamRequest,
+      }),
+    );
+
+    const reviewButton = await screen.findByRole("button", {
+      name: "Review selection",
+    });
+    await waitFor(() => {
+      expect(reviewButton.hasAttribute("disabled")).to.equal(false);
+    });
+    fireEvent.click(reviewButton);
+    expect(await screen.findByText("Error")).to.exist;
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(save.called).to.equal(false);
+    expect(persistence.read(projectId).runs).to.deep.equal([]);
+  });
+
+  it("deletes runs immediately without discussions and confirms cascading deletion with discussions", async function () {
+    const immediateProjectId = "manual-run-delete-project";
+    const immediatePersistence = new MemoryWorkspacePersistence({
+      [immediateProjectId]: workspaceWithFinding({
+        projectId: immediateProjectId,
+      }),
+    });
+    const immediate = render(panel(immediateProjectId, immediatePersistence));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete run" }));
+    expect(screen.queryByText("Delete this run?")).not.to.exist;
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Review run 1")).not.to.exist;
+      expect(immediatePersistence.read(immediateProjectId).runs).to.deep.equal(
+        [],
+      );
+    });
+    immediate.unmount();
+
+    const confirmedProjectId = "manual-run-discussion-delete-project";
+    const confirmedPersistence = new MemoryWorkspacePersistence({
+      [confirmedProjectId]: workspaceWithFinding({
+        projectId: confirmedProjectId,
+        includeDiscussion: true,
+      }),
+    });
+    render(panel(confirmedProjectId, confirmedPersistence));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete run" }));
+    expect(await screen.findByText("Delete this run?")).to.exist;
+    expect(screen.getByLabelText("Review run 1")).to.exist;
+    expect(
+      confirmedPersistence.read(confirmedProjectId).discussions,
+    ).to.have.length(1);
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Review run 1")).not.to.exist;
+      expect(confirmedPersistence.read(confirmedProjectId)).to.deep.equal(
+        emptyWorkspace(),
+      );
+    });
   });
 
   it("hydrates unresolved artifacts and discussions on later mounts", async function () {

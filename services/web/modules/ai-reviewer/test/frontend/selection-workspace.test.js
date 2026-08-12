@@ -1031,7 +1031,7 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     expect(getSelectionContext.called).to.equal(false);
 
-    await screen.findByText("Status: Applied");
+    await waitFor(() => expect(screen.queryByText("Completed")).not.to.exist);
     expect(applySelectionSuggestion.calledOnce).to.equal(true);
     const application = applySelectionSuggestion.firstCall.args[0];
     expect(application.session).to.equal(session);
@@ -1042,9 +1042,7 @@ describe("AI reviewer: single document selection workspace", function () {
       "ai-hunk-v1-workspace-b",
     ]);
     expect(Object.isFrozen(application.selectedHunkIds)).to.equal(true);
-    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
-      true,
-    );
+    expect(screen.queryByRole("button", { name: "Apply" })).not.to.exist;
   });
   it("fails closed on AI_DIFF_PLAN_MISMATCH from the card Apply entry point", async function () {
     const session = selectionSession({
@@ -1412,7 +1410,7 @@ describe("AI reviewer: single document selection workspace", function () {
     await screen.findByText("Completed");
 
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    await screen.findByText("Status: Applied");
+    await waitFor(() => expect(screen.queryByText("Completed")).not.to.exist);
     expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
       prototypeSuggestion,
     );
