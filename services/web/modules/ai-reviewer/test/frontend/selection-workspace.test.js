@@ -307,8 +307,10 @@ describe("AI reviewer: single document selection workspace", function () {
       expect(screen.getAllByText(`${path} (chars 6\u201310)`)).to.have.length(
         2,
       );
-      expect(screen.getByText("Original: beta")).to.exist;
-      expect(screen.getByText("Replacement: clear")).to.exist;
+      expect(screen.queryByText("Original: beta")).not.to.exist;
+      expect(screen.queryByText("Replacement: clear")).not.to.exist;
+      expect(screen.getByText("beta", { selector: "del" })).to.exist;
+      expect(screen.getByText("clear", { selector: "ins" })).to.exist;
       expect(screen.getByText("Rationale: Use a more precise synthetic term."))
         .to.exist;
       expect(screen.queryByRole("button", { name: /accept/i })).not.to.exist;
@@ -610,7 +612,7 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     await screen.findByText("Completed");
     expect(screen.getByText("Ambiguous synthetic phrase")).to.exist;
-    expect(screen.getByText("Replacement: clear")).to.exist;
+    expect(screen.getByText("clear", { selector: "ins" })).to.exist;
   });
   it("keeps completed events non-final until the stream promise resolves", async function () {
     const session = selectionSession({
@@ -795,8 +797,8 @@ describe("AI reviewer: single document selection workspace", function () {
       "duplicate suggestion",
     );
     expect(streamCall?.signal.aborted).to.equal(true);
-    expect(screen.getByText("Replacement: clear")).to.exist;
-    expect(screen.queryByText("Replacement: different")).not.to.exist;
+    expect(screen.getByText("clear", { selector: "ins" })).to.exist;
+    expect(screen.queryByText("different", { selector: "ins" })).not.to.exist;
     stream.resolve();
   });
   it("rejects duplicate finding identities instead of overwriting them", async function () {
@@ -928,7 +930,7 @@ describe("AI reviewer: single document selection workspace", function () {
       "after a terminal event",
     );
     expect(streamCall?.signal.aborted).to.equal(true);
-    expect(screen.queryByText("Replacement: clear")).not.to.exist;
+    expect(screen.queryByText("clear", { selector: "ins" })).not.to.exist;
     expect(screen.queryByText("Completed")).not.to.exist;
     stream.resolve();
   });

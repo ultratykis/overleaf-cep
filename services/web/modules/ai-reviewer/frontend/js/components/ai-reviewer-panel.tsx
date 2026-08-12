@@ -123,6 +123,7 @@ import {
 } from "../services/editor-artifact-comment-posting";
 import { readEditorSuggestionLiveContext } from "../services/editor-suggestion-host-application";
 import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
+import { mountSuggestionCardDiff } from "../services/detached-suggestion-diff";
 import {
   getAiProviderConnections,
   getAiProviderModels,
@@ -134,6 +135,30 @@ import {
 import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
 
 import "../../stylesheets/ai-reviewer.scss";
+
+function AiReviewerSuggestionCardDiff({
+  original,
+  replacement,
+}: {
+  original: string;
+  replacement: string;
+}) {
+  const parent = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (parent.current == null) {
+      return;
+    }
+    const mounted = mountSuggestionCardDiff({
+      parent: parent.current,
+      original,
+      replacement,
+    });
+    return mounted.destroy;
+  }, [original, replacement]);
+
+  return <div ref={parent} className="ai-reviewer-suggestion-card-diff" />;
+}
 
 // Loaded on demand: the settings modal is only reached from the panel when
 // there is no connection yet.
@@ -4721,16 +4746,10 @@ export function AiReviewerPanelView({
       t("ai_reviewer_suggestion_title", { index: index + 1 }),
       status,
       <>
-        <p className="ai-reviewer-panel-quoted-source">
-          {t("ai_reviewer_suggestion_original", {
-            original: suggestion.original,
-          })}
-        </p>
-        <p className="ai-reviewer-panel-quoted-source">
-          {t("ai_reviewer_suggestion_replacement", {
-            replacement: suggestion.replacement,
-          })}
-        </p>
+        <AiReviewerSuggestionCardDiff
+          original={suggestion.original}
+          replacement={suggestion.replacement}
+        />
         <AiReviewerMarkdown
           className="ai-reviewer-panel-prose"
           content={t("ai_reviewer_suggestion_rationale", {
@@ -5077,16 +5096,10 @@ export function AiReviewerPanelView({
       t("ai_reviewer_suggestion_title", { index: index + 1 }),
       status,
       <>
-        <p className="ai-reviewer-panel-quoted-source">
-          {t("ai_reviewer_suggestion_original", {
-            original: suggestion.original,
-          })}
-        </p>
-        <p className="ai-reviewer-panel-quoted-source">
-          {t("ai_reviewer_suggestion_replacement", {
-            replacement: suggestion.replacement,
-          })}
-        </p>
+        <AiReviewerSuggestionCardDiff
+          original={suggestion.original}
+          replacement={suggestion.replacement}
+        />
         <AiReviewerMarkdown
           className="ai-reviewer-panel-prose"
           content={t("ai_reviewer_suggestion_rationale", {

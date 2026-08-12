@@ -10,6 +10,7 @@ import {
   compileSelectedSuggestionHunks,
   DetachedSuggestionDiffError,
   mountDetachedSuggestionDiff,
+  mountSuggestionCardDiff,
 } from "../../frontend/js/services/detached-suggestion-diff";
 import diffFixtureSet from "../fixtures/oss-adoption/diff-fixtures.json";
 
@@ -133,6 +134,26 @@ function hunkInputs(parent: HTMLElement) {
   );
 }
 
+function renderedVersions(parent: HTMLElement) {
+  const text = parent.querySelector<HTMLElement>(
+    ".ai-reviewer-detached-diff-text",
+  );
+  if (text == null) {
+    throw new Error("Expected a rendered suggestion diff.");
+  }
+  const nodes = Array.from(text.childNodes);
+  return {
+    original: nodes
+      .filter((node) => node.nodeName !== "INS")
+      .map((node) => node.textContent)
+      .join(""),
+    replacement: nodes
+      .filter((node) => node.nodeName !== "DEL")
+      .map((node) => node.textContent)
+      .join(""),
+  };
+}
+
 describe("AI reviewer: single document detached diff", function () {
   const mountedDiffs: MountedDiff[] = [];
   const parents: HTMLElement[] = [];
@@ -184,13 +205,13 @@ describe("AI reviewer: single document detached diff", function () {
         },
       );
 
-      const previewText = Array.from(
-        parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
-      ).map((element) => element.textContent);
-      expect(previewText).to.deep.equal([
-        fixture.original,
-        fixture.replacement,
-      ]);
+      const previewText = parent.querySelector(
+        ".ai-reviewer-detached-diff-text",
+      )?.textContent;
+      expect(renderedVersions(parent)).to.deep.equal({
+        original: fixture.original,
+        replacement: fixture.replacement,
+      });
       expect(mounted.hunkIds).to.have.length.greaterThan(0);
       expect(new Set(mounted.hunkIds).size).to.equal(mounted.hunkIds.length);
       expect(hunkInputs(parent)).to.have.length(mounted.hunkIds.length);
@@ -202,12 +223,8 @@ describe("AI reviewer: single document detached diff", function () {
       }
       expect(selectionEvents.at(-1)).to.deep.equal(mounted.hunkIds);
       expect(
-        Array.from(
-          parent.querySelectorAll<HTMLElement>(
-            ".ai-reviewer-detached-diff-text",
-          ),
-        ).map((element) => element.textContent),
-      ).to.deep.equal(previewText);
+        parent.querySelector(".ai-reviewer-detached-diff-text")?.textContent,
+      ).to.equal(previewText);
 
       const compiled = await compileSelectedSuggestionHunks({
         request: testCase.request,
@@ -229,7 +246,7 @@ describe("AI reviewer: single document detached diff", function () {
     });
   }
 
-  it("renders a stacked unified preview with full semantic word highlights", async function () {
+  it("renders one inline unified block with semantic segments in document order", async function () {
     const original = "Your introduction goes beyond the topic.";
     const replacement = "This document explores the topic.";
     const { parent } = await mountCase(
@@ -243,28 +260,39 @@ describe("AI reviewer: single document detached diff", function () {
       parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-block"),
     );
 
-    expect(blocks).to.have.length(2);
+    expect(blocks).to.have.length(1);
+    const text = blocks[0].querySelector(".ai-reviewer-detached-diff-text");
     expect(
-      blocks[0].classList.contains("ai-reviewer-detached-diff-block--deletion"),
-    ).to.equal(true);
-    expect(
-      blocks[1].classList.contains(
-        "ai-reviewer-detached-diff-block--insertion",
-      ),
-    ).to.equal(true);
-    expect(
-      blocks[0].querySelector(".ai-reviewer-detached-diff-text")?.textContent,
-    ).to.equal(original);
-    expect(
-      blocks[1].querySelector(".ai-reviewer-detached-diff-text")?.textContent,
-    ).to.equal(replacement);
-    expect(blocks[0].querySelector("del")?.textContent).to.equal(
-      "Your introduction goes beyond",
-    );
-    expect(blocks[1].querySelector("ins")?.textContent).to.equal(
-      "This document explores",
-    );
+      Array.from(text?.childNodes ?? []).map((node) => [
+        node.nodeName,
+        node.textContent,
+      ]),
+    ).to.deep.equal([
+      ["DEL", "Your introduction goes beyond"],
+      ["INS", "This document explores"],
+      ["#text", " the topic."],
+    ]);
+    expect(renderedVersions(parent)).to.deep.equal({ original, replacement });
     expect(parent.querySelectorAll(".cm-mergeView")).to.have.length(0);
+  });
+
+  it("mounts the card diff from original and replacement strings alone", function () {
+    const parent = createParent();
+    const mounted = mountSuggestionCardDiff({
+      parent,
+      original: "alpha old omega",
+      replacement: "alpha new omega",
+    });
+
+    expect(
+      parent.querySelectorAll(".ai-reviewer-detached-diff-block"),
+    ).to.have.length(1);
+    expect(renderedVersions(parent)).to.deep.equal({
+      original: "alpha old omega",
+      replacement: "alpha new omega",
+    });
+    mounted.destroy();
+    expect(parent.childElementCount).to.equal(0);
   });
 
   it("keeps hunk IDs stable for one plan and changes them with replacement content", async function () {

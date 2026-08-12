@@ -835,6 +835,10 @@ describe("AI reviewer: conversation workspace", function () {
     expect(
       rationale.closest(".ai-reviewer-markdown")?.textContent,
     ).not.to.contain("**");
+    expect(screen.queryByText("Original: beta")).not.to.exist;
+    expect(screen.queryByText("Replacement: clear")).not.to.exist;
+    expect(screen.getByText("beta", { selector: "del" })).to.exist;
+    expect(screen.getByText("clear", { selector: "ins" })).to.exist;
     fireEvent.click(previewButton);
     await screen.findByText("Suggestion preview ready");
 

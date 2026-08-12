@@ -346,31 +346,45 @@ function renderDisplayDiff(
 ) {
   const segments = buildDisplayDiff(original, replacement);
 
-  for (const { kind, marker, tagName } of [
-    { kind: "delete", marker: "−", tagName: "del" },
-    { kind: "insert", marker: "+", tagName: "ins" },
-  ] as const) {
-    const block = ownerDocument.createElement("div");
-    block.className = `ai-reviewer-detached-diff-block ai-reviewer-detached-diff-block--${kind === "delete" ? "deletion" : "insertion"}`;
-    const sign = ownerDocument.createElement("span");
-    sign.className = "ai-reviewer-detached-diff-marker";
-    sign.setAttribute("aria-hidden", "true");
-    sign.textContent = marker;
-    const text = ownerDocument.createElement("div");
-    text.className = "ai-reviewer-detached-diff-text";
+  const block = ownerDocument.createElement("div");
+  block.className = "ai-reviewer-detached-diff-block";
+  const text = ownerDocument.createElement("div");
+  text.className = "ai-reviewer-detached-diff-text";
 
-    for (const segment of segments) {
-      if (segment.kind === "equal") {
-        text.appendChild(ownerDocument.createTextNode(segment.text));
-      } else if (segment.kind === kind) {
-        const emphasis = ownerDocument.createElement(tagName);
-        emphasis.textContent = segment.text;
-        text.appendChild(emphasis);
-      }
+  for (const segment of segments) {
+    if (segment.kind === "equal") {
+      text.appendChild(ownerDocument.createTextNode(segment.text));
+    } else {
+      const emphasis = ownerDocument.createElement(
+        segment.kind === "delete" ? "del" : "ins",
+      );
+      emphasis.textContent = segment.text;
+      text.appendChild(emphasis);
     }
-    block.append(sign, text);
-    parent.appendChild(block);
   }
+  block.appendChild(text);
+  parent.appendChild(block);
+  return block;
+}
+
+export function mountSuggestionCardDiff({
+  parent,
+  original,
+  replacement,
+}: {
+  parent: HTMLElement;
+  original: string;
+  replacement: string;
+}) {
+  const block = renderDisplayDiff(
+    parent.ownerDocument,
+    parent,
+    original,
+    replacement,
+  );
+  return Object.freeze({
+    destroy: () => block.remove(),
+  });
 }
 
 function parseSelectedHunkIds(value: unknown): string[] {

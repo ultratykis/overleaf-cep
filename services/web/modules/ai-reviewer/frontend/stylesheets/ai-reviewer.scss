@@ -1372,7 +1372,8 @@
 
 .ai-reviewer-detached-diff,
 .ai-reviewer-detached-diff-preview,
-.ai-reviewer-detached-diff-hunks {
+.ai-reviewer-detached-diff-hunks,
+.ai-reviewer-suggestion-card-diff {
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -1381,29 +1382,10 @@
 }
 
 .ai-reviewer-detached-diff-block {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
   width: 100%;
   padding: var(--spacing-02);
   border: 1px solid var(--border-divider-themed);
   border-radius: var(--border-radius-base);
-  gap: var(--spacing-02);
-
-  &--deletion {
-    color: var(--red-70);
-    background: var(--bg-danger-03);
-  }
-
-  &--insertion {
-    color: var(--green-70);
-    background: var(--bg-accent-03);
-  }
-}
-
-.ai-reviewer-detached-diff-marker {
-  font-weight: bold;
-  user-select: none;
 }
 
 .ai-reviewer-detached-diff-text {
@@ -1414,11 +1396,13 @@
   word-break: break-word;
 
   del {
+    color: var(--red-70);
     background: var(--red-20);
     text-decoration-thickness: 0.12em;
   }
 
   ins {
+    color: var(--green-70);
     background: var(--green-20);
     font-weight: bold;
     text-decoration: none;
