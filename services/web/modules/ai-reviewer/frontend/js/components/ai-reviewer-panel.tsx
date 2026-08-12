@@ -22,6 +22,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -1625,8 +1626,22 @@ export function AiReviewerPanelView({
   const firstUnresolvedFindingRef = useRef<HTMLElement | null>(null);
   const runElementRefs = useRef(new Map<number, HTMLElement>());
   const pendingStartedRunScroll = useRef<number | null>(null);
+  const panelBodyRef = useRef<HTMLDivElement | null>(null);
+  const reviewListScroll = useRef<{
+    scrollTop: number;
+    restore: boolean;
+  } | null>(null);
   const activeDiscussionIdRef = useRef<string | null>(activeDiscussionId);
   activeDiscussionIdRef.current = activeDiscussionId;
+  const activateDiscussion = useCallback((discussionId: string) => {
+    if (activeDiscussionIdRef.current == null && panelBodyRef.current != null) {
+      reviewListScroll.current = {
+        scrollTop: panelBodyRef.current.scrollTop,
+        restore: false,
+      };
+    }
+    setActiveDiscussionId(discussionId);
+  }, []);
   const [showDeleteWorkspaceConfirmation, setShowDeleteWorkspaceConfirmation] =
     useState(false);
   const [discussionPendingDeletion, setDiscussionPendingDeletion] = useState<{
@@ -3352,7 +3367,7 @@ export function AiReviewerPanelView({
       );
       if (existing != null) {
         setActionNotice(null);
-        setActiveDiscussionId(existing.id);
+        activateDiscussion(existing.id);
         return;
       }
       if (
@@ -3385,9 +3400,9 @@ export function AiReviewerPanelView({
       };
       updateDiscussions((current) => [...current, discussion]);
       setActionNotice(null);
-      setActiveDiscussionId(id);
+      activateDiscussion(id);
     },
-    [createDiscussionId, now, t, updateDiscussions],
+    [activateDiscussion, createDiscussionId, now, t, updateDiscussions],
   );
 
   const failDiscussionRequest = useCallback(
@@ -3462,9 +3477,9 @@ export function AiReviewerPanelView({
     nextWorkspaceOrder.current += 1;
     updateDiscussions((current) => [...current, discussion]);
     setActionNotice(null);
-    setActiveDiscussionId(discussion.id);
+    activateDiscussion(discussion.id);
     return discussion;
-  }, [createDiscussionId, now, t, updateDiscussions]);
+  }, [activateDiscussion, createDiscussionId, now, t, updateDiscussions]);
 
   const submitConversationMessage = useCallback(
     async (message: string) => {
@@ -5284,7 +5299,7 @@ export function AiReviewerPanelView({
                   type="button"
                   variant="link"
                   className="ai-reviewer-discussion-row-subject"
-                  onClick={() => setActiveDiscussionId(discussion.id)}
+                  onClick={() => activateDiscussion(discussion.id)}
                 >
                   {discussion.subjectLabel}
                 </OLButton>
@@ -5466,6 +5481,39 @@ export function AiReviewerPanelView({
           (discussion) => discussion.id === activeDiscussionId,
         ) ?? null);
 
+  useLayoutEffect(() => {
+    if (activeDiscussionId != null || reviewListScroll.current == null) {
+      return;
+    }
+    const savedScroll = reviewListScroll.current;
+    if (!savedScroll.restore) {
+      reviewListScroll.current = null;
+      return;
+    }
+    // The list is re-rendered as we return, so the first frame can still be
+    // short enough for the browser to clamp the offset back to the top. Retry
+    // over a few frames until the value sticks, then stop.
+    let animationFrame = 0;
+    let attemptsLeft = 10;
+    const restore = () => {
+      const panelBody = panelBodyRef.current;
+      if (panelBody == null) {
+        return;
+      }
+      panelBody.scrollTop = savedScroll.scrollTop;
+      attemptsLeft -= 1;
+      if (panelBody.scrollTop < savedScroll.scrollTop && attemptsLeft > 0) {
+        animationFrame = requestAnimationFrame(restore);
+        return;
+      }
+      if (reviewListScroll.current === savedScroll) {
+        reviewListScroll.current = null;
+      }
+    };
+    animationFrame = requestAnimationFrame(restore);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [activeDiscussionId]);
+
   const findingEntries = workspace.runs.flatMap((runState) =>
     runState.findings.map((finding) => ({ runState, finding })),
   );
@@ -5572,7 +5620,12 @@ export function AiReviewerPanelView({
             type="button"
             variant="link"
             size="sm"
-            onClick={() => setActiveDiscussionId(null)}
+            onClick={() => {
+              if (reviewListScroll.current != null) {
+                reviewListScroll.current.restore = true;
+              }
+              setActiveDiscussionId(null);
+            }}
           >
             {t("ai_reviewer_back_to_review_list")}
           </OLButton>
@@ -5769,6 +5822,7 @@ export function AiReviewerPanelView({
       ) : (
         <>
           <div
+            ref={panelBodyRef}
             className="ai-reviewer-panel-body"
             aria-label={t("ai_reviewer_conversation")}
             data-testid="ai-reviewer-conversation"

@@ -640,6 +640,29 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(persistence.read(projectId).discussions).to.have.length(1);
   });
 
+  it("restores the review-list scroll position after a card discussion", async function () {
+    const projectId = "discussion-scroll-position-project";
+    const persistence = new MemoryWorkspacePersistence({
+      [projectId]: workspaceWithFinding({ projectId }),
+    });
+
+    render(panel(projectId, persistence));
+    await screen.findByText("Persisted unresolved finding");
+    const panelBody = screen.getByTestId("ai-reviewer-conversation");
+    panelBody.scrollTop = 417;
+
+    fireEvent.click(screen.getByRole("button", { name: "Discuss finding" }));
+    expect(screen.getByRole("article", { name: "AI reviewer discussion" })).to
+      .exist;
+    panelBody.scrollTop = 0;
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Back to review list" }),
+    );
+
+    await waitFor(() => expect(panelBody.scrollTop).to.equal(417));
+  });
+
   it("does not show a back control when no discussion is open", async function () {
     const projectId = "discussion-navigation-list-project";
     const persistence = new MemoryWorkspacePersistence({
