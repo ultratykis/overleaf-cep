@@ -302,12 +302,25 @@ describe("AI reviewer comment-posting panel", function () {
     const findings = screen.getByRole("region", {
       name: "Review findings",
     });
-
-    fireEvent.click(
-      within(findings).getByRole("button", {
-        name: "Post finding as comment",
-      }),
+    const postFinding = within(findings).getByRole("button", {
+      name: "Post finding as comment",
+    });
+    expect(postFinding.textContent).to.equal("add_comment");
+    const findingActions = postFinding.closest(
+      ".ai-reviewer-artifact-heading-actions",
     );
+    expect(findingActions).not.to.equal(null);
+    expect(
+      within(findingActions)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).to.deep.equal([
+      "Discuss finding",
+      "Post finding as comment",
+      "Discard finding",
+    ]);
+
+    fireEvent.click(postFinding);
     const body = within(findings).getByRole("textbox", {
       name: "Comment body",
     });
@@ -339,12 +352,28 @@ describe("AI reviewer comment-posting panel", function () {
     const suggestions = screen.getByRole("region", {
       name: "Review suggestions",
     });
-
-    fireEvent.click(
-      within(suggestions).getByRole("button", {
-        name: "Post suggestion as comment",
-      }),
+    const postSuggestion = within(suggestions).getByRole("button", {
+      name: "Post suggestion as comment",
+    });
+    expect(postSuggestion.textContent).to.equal("add_comment");
+    const suggestionActions = postSuggestion.closest(
+      ".ai-reviewer-artifact-heading-actions",
     );
+    expect(suggestionActions).not.to.equal(null);
+    expect(
+      within(suggestionActions)
+        .getAllByRole("button")
+        .map(
+          (button) => button.getAttribute("aria-label") ?? button.textContent,
+        ),
+    ).to.deep.equal([
+      "Discuss suggestion",
+      "Post suggestion as comment",
+      "Discard suggestion",
+      "Apply",
+    ]);
+
+    fireEvent.click(postSuggestion);
     const body = within(suggestions).getByRole("textbox", {
       name: "Comment body",
     });

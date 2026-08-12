@@ -864,7 +864,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(
       within(card)
         .getByRole("button", { name: "Discuss finding" })
-        .closest(".ai-reviewer-artifact-body"),
+        .closest(".ai-reviewer-artifact-heading-actions"),
     ).not.to.equal(null);
     fireEvent.click(summary!);
     expect(disclosure?.open).to.equal(true);

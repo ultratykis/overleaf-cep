@@ -959,6 +959,43 @@
   }
 }
 
+.ai-reviewer-artifact-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  gap: var(--spacing-02);
+
+  > .ai-reviewer-artifact-title {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.ai-reviewer-artifact-heading-resolved {
+  align-items: flex-start;
+}
+
+.ai-reviewer-artifact-heading-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  max-width: 100%;
+  gap: var(--spacing-01);
+}
+
+.ai-reviewer-tooltip-icon-button {
+  display: inline-flex;
+}
+
+.ai-reviewer-artifact-apply {
+  margin-inline-start: var(--spacing-02);
+}
+
 // Completed work stays in its run but yields its vertical space until the
 // reader asks to inspect it again.
 .ai-reviewer-artifact-resolved {

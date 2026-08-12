@@ -794,8 +794,10 @@ describe("AI reviewer: panel layout", function () {
 
     expect(within(headerAction).queryByRole("button", { name: "Stop" })).not.to
       .exist;
-    expect(within(headerAction).getByRole("button", { name: "Discuss" })).to
-      .exist;
+    const discussRun = within(headerAction).getByRole("button", {
+      name: "Discuss this run",
+    });
+    expect(discussRun.textContent).to.equal("forum");
     expect(within(run).getByRole("heading", { name: "Claim support" })).to
       .exist;
   });

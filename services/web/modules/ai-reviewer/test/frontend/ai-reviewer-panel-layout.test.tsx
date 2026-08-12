@@ -58,9 +58,13 @@ const emptyLayoutSelectors = [
   ".ai-reviewer-panel-selection",
 ];
 const workspaceLayoutSelectors = [
-  ...listLayoutSelectors,
+  ...listLayoutSelectors.filter(
+    (selector) => selector !== ".ai-reviewer-panel-actions",
+  ),
   ".ai-reviewer-run",
   ".ai-reviewer-artifact",
+  ".ai-reviewer-artifact-heading",
+  ".ai-reviewer-artifact-heading-actions",
   ".ai-reviewer-discussion-row",
 ];
 const failureLayoutSelectors = [

@@ -1730,7 +1730,7 @@ describe("AI reviewer: persisted review workspace", function () {
     });
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Discuss",
+        name: "Discuss this run",
       }),
     );
     expect(await screen.findByText(workspaceLimitMessage)).to.exist;

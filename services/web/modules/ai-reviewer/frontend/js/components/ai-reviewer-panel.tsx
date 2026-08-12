@@ -14,6 +14,7 @@ import OLButton from "@/shared/components/ol/ol-button";
 import OLDropdownMenuItem from "@/shared/components/ol/ol-dropdown-menu-item";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
+import OLIconButton from "@/shared/components/ol/ol-icon-button";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
 import { useProjectContext } from "@/shared/context/project-context";
 import type { TFunction } from "i18next";
@@ -134,6 +135,42 @@ import {
 import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
 
 import "../../stylesheets/ai-reviewer.scss";
+
+function AiReviewerTooltipIconButton({
+  id,
+  label,
+  icon,
+  variant,
+  disabled = false,
+  onClick,
+}: {
+  id: string;
+  label: string;
+  icon: string;
+  variant: "secondary" | "ghost";
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <OLTooltip
+      id={id}
+      description={label}
+      overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
+    >
+      <span className="ai-reviewer-tooltip-icon-button">
+        <OLIconButton
+          type="button"
+          variant={variant}
+          size="sm"
+          accessibilityLabel={label}
+          icon={icon}
+          disabled={disabled}
+          onClick={onClick}
+        />
+      </span>
+    </OLTooltip>
+  );
+}
 
 function AiReviewerSuggestionCardDiff({
   original,
@@ -4491,7 +4528,7 @@ export function AiReviewerPanelView({
           {headingAction == null ? (
             disclosure
           ) : (
-            <div className="d-flex align-items-start justify-content-between gap-2">
+            <div className="ai-reviewer-artifact-heading ai-reviewer-artifact-heading-resolved">
               {disclosure}
               {headingAction}
             </div>
@@ -4503,7 +4540,7 @@ export function AiReviewerPanelView({
     return (
       <article key={key} className="ai-reviewer-artifact" {...jumpTargetProps}>
         {title != null && headingAction != null ? (
-          <div className="d-flex align-items-center justify-content-between gap-2">
+          <div className="ai-reviewer-artifact-heading">
             <h5 className="ai-reviewer-artifact-title">{title}</h5>
             {headingAction}
           </div>
@@ -4562,6 +4599,15 @@ export function AiReviewerPanelView({
   ) => {
     const status = findingStatus(runState.findingStatuses, finding.id);
     const commentDraftKey = `run:${runState.generation}:finding:${finding.id}`;
+    const discussAvailable =
+      canDiscussRun(runState) && runState.request != null;
+    const postAvailable =
+      status === "unresolved" &&
+      runState.status === "completed" &&
+      runState.request != null &&
+      postEditorComment != null &&
+      getSelectionContext != null;
+    const discardAvailable = status === "unresolved";
     return renderArtifact(
       commentDraftKey,
       finding.title,
@@ -4575,12 +4621,24 @@ export function AiReviewerPanelView({
           translate="no"
         />
         {renderEvidence(runState, finding)}
-        <div className="ai-reviewer-panel-actions">
-          {canDiscussRun(runState) && runState.request != null && (
-            <OLButton
-              type="button"
+        {renderCommentDraft(commentDraftKey)}
+        {evidenceNavigationNotice?.identity.generation ===
+          runState.generation &&
+          evidenceNavigationNotice.identity.finding === finding && (
+            <p aria-live="polite">
+              {evidenceNavigationMessage(evidenceNavigationNotice, t)}
+            </p>
+          )}
+      </>,
+      commentDraftKey === firstUnresolvedFindingKey,
+      discussAvailable || postAvailable || discardAvailable ? (
+        <div className="ai-reviewer-artifact-heading-actions">
+          {discussAvailable && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-discuss`}
+              label={t("ai_reviewer_discuss_finding")}
+              icon="forum"
               variant="secondary"
-              size="sm"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -4592,59 +4650,42 @@ export function AiReviewerPanelView({
                   `finding:${finding.id}`,
                 )
               }
-            >
-              {t("ai_reviewer_discuss_finding")}
-            </OLButton>
+            />
           )}
-          {status === "unresolved" &&
-            runState.status === "completed" &&
-            runState.request != null &&
-            postEditorComment != null &&
-            getSelectionContext != null && (
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={
-                  persistenceConflict ||
-                  (commentDraft != null && commentDraft.key !== commentDraftKey)
-                }
-                onClick={() =>
-                  openCommentDraft({
-                    key: commentDraftKey,
-                    generation: runState.generation,
-                    request: runState.request!,
-                    artifact: finding,
-                  })
-                }
-              >
-                {t("ai_reviewer_post_finding_as_comment")}
-              </OLButton>
-            )}
-          {status === "unresolved" && (
-            <OLButton
-              type="button"
+          {postAvailable && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-post-comment`}
+              label={t("ai_reviewer_post_finding_as_comment")}
+              icon="add_comment"
+              variant="secondary"
+              disabled={
+                persistenceConflict ||
+                (commentDraft != null && commentDraft.key !== commentDraftKey)
+              }
+              onClick={() =>
+                openCommentDraft({
+                  key: commentDraftKey,
+                  generation: runState.generation,
+                  request: runState.request!,
+                  artifact: finding,
+                })
+              }
+            />
+          )}
+          {discardAvailable && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-discard`}
+              label={t("ai_reviewer_discard_finding")}
+              icon="delete"
               variant="ghost"
-              size="sm"
               disabled={
                 persistenceConflict || commentDraft?.key === commentDraftKey
               }
               onClick={() => discardFinding(runState, finding)}
-            >
-              {t("ai_reviewer_discard_finding")}
-            </OLButton>
+            />
           )}
         </div>
-        {renderCommentDraft(commentDraftKey)}
-        {evidenceNavigationNotice?.identity.generation ===
-          runState.generation &&
-          evidenceNavigationNotice.identity.finding === finding && (
-            <p aria-live="polite">
-              {evidenceNavigationMessage(evidenceNavigationNotice, t)}
-            </p>
-          )}
-      </>,
-      commentDraftKey === firstUnresolvedFindingKey,
+      ) : null,
     );
   };
 
@@ -4659,6 +4700,9 @@ export function AiReviewerPanelView({
       citationCopyNotice.finding === finding
         ? citationCopyNotice
         : null;
+    const discussAvailable =
+      canDiscussRun(runState) && runState.request != null;
+    const unresolved = status === "unresolved";
     return renderArtifact(
       commentDraftKey,
       finding.title,
@@ -4677,52 +4721,6 @@ export function AiReviewerPanelView({
           })}
         </p>
         {renderEvidence(runState, finding)}
-        <div className="ai-reviewer-panel-actions">
-          {canDiscussRun(runState) && runState.request != null && (
-            <OLButton
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                openDiscussion(
-                  runState,
-                  {
-                    kind: "citation-finding",
-                    sourceRequest: runState.request!,
-                    artifact: finding,
-                  },
-                  `citation-finding:${finding.id}`,
-                )
-              }
-            >
-              {t("ai_reviewer_discuss_citation_finding")}
-            </OLButton>
-          )}
-          {status === "unresolved" && (
-            <>
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={
-                  persistenceConflict || copyNotice?.status === "copying"
-                }
-                onClick={() => copyCitationProposedText(runState, finding)}
-              >
-                {t("ai_reviewer_copy_proposed_text")}
-              </OLButton>
-              <OLButton
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={persistenceConflict}
-                onClick={() => discardFinding(runState, finding)}
-              >
-                {t("ai_reviewer_discard_citation_finding")}
-              </OLButton>
-            </>
-          )}
-        </div>
         {copyNotice != null && (
           <p aria-live="polite">
             {copyNotice.status === "copying"
@@ -4743,6 +4741,49 @@ export function AiReviewerPanelView({
           )}
       </>,
       commentDraftKey === firstUnresolvedFindingKey,
+      discussAvailable || unresolved ? (
+        <div className="ai-reviewer-artifact-heading-actions">
+          {discussAvailable && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-discuss`}
+              label={t("ai_reviewer_discuss_citation_finding")}
+              icon="forum"
+              variant="secondary"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "citation-finding",
+                    sourceRequest: runState.request!,
+                    artifact: finding,
+                  },
+                  `citation-finding:${finding.id}`,
+                )
+              }
+            />
+          )}
+          {unresolved && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-copy`}
+              label={t("ai_reviewer_copy_proposed_text")}
+              icon="content_copy"
+              variant="secondary"
+              disabled={persistenceConflict || copyNotice?.status === "copying"}
+              onClick={() => copyCitationProposedText(runState, finding)}
+            />
+          )}
+          {unresolved && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-discard`}
+              label={t("ai_reviewer_discard_citation_finding")}
+              icon="delete"
+              variant="ghost"
+              disabled={persistenceConflict}
+              onClick={() => discardFinding(runState, finding)}
+            />
+          )}
+        </div>
+      ) : null,
     );
   };
 
@@ -4799,66 +4840,6 @@ export function AiReviewerPanelView({
             );
           })}
         </ul>
-        <div className="ai-reviewer-panel-actions">
-          {canDiscussRun(runState) && runState.request != null && (
-            <OLButton
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                openDiscussion(
-                  runState,
-                  {
-                    kind: "suggestion",
-                    sourceRequest: runState.request!,
-                    artifact: suggestion,
-                  },
-                  `suggestion:${suggestion.id}`,
-                )
-              }
-            >
-              {t("ai_reviewer_discuss_suggestion")}
-            </OLButton>
-          )}
-          {status === "unresolved" &&
-            runState.status === "completed" &&
-            runState.request != null &&
-            postEditorComment != null &&
-            getSelectionContext != null && (
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={
-                  persistenceConflict ||
-                  (commentDraft != null && commentDraft.key !== commentDraftKey)
-                }
-                onClick={() =>
-                  openCommentDraft({
-                    key: commentDraftKey,
-                    generation: runState.generation,
-                    request: runState.request!,
-                    artifact: suggestion,
-                  })
-                }
-              >
-                {t("ai_reviewer_post_suggestion_as_comment")}
-              </OLButton>
-            )}
-          {discardAvailable && (
-            <OLButton
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={
-                persistenceConflict || commentDraft?.key === commentDraftKey
-              }
-              onClick={() => discardSuggestion(runState, suggestion)}
-            >
-              {t("ai_reviewer_discard_suggestion")}
-            </OLButton>
-          )}
-        </div>
         {renderCommentDraft(commentDraftKey)}
         {status === "conflict" && (
           <p aria-live="polite">
@@ -4871,15 +4852,73 @@ export function AiReviewerPanelView({
         )}
       </>,
       false,
-      <OLButton
-        type="button"
-        variant="secondary"
-        size="sm"
-        disabled={!applyAvailable || applying || persistenceConflict}
-        onClick={() => applyRunSuggestion(runState, suggestion)}
-      >
-        {t("ai_reviewer_apply_suggestion")}
-      </OLButton>,
+      <div className="ai-reviewer-artifact-heading-actions">
+        {canDiscussRun(runState) && runState.request != null && (
+          <AiReviewerTooltipIconButton
+            id={`${commentDraftKey}-discuss`}
+            label={t("ai_reviewer_discuss_suggestion")}
+            icon="forum"
+            variant="secondary"
+            onClick={() =>
+              openDiscussion(
+                runState,
+                {
+                  kind: "suggestion",
+                  sourceRequest: runState.request!,
+                  artifact: suggestion,
+                },
+                `suggestion:${suggestion.id}`,
+              )
+            }
+          />
+        )}
+        {status === "unresolved" &&
+          runState.status === "completed" &&
+          runState.request != null &&
+          postEditorComment != null &&
+          getSelectionContext != null && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-post-comment`}
+              label={t("ai_reviewer_post_suggestion_as_comment")}
+              icon="add_comment"
+              variant="secondary"
+              disabled={
+                persistenceConflict ||
+                (commentDraft != null && commentDraft.key !== commentDraftKey)
+              }
+              onClick={() =>
+                openCommentDraft({
+                  key: commentDraftKey,
+                  generation: runState.generation,
+                  request: runState.request!,
+                  artifact: suggestion,
+                })
+              }
+            />
+          )}
+        {discardAvailable && (
+          <AiReviewerTooltipIconButton
+            id={`${commentDraftKey}-discard`}
+            label={t("ai_reviewer_discard_suggestion")}
+            icon="delete"
+            variant="ghost"
+            disabled={
+              persistenceConflict || commentDraft?.key === commentDraftKey
+            }
+            onClick={() => discardSuggestion(runState, suggestion)}
+          />
+        )}
+        <OLButton
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="ai-reviewer-artifact-apply"
+          disabled={!applyAvailable || applying || persistenceConflict}
+          onClick={() => applyRunSuggestion(runState, suggestion)}
+        >
+          {t("ai_reviewer_apply_suggestion")}
+        </OLButton>
+      </div>,
     );
   };
 
@@ -4998,10 +5037,11 @@ export function AiReviewerPanelView({
             </OLButton>
           )}
           {canDiscussRun(runState) && runState.request != null && (
-            <OLButton
-              type="button"
+            <AiReviewerTooltipIconButton
+              id={`ai-reviewer-run-${runState.generation}-discuss`}
+              label={t("ai_reviewer_discuss_run")}
+              icon="forum"
               variant="secondary"
-              size="sm"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -5012,9 +5052,7 @@ export function AiReviewerPanelView({
                   "scope",
                 )
               }
-            >
-              {t("ai_reviewer_discuss")}
-            </OLButton>
+            />
           )}
         </div>
       </header>
@@ -5137,49 +5175,6 @@ export function AiReviewerPanelView({
           })}
           translate="no"
         />
-        <div className="ai-reviewer-panel-actions">
-          {status === "unresolved" &&
-            sourceRequest != null &&
-            postEditorComment != null &&
-            getSelectionContext != null && (
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={
-                  persistenceConflict ||
-                  (commentDraft != null && commentDraft.key !== commentDraftKey)
-                }
-                onClick={() =>
-                  openCommentDraft({
-                    key: commentDraftKey,
-                    generation:
-                      discussion.sourceGeneration ?? discussion.createdOrder,
-                    request: sourceRequest,
-                    artifact: suggestion,
-                    discussionId: discussion.id,
-                  })
-                }
-              >
-                {t("ai_reviewer_post_suggestion_as_comment")}
-              </OLButton>
-            )}
-          {(status === "unresolved" || status === "conflict") && (
-            <OLButton
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={
-                persistenceConflict || commentDraft?.key === commentDraftKey
-              }
-              onClick={() =>
-                discardDiscussionSuggestion(discussion, suggestion)
-              }
-            >
-              {t("ai_reviewer_discard_suggestion")}
-            </OLButton>
-          )}
-        </div>
         {renderCommentDraft(commentDraftKey)}
         {status === "conflict" && (
           <p aria-live="polite">
@@ -5192,15 +5187,55 @@ export function AiReviewerPanelView({
         )}
       </>,
       false,
-      <OLButton
-        type="button"
-        variant="secondary"
-        size="sm"
-        disabled={!applyAvailable || applying || persistenceConflict}
-        onClick={() => applyDiscussionSuggestion(discussion, suggestion)}
-      >
-        {t("ai_reviewer_apply_suggestion")}
-      </OLButton>,
+      <div className="ai-reviewer-artifact-heading-actions">
+        {status === "unresolved" &&
+          sourceRequest != null &&
+          postEditorComment != null &&
+          getSelectionContext != null && (
+            <AiReviewerTooltipIconButton
+              id={`${commentDraftKey}-post-comment`}
+              label={t("ai_reviewer_post_suggestion_as_comment")}
+              icon="add_comment"
+              variant="secondary"
+              disabled={
+                persistenceConflict ||
+                (commentDraft != null && commentDraft.key !== commentDraftKey)
+              }
+              onClick={() =>
+                openCommentDraft({
+                  key: commentDraftKey,
+                  generation:
+                    discussion.sourceGeneration ?? discussion.createdOrder,
+                  request: sourceRequest,
+                  artifact: suggestion,
+                  discussionId: discussion.id,
+                })
+              }
+            />
+          )}
+        {(status === "unresolved" || status === "conflict") && (
+          <AiReviewerTooltipIconButton
+            id={`${commentDraftKey}-discard`}
+            label={t("ai_reviewer_discard_suggestion")}
+            icon="delete"
+            variant="ghost"
+            disabled={
+              persistenceConflict || commentDraft?.key === commentDraftKey
+            }
+            onClick={() => discardDiscussionSuggestion(discussion, suggestion)}
+          />
+        )}
+        <OLButton
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="ai-reviewer-artifact-apply"
+          disabled={!applyAvailable || applying || persistenceConflict}
+          onClick={() => applyDiscussionSuggestion(discussion, suggestion)}
+        >
+          {t("ai_reviewer_apply_suggestion")}
+        </OLButton>
+      </div>,
     );
   };
 
