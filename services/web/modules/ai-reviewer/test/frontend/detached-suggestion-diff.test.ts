@@ -1,6 +1,7 @@
-import { Chunk, MergeView } from "@codemirror/merge";
+import { Chunk } from "@codemirror/merge";
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+// @ts-expect-error diff-match-patch is vendored without a declaration file.
+import DiffMatchPatch from "diff-match-patch";
 import { expect } from "chai";
 import i18next from "i18next";
 import sinon from "sinon";
@@ -183,43 +184,30 @@ describe("AI reviewer: single document detached diff", function () {
         },
       );
 
-      expect(parent.querySelectorAll(".cm-mergeView")).to.have.length(1);
-      expect(parent.querySelectorAll(".cm-merge-revert")).to.have.length(0);
-      expect(parent.querySelectorAll(".cm-editor")).to.have.length(2);
+      const previewText = Array.from(
+        parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
+      ).map((element) => element.textContent);
+      expect(previewText).to.deep.equal([
+        fixture.original,
+        fixture.replacement,
+      ]);
       expect(mounted.hunkIds).to.have.length.greaterThan(0);
       expect(new Set(mounted.hunkIds).size).to.equal(mounted.hunkIds.length);
       expect(hunkInputs(parent)).to.have.length(mounted.hunkIds.length);
       expect(selectionEvents).to.deep.equal([[]]);
-
-      const previewViews = Array.from(
-        parent.querySelectorAll<HTMLElement>(".cm-editor"),
-      ).map((editor) => EditorView.findFromDOM(editor));
-      expect(previewViews.every((view) => view != null)).to.equal(true);
-
-      for (const previewView of previewViews) {
-        if (previewView == null) {
-          throw new Error("Expected a mounted preview EditorView.");
-        }
-        const before = previewView.state.doc.toString();
-        expect(previewView.state.facet(EditorState.readOnly)).to.equal(true);
-        expect(previewView.state.facet(EditorView.editable)).to.equal(false);
-        expect(
-          previewView.state.facet(EditorState.changeFilter).length,
-        ).to.be.greaterThan(0);
-        previewView.dispatch({
-          changes: {
-            from: 0,
-            insert: "blocked",
-          },
-        });
-        expect(previewView.state.doc.toString()).to.equal(before);
-      }
 
       for (const input of hunkInputs(parent)) {
         input.checked = true;
         input.dispatchEvent(new Event("change", { bubbles: true }));
       }
       expect(selectionEvents.at(-1)).to.deep.equal(mounted.hunkIds);
+      expect(
+        Array.from(
+          parent.querySelectorAll<HTMLElement>(
+            ".ai-reviewer-detached-diff-text",
+          ),
+        ).map((element) => element.textContent),
+      ).to.deep.equal(previewText);
 
       const compiled = await compileSelectedSuggestionHunks({
         request: testCase.request,
@@ -240,6 +228,44 @@ describe("AI reviewer: single document detached diff", function () {
       expect(testCase.fullText).not.to.equal(testCase.expectedText);
     });
   }
+
+  it("renders a stacked unified preview with full semantic word highlights", async function () {
+    const original = "Your introduction goes beyond the topic.";
+    const replacement = "This document explores the topic.";
+    const { parent } = await mountCase(
+      createSuggestionCase({
+        id: "readable-unified-preview",
+        original,
+        replacement,
+      }),
+    );
+    const blocks = Array.from(
+      parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-block"),
+    );
+
+    expect(blocks).to.have.length(2);
+    expect(
+      blocks[0].classList.contains("ai-reviewer-detached-diff-block--deletion"),
+    ).to.equal(true);
+    expect(
+      blocks[1].classList.contains(
+        "ai-reviewer-detached-diff-block--insertion",
+      ),
+    ).to.equal(true);
+    expect(
+      blocks[0].querySelector(".ai-reviewer-detached-diff-text")?.textContent,
+    ).to.equal(original);
+    expect(
+      blocks[1].querySelector(".ai-reviewer-detached-diff-text")?.textContent,
+    ).to.equal(replacement);
+    expect(blocks[0].querySelector("del")?.textContent).to.equal(
+      "Your introduction goes beyond",
+    );
+    expect(blocks[1].querySelector("ins")?.textContent).to.equal(
+      "This document explores",
+    );
+    expect(parent.querySelectorAll(".cm-mergeView")).to.have.length(0);
+  });
 
   it("keeps hunk IDs stable for one plan and changes them with replacement content", async function () {
     const firstCase = createSuggestionCase({
@@ -364,8 +390,8 @@ describe("AI reviewer: single document detached diff", function () {
     const inputs = hunkInputs(parent);
     expect(inputs).to.have.length(2);
     const before = Array.from(
-      parent.querySelectorAll<HTMLElement>(".cm-editor"),
-    ).map((editor) => EditorView.findFromDOM(editor)?.state.doc.toString());
+      parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
+    ).map((element) => element.textContent);
 
     inputs[1].checked = true;
     inputs[1].dispatchEvent(new Event("change", { bubbles: true }));
@@ -374,9 +400,9 @@ describe("AI reviewer: single document detached diff", function () {
 
     expect(selectionEvents.at(-1)).to.deep.equal(mounted.hunkIds);
     expect(
-      Array.from(parent.querySelectorAll<HTMLElement>(".cm-editor")).map(
-        (editor) => EditorView.findFromDOM(editor)?.state.doc.toString(),
-      ),
+      Array.from(
+        parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
+      ).map((element) => element.textContent),
     ).to.deep.equal(before);
   });
 
@@ -739,34 +765,13 @@ describe("AI reviewer: single document detached diff", function () {
     expect(parent.childElementCount).to.equal(0);
   });
 
-  it("rejects a preview whose rendered chunks disagree with the reconstructed plan", async function () {
+  it("rejects a preview whose rendered segments disagree with the suggestion", async function () {
     const testCase = createSuggestionCase({
       id: "plan-mismatch",
       original: "alpha\nold\nomega\n",
       replacement: "alpha\nnew\nomega\n",
     });
-    const originalBuild = Chunk.build;
-    const expectedChunks = originalBuild(
-      EditorState.create({ doc: "alpha\nold\nomega\n" }).doc,
-      EditorState.create({ doc: "alpha\nnew\nomega\n" }).doc,
-      {
-        scanLimit: 500,
-        timeout: 1_000,
-      },
-    );
-    const mismatchedChunks = originalBuild(
-      EditorState.create({ doc: "old" }).doc,
-      EditorState.create({ doc: "different" }).doc,
-      {
-        scanLimit: 500,
-        timeout: 1_000,
-      },
-    );
-    const build = sinon.stub(Chunk, "build");
-    build.onFirstCall().returns(expectedChunks);
-    build.onSecondCall().returns(mismatchedChunks);
-    build.callsFake(originalBuild);
-    const destroy = sinon.spy(MergeView.prototype, "destroy");
+    sinon.stub(DiffMatchPatch.prototype, "diff_main").returns([[0, "wrong"]]);
     const parent = createParent();
 
     const error = await captureError(() =>
@@ -782,16 +787,14 @@ describe("AI reviewer: single document detached diff", function () {
       .to.be.instanceOf(DetachedSuggestionDiffError)
       .and.have.property("code", "AI_DIFF_PLAN_MISMATCH");
     expect(parent.childElementCount).to.equal(0);
-    expect(destroy.calledOnce).to.equal(true);
   });
 
-  it("destroys both detached editors and the selection controls", async function () {
+  it("destroys the unified preview and selection controls", async function () {
     const testCase = createSuggestionCase({
       id: "destroy",
       original: "old",
       replacement: "new",
     });
-    const destroy = sinon.spy(MergeView.prototype, "destroy");
     const { mounted, parent } = await mountCase(testCase);
     expect(parent.childElementCount).to.be.greaterThan(0);
 
@@ -799,7 +802,6 @@ describe("AI reviewer: single document detached diff", function () {
     mounted.destroy();
 
     expect(parent.childElementCount).to.equal(0);
-    expect(destroy.calledOnce).to.equal(true);
   });
 
   it("removes selection listeners when the preview is destroyed", async function () {

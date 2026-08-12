@@ -1,6 +1,7 @@
-import { Chunk, MergeView, type DiffConfig } from "@codemirror/merge";
+import { Chunk, type DiffConfig } from "@codemirror/merge";
 import { ChangeSet, EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+// @ts-expect-error diff-match-patch is vendored without a declaration file.
+import DiffMatchPatch from "diff-match-patch";
 import type { TFunction } from "i18next";
 
 import type { UnresolvedSuggestion } from "../../../shared/contract-types";
@@ -29,6 +30,11 @@ type SuggestionDiffPlan = {
   suggestion: UnresolvedSuggestion;
   chunks: readonly Chunk[];
   hunks: readonly PlannedHunk[];
+};
+
+type DisplayDiffSegment = {
+  kind: "equal" | "delete" | "insert";
+  text: string;
 };
 
 type MountDetachedSuggestionDiffOptions = {
@@ -295,27 +301,76 @@ async function buildPlan({
   );
 }
 
-function sameChunks(
-  expected: readonly Chunk[],
-  rendered: readonly Chunk[],
-  suggestion: UnresolvedSuggestion,
-) {
-  if (expected.length !== rendered.length) {
-    return false;
+function buildDisplayDiff(original: string, replacement: string) {
+  const dmp = new DiffMatchPatch();
+  const diff = dmp.diff_main(original, replacement) as Array<[number, string]>;
+  dmp.diff_cleanupSemantic(diff);
+
+  const segments = diff.map(([operation, text]): DisplayDiffSegment => {
+    if (operation === DiffMatchPatch.DIFF_DELETE) {
+      return { kind: "delete", text };
+    }
+    if (operation === DiffMatchPatch.DIFF_INSERT) {
+      return { kind: "insert", text };
+    }
+    if (operation === DiffMatchPatch.DIFF_EQUAL) {
+      return { kind: "equal", text };
+    }
+    return fail(
+      "AI_DIFF_PLAN_MISMATCH",
+      "The rendered preview does not match the suggestion plan.",
+    );
+  });
+  const renderedOriginal = segments
+    .filter((segment) => segment.kind !== "insert")
+    .map((segment) => segment.text)
+    .join("");
+  const renderedReplacement = segments
+    .filter((segment) => segment.kind !== "delete")
+    .map((segment) => segment.text)
+    .join("");
+  if (renderedOriginal !== original || renderedReplacement !== replacement) {
+    return fail(
+      "AI_DIFF_PLAN_MISMATCH",
+      "The rendered preview does not match the suggestion plan.",
+    );
   }
-  return expected.every(
-    (chunk, index) =>
-      JSON.stringify(
-        chunkDescription(chunk, suggestion.original, suggestion.replacement),
-      ) ===
-      JSON.stringify(
-        chunkDescription(
-          rendered[index],
-          suggestion.original,
-          suggestion.replacement,
-        ),
-      ),
-  );
+  return segments;
+}
+
+function renderDisplayDiff(
+  ownerDocument: Document,
+  parent: HTMLElement,
+  original: string,
+  replacement: string,
+) {
+  const segments = buildDisplayDiff(original, replacement);
+
+  for (const { kind, marker, tagName } of [
+    { kind: "delete", marker: "−", tagName: "del" },
+    { kind: "insert", marker: "+", tagName: "ins" },
+  ] as const) {
+    const block = ownerDocument.createElement("div");
+    block.className = `ai-reviewer-detached-diff-block ai-reviewer-detached-diff-block--${kind === "delete" ? "deletion" : "insertion"}`;
+    const sign = ownerDocument.createElement("span");
+    sign.className = "ai-reviewer-detached-diff-marker";
+    sign.setAttribute("aria-hidden", "true");
+    sign.textContent = marker;
+    const text = ownerDocument.createElement("div");
+    text.className = "ai-reviewer-detached-diff-text";
+
+    for (const segment of segments) {
+      if (segment.kind === "equal") {
+        text.appendChild(ownerDocument.createTextNode(segment.text));
+      } else if (segment.kind === kind) {
+        const emphasis = ownerDocument.createElement(tagName);
+        emphasis.textContent = segment.text;
+        text.appendChild(emphasis);
+      }
+    }
+    block.append(sign, text);
+    parent.appendChild(block);
+  }
 }
 
 function parseSelectedHunkIds(value: unknown): string[] {
@@ -376,19 +431,20 @@ export async function mountDetachedSuggestionDiff({
   container.className = "ai-reviewer-detached-diff";
   const preview = ownerDocument.createElement("div");
   preview.className = "ai-reviewer-detached-diff-preview";
+  renderDisplayDiff(
+    ownerDocument,
+    preview,
+    plan.suggestion.original,
+    plan.suggestion.replacement,
+  );
   const controls = ownerDocument.createElement("fieldset");
   controls.className = "ai-reviewer-detached-diff-hunks";
   const legend = ownerDocument.createElement("legend");
+  legend.className = "ai-reviewer-detached-diff-hunks-title";
   legend.textContent = t("ai_reviewer_select_proposed_changes");
   controls.appendChild(legend);
   container.append(preview, controls);
 
-  const immutableExtensions = [
-    EditorState.readOnly.of(true),
-    EditorView.editable.of(false),
-    EditorState.changeFilter.of(() => false),
-  ];
-  let mergeView: MergeView | null = null;
   let destroyed = false;
   const removeListeners: Array<() => void> = [];
   const selected = new Set<string>();
@@ -406,35 +462,10 @@ export async function mountDetachedSuggestionDiff({
     for (const removeListener of removeListeners.splice(0)) {
       removeListener();
     }
-    mergeView?.destroy();
-    mergeView = null;
     container.remove();
   };
 
   try {
-    mergeView = new MergeView({
-      a: {
-        doc: plan.suggestion.original,
-        extensions: immutableExtensions,
-      },
-      b: {
-        doc: plan.suggestion.replacement,
-        extensions: immutableExtensions,
-      },
-      parent: preview,
-      root: parent.getRootNode() as Document | ShadowRoot,
-      revertControls: undefined,
-      highlightChanges: true,
-      gutter: true,
-      diffConfig: DIFF_CONFIG,
-    });
-    if (!sameChunks(plan.chunks, mergeView.chunks, plan.suggestion)) {
-      return fail(
-        "AI_DIFF_PLAN_MISMATCH",
-        "The rendered preview does not match the suggestion plan.",
-      );
-    }
-
     for (const hunk of plan.hunks) {
       const label = ownerDocument.createElement("label");
       label.className = "ai-reviewer-detached-diff-hunk";
