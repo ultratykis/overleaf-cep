@@ -1164,7 +1164,7 @@ describe("AI reviewer: persisted review workspace", function () {
     expect(persistence.read(projectId)).to.deep.equal(emptyWorkspace());
   });
 
-  it("disposes a ready suggestion preview before deleting all saved review work", async function () {
+  it("removes the suggestion card when deleting all saved review work", async function () {
     const projectId = "preview-deletion-project";
     const request = sourceRequest(projectId);
     const suggestion = sourceSuggestion(request);
@@ -1193,14 +1193,6 @@ describe("AI reviewer: persisted review workspace", function () {
     };
     const persistence = new MemoryWorkspacePersistence({});
     const deleteAll = sinon.spy(persistence, "deleteAll");
-    const destroy = sinon.stub();
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-persistence-delete"]),
-        destroy,
-      };
-    });
     const streamRequest: NonNullable<
       React.ComponentProps<typeof AiReviewerPanelView>["streamRequest"]
     > = async ({ onEvent }) => {
@@ -1240,7 +1232,6 @@ describe("AI reviewer: persisted review workspace", function () {
           session,
         }),
         getSelectionContext: sinon.stub(),
-        mountSuggestionPreview,
         streamRequest,
       }),
     );
@@ -1250,12 +1241,7 @@ describe("AI reviewer: persisted review workspace", function () {
       }),
     );
     await screen.findByText("Completed");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await screen.findByText("Suggestion preview ready");
+    expect(screen.getByRole("button", { name: "Apply" })).to.exist;
 
     const deleteButton = getDeleteAllMenuItem();
     expect(deleteButton.hasAttribute("disabled")).to.equal(false);
@@ -1265,10 +1251,120 @@ describe("AI reviewer: persisted review workspace", function () {
 
     await waitFor(() => {
       expect(deleteAll.calledOnce).to.equal(true);
-      expect(destroy.calledOnce).to.equal(true);
     });
     expect(persistence.read(projectId)).to.deep.equal(emptyWorkspace());
-    expect(screen.queryByText("Suggestion preview ready")).not.to.exist;
+    expect(screen.queryByRole("button", { name: "Apply" })).not.to.exist;
+  });
+
+  it("cancels an in-flight suggestion Apply when deleting all saved review work", async function () {
+    const projectId = "apply-cancel-project";
+    const request = sourceRequest(projectId);
+    const suggestion = sourceSuggestion(request);
+    const shareDocument = {
+      connection: {
+        state: "ok",
+      },
+      getVersion: () => 7,
+    };
+    const currentDocument = {
+      doc_id: `${projectId}-document`,
+      joined: true,
+      doc: shareDocument,
+      getSnapshot: () => "Alpha beta gamma.",
+      hasBufferedOps: () => false,
+      getTrackingChanges: () => false,
+    };
+    const session = {
+      request,
+      binding: {
+        currentDocument,
+        shareDocument,
+        trackChanges: false,
+        connectionEpoch: 1,
+      },
+    };
+    const persistence = new MemoryWorkspacePersistence({});
+    const deleteAll = sinon.spy(persistence, "deleteAll");
+    // The plan compilation stays pending until after the deletion so the
+    // Apply is genuinely in flight when the workspace goes away.
+    let releaseHunkIds: (ids: readonly string[]) => void = () => {};
+    const hunkIdsGate = new Promise<readonly string[]>((resolve) => {
+      releaseHunkIds = resolve;
+    });
+    const getSuggestionHunkIds = sinon.stub().returns(hunkIdsGate);
+    const applySelectionSuggestion = sinon.stub().resolves({
+      status: "applied",
+    });
+    const streamRequest: NonNullable<
+      React.ComponentProps<typeof AiReviewerPanelView>["streamRequest"]
+    > = async ({ onEvent }) => {
+      onEvent({
+        type: "started",
+        eventId: "apply-cancel-started",
+        requestId: request.requestId,
+        sequence: 0,
+        createdAt,
+        provider: "fake",
+        model: "deterministic-v1",
+        skill: request.skill,
+      });
+      onEvent({
+        type: "suggestion",
+        eventId: "apply-cancel-suggestion",
+        requestId: request.requestId,
+        sequence: 1,
+        createdAt,
+        suggestion,
+      });
+      onEvent({
+        type: "completed",
+        eventId: "apply-cancel-completed",
+        requestId: request.requestId,
+        sequence: 2,
+        createdAt,
+        finishReason: "stop",
+      });
+    };
+
+    render(
+      panel(projectId, persistence, {
+        createRequestId: () => request.requestId,
+        captureSelectionSession: async () => ({
+          status: "ready",
+          session,
+        }),
+        getSelectionContext: sinon.stub(),
+        getSuggestionHunkIds,
+        applySelectionSuggestion,
+        streamRequest,
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Review selection",
+      }),
+    );
+    await screen.findByText("Completed");
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => {
+      expect(getSuggestionHunkIds.calledOnce).to.equal(true);
+    });
+
+    fireEvent.click(getDeleteAllMenuItem());
+    confirmDeleteAll();
+    await waitFor(() => {
+      expect(deleteAll.calledOnce).to.equal(true);
+    });
+
+    releaseHunkIds(Object.freeze(["ai-hunk-v1-apply-cancel"]));
+    await hunkIdsGate;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(applySelectionSuggestion.called).to.equal(false);
+    expect(persistence.read(projectId)).to.deep.equal(emptyWorkspace());
+    expect(screen.queryByRole("button", { name: "Apply" })).not.to.exist;
+    expect(screen.queryByText("The suggestion could not be applied.")).not.to
+      .exist;
   });
 
   it("blocks mutations after a stale save instead of hydrating away unsaved work", async function () {

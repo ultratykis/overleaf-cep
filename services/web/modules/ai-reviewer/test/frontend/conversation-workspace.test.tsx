@@ -283,12 +283,12 @@ function reviewingStream(onConversation: (call: ReviewStreamCall) => void) {
 
 async function renderCompletedFindingRun({
   onConversation,
-  mountSuggestionPreview,
+  getSuggestionHunkIds,
   applySelectionSuggestion,
   getSelectionContext,
 }: {
   onConversation: (call: ReviewStreamCall) => void;
-  mountSuggestionPreview?: sinon.SinonStub;
+  getSuggestionHunkIds?: sinon.SinonStub;
   applySelectionSuggestion?: sinon.SinonStub;
   getSelectionContext?: sinon.SinonStub;
 }) {
@@ -317,7 +317,7 @@ async function renderCompletedFindingRun({
       }}
       streamRequest={streamRequest}
       getSelectionContext={getSelectionContext}
-      mountSuggestionPreview={mountSuggestionPreview}
+      getSuggestionHunkIds={getSuggestionHunkIds}
       applySelectionSuggestion={applySelectionSuggestion}
     />,
   );
@@ -773,17 +773,14 @@ describe("AI reviewer: conversation workspace", function () {
     );
   });
 
-  it("routes an Agent suggestion through preview/apply with its exact turn session", async function () {
+  it("applies every Agent suggestion hunk from its card with the exact turn session", async function () {
     const request = sourceRequest();
     let emittedSuggestion: UnresolvedSuggestion | null = null;
-    const destroy = sinon.stub();
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange(["ai-hunk-v1-discussion"]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-discussion"]),
-        destroy,
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(
+        Object.freeze(["ai-hunk-v1-discussion-a", "ai-hunk-v1-discussion-b"]),
+      );
     const applySelectionSuggestion = sinon.stub().resolves({
       status: "applied",
     });
@@ -816,7 +813,7 @@ describe("AI reviewer: conversation workspace", function () {
           agentEvent(requestId, 3, { type: "completed", finishReason: "stop" }),
         );
       },
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
       applySelectionSuggestion,
       getSelectionContext,
     });
@@ -827,9 +824,7 @@ describe("AI reviewer: conversation workspace", function () {
     );
     fireEvent.click(screen.getByRole("menuitem", { name: "Review mode" }));
     typeConversationMessage("Please propose a precise replacement.");
-    const previewButton = await screen.findByRole("button", {
-      name: "Preview discussion diff 1",
-    });
+    const applyButton = await screen.findByRole("button", { name: "Apply" });
     const rationale = screen.getByText("precise term");
     expect(rationale.tagName).to.equal("STRONG");
     expect(
@@ -839,22 +834,17 @@ describe("AI reviewer: conversation workspace", function () {
     expect(screen.queryByText("Replacement: clear")).not.to.exist;
     expect(screen.getByText("beta", { selector: "del" })).to.exist;
     expect(screen.getByText("clear", { selector: "ins" })).to.exist;
-    fireEvent.click(previewButton);
-    await screen.findByText("Suggestion preview ready");
+    fireEvent.click(applyButton);
 
-    expect(mountSuggestionPreview.calledOnce).to.equal(true);
+    expect(getSuggestionHunkIds.calledOnce).to.equal(true);
     const agentRequest = conversationCalls(workspace.streamRequest)[0];
     expect(agentRequest.agentSessionId).to.equal("discussion-0001");
     expect(agentRequest.scope?.kind).to.equal("document");
-    expect(mountSuggestionPreview.firstCall.args[0].request).to.equal(
+    expect(getSuggestionHunkIds.firstCall.args[0].request).to.equal(
       agentRequest,
     );
-    expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
+    expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
       emittedSuggestion,
-    );
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Apply selected changes" }),
     );
     await waitFor(() => {
       expect(applySelectionSuggestion.calledOnce).to.equal(true);
@@ -867,11 +857,11 @@ describe("AI reviewer: conversation workspace", function () {
     expect(applyOptions.suggestion).to.equal(emittedSuggestion);
     expect(applyOptions.getContext).to.equal(getSelectionContext);
     expect(applyOptions.selectedHunkIds).to.deep.equal([
-      "ai-hunk-v1-discussion",
+      "ai-hunk-v1-discussion-a",
+      "ai-hunk-v1-discussion-b",
     ]);
     expect(Object.isFrozen(applyOptions.selectedHunkIds)).to.equal(true);
     await screen.findByText("Status: Applied");
-    expect(destroy.calledOnce).to.equal(true);
   });
 
   it("rebinds a persisted Agent suggestion to its generating turn after reload", async function () {
@@ -941,20 +931,19 @@ describe("AI reviewer: conversation workspace", function () {
       deleteAll: async () => ({ revision: 2, workspace: storedWorkspace }),
     };
     const { context, view } = editorContext(baseText, 0, 0);
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange(["persisted-agent-hunk"]);
-      return {
-        hunkIds: Object.freeze(["persisted-agent-hunk"]),
-        destroy: sinon.stub(),
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["persisted-agent-hunk"]));
 
     render(
       <AiReviewerPanelView
         projectId={projectId}
         workspacePersistence={persistence}
         getSelectionContext={sinon.stub().returns(context)}
-        mountSuggestionPreview={mountSuggestionPreview}
+        getSuggestionHunkIds={getSuggestionHunkIds}
+        applySelectionSuggestion={sinon.stub().resolves({
+          status: "cancelled",
+        })}
       />,
     );
 
@@ -966,17 +955,12 @@ describe("AI reviewer: conversation workspace", function () {
         name: "Finding: Ambiguous discussion phrase",
       }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Preview discussion diff 1",
-      }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
     await waitFor(() => {
-      expect(mountSuggestionPreview.calledOnce).to.equal(true);
+      expect(getSuggestionHunkIds.calledOnce).to.equal(true);
     });
-    await screen.findByText("Suggestion preview ready");
 
-    expect(mountSuggestionPreview.firstCall.args[0].request).to.deep.equal(
+    expect(getSuggestionHunkIds.firstCall.args[0].request).to.deep.equal(
       agentRequest,
     );
     view.destroy();

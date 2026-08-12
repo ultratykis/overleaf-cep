@@ -56,13 +56,6 @@ import {
   resolveWorkspaceModelSelection,
 } from "../../../shared/contracts.mjs";
 import {
-  AiReviewerSuggestionPreview,
-  type ApplySelectionSuggestion,
-  type MountSuggestionPreview,
-  type RegisterSuggestionPreviewLease,
-  type SuggestionPreviewDisposer,
-} from "./ai-reviewer-suggestion-preview";
-import {
   AiReviewerDiscussionMessages,
   type AiReviewerToolLine,
 } from "./ai-reviewer-discussion-messages";
@@ -121,9 +114,15 @@ import {
   type PostEditorComment,
   type PostableAiReviewerArtifact,
 } from "../services/editor-artifact-comment-posting";
-import { readEditorSuggestionLiveContext } from "../services/editor-suggestion-host-application";
+import {
+  applySelectedEditorSelectionSuggestion,
+  readEditorSuggestionLiveContext,
+} from "../services/editor-suggestion-host-application";
 import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
-import { mountSuggestionCardDiff } from "../services/detached-suggestion-diff";
+import {
+  getSuggestionHunkIds as getDefaultSuggestionHunkIds,
+  mountSuggestionCardDiff,
+} from "../services/detached-suggestion-diff";
 import {
   getAiProviderConnections,
   getAiProviderModels,
@@ -178,6 +177,8 @@ type CaptureSelectionSession = (
 type CitationFinding = Extract<Finding, { artifactKind: "citation-finding" }>;
 type OrdinaryFinding = Extract<Finding, { artifactKind: "finding" }>;
 type CopyText = (text: string) => Promise<void>;
+type GetSuggestionHunkIds = typeof getDefaultSuggestionHunkIds;
+type ApplySelectionSuggestion = typeof applySelectedEditorSelectionSuggestion;
 
 type CommentDraft = {
   key: string;
@@ -209,16 +210,13 @@ type ActiveRun = {
   referencedSuggestionIds: Set<string>;
 };
 
-type ActiveSuggestionPreview = {
+type ActiveSuggestionApplication = {
   generation: number;
   requestId: string;
   discussionId: string | null;
   session: EditorSelectionSession;
   suggestion: UnresolvedSuggestion;
-};
-
-type ActiveSuggestionLease = {
-  dispose: SuggestionPreviewDisposer;
+  controller: AbortController;
 };
 
 type ActiveEvidenceNavigation = {
@@ -1397,8 +1395,8 @@ export function AiReviewerPanelView({
   navigateEvidence = navigateToEditorEvidence,
   resolveEvidenceDocument,
   openEvidenceDocument,
-  mountSuggestionPreview,
-  applySelectionSuggestion,
+  getSuggestionHunkIds = getDefaultSuggestionHunkIds,
+  applySelectionSuggestion = applySelectedEditorSelectionSuggestion,
   copyText = copyTextToClipboard,
   postEditorComment,
   workspacePersistence,
@@ -1420,7 +1418,7 @@ export function AiReviewerPanelView({
   navigateEvidence?: NavigateEvidence;
   resolveEvidenceDocument?: ResolveEditorEvidenceDocument;
   openEvidenceDocument?: OpenEditorEvidenceDocument;
-  mountSuggestionPreview?: MountSuggestionPreview;
+  getSuggestionHunkIds?: GetSuggestionHunkIds;
   applySelectionSuggestion?: ApplySelectionSuggestion;
   copyText?: CopyText;
   postEditorComment?: PostEditorComment;
@@ -1581,8 +1579,8 @@ export function AiReviewerPanelView({
     projectId: string;
     discussionId: string;
   } | null>(null);
-  const [activeSuggestionPreview, setActiveSuggestionPreview] =
-    useState<ActiveSuggestionPreview | null>(null);
+  const [activeSuggestionApplication, setActiveSuggestionApplication] =
+    useState<ActiveSuggestionApplication | null>(null);
   const [evidenceNavigationNotice, setEvidenceNavigationNotice] =
     useState<EvidenceNavigationNotice | null>(null);
   const [citationCopyNotice, setCitationCopyNotice] =
@@ -1599,8 +1597,8 @@ export function AiReviewerPanelView({
   const [persistenceSaveFailed, setPersistenceSaveFailed] = useState(false);
   const [persistenceConflict, setPersistenceConflict] = useState(false);
   const activeRun = useRef<ActiveRun | null>(null);
-  const activeSuggestionIdentity = useRef<ActiveSuggestionPreview | null>(null);
-  const activeSuggestionLease = useRef<ActiveSuggestionLease | null>(null);
+  const activeSuggestionApplicationRef =
+    useRef<ActiveSuggestionApplication | null>(null);
   const activeEvidenceNavigation = useRef<ActiveEvidenceNavigation | null>(
     null,
   );
@@ -2073,14 +2071,16 @@ export function AiReviewerPanelView({
   }, []);
 
   const disposeActiveSuggestion = useCallback((reason: unknown) => {
-    const activeLease = activeSuggestionLease.current;
-    activeSuggestionLease.current = null;
-    if (activeLease != null) {
-      activeLease.dispose(reason);
+    const activeApplication = activeSuggestionApplicationRef.current;
+    activeSuggestionApplicationRef.current = null;
+    if (
+      activeApplication != null &&
+      !activeApplication.controller.signal.aborted
+    ) {
+      activeApplication.controller.abort(reason);
     }
-    activeSuggestionIdentity.current = null;
     if (mounted.current) {
-      setActiveSuggestionPreview(null);
+      setActiveSuggestionApplication(null);
     }
   }, []);
 
@@ -2104,34 +2104,6 @@ export function AiReviewerPanelView({
       setCitationCopyNotice(null);
     }
   }, []);
-
-  const registerSuggestionLease = useCallback(
-    (identity: ActiveSuggestionPreview, dispose: SuggestionPreviewDisposer) => {
-      if (activeSuggestionIdentity.current !== identity) {
-        dispose(
-          cancellationReason("The suggestion preview is no longer active."),
-        );
-        return () => {};
-      }
-
-      const previous = activeSuggestionLease.current;
-      const lease = {
-        dispose,
-      };
-      activeSuggestionLease.current = lease;
-      if (previous != null && previous !== lease) {
-        previous.dispose(
-          cancellationReason("The suggestion preview was replaced."),
-        );
-      }
-      return () => {
-        if (activeSuggestionLease.current === lease) {
-          activeSuggestionLease.current = null;
-        }
-      };
-    },
-    [],
-  );
 
   const isActiveRun = useCallback(
     (run: ActiveRun) =>
@@ -3054,94 +3026,18 @@ export function AiReviewerPanelView({
     persistenceMutationPending ||
     persistenceConflict ||
     runInProgress;
-  const activeLeaseRegistrar = useMemo<
-    RegisterSuggestionPreviewLease | undefined
-  >(() => {
-    if (activeSuggestionPreview == null) {
-      return undefined;
-    }
-    const identity = activeSuggestionPreview;
-    return (dispose) => registerSuggestionLease(identity, dispose);
-  }, [activeSuggestionPreview, registerSuggestionLease]);
-
-  const openSuggestionPreview = useCallback(
-    (runState: SelectionWorkspaceState, suggestion: UnresolvedSuggestion) => {
-      const session =
-        runState.session ??
-        (runState.request == null
-          ? null
-          : rebindSuggestionSession(runState.request));
-      const requestId = runState.requestId;
-      if (
-        persistenceConflictRef.current ||
-        runState.status !== "completed" ||
-        session == null ||
-        requestId == null ||
-        getSelectionContext == null ||
-        session.request.scope == null ||
-        session.request.scope.kind === "project" ||
-        session.request.requestId !== requestId ||
-        suggestion.requestId !== requestId ||
-        suggestionStatus(runState.suggestionStatuses, suggestion.id) !==
-          "unresolved"
-      ) {
-        if (
-          runState.status === "completed" &&
-          runState.request?.scope?.kind !== "project" &&
-          session == null
-        ) {
-          setActionNotice(
-            t("ai_reviewer_open_reviewed_document_in_source_mode"),
-          );
-        }
-        return;
-      }
-
-      if (
-        activeSuggestionIdentity.current?.generation === runState.generation &&
-        activeSuggestionIdentity.current.requestId === requestId &&
-        activeSuggestionIdentity.current.discussionId == null &&
-        activeSuggestionIdentity.current.session === session &&
-        activeSuggestionIdentity.current.suggestion === suggestion
-      ) {
-        return;
-      }
-
-      setActionNotice(null);
-      disposeActiveSuggestion(
-        cancellationReason("Another suggestion preview was selected."),
-      );
-      if (runState.session == null) {
-        dispatch({
-          type: "rebind-session",
-          generation: runState.generation,
-          requestId,
-          session,
-        });
-      }
-      const identity = {
-        generation: runState.generation,
-        requestId,
-        discussionId: null,
-        session,
-        suggestion,
-      };
-      activeSuggestionIdentity.current = identity;
-      setActiveSuggestionPreview(identity);
-    },
-    [disposeActiveSuggestion, getSelectionContext, rebindSuggestionSession, t],
-  );
-
   const recordSuggestionDecision = useCallback(
     (
-      identity: ActiveSuggestionPreview,
+      identity: ActiveSuggestionApplication,
       decision: SelectionSuggestionDecision,
     ) => {
-      if (activeSuggestionIdentity.current !== identity) {
+      if (activeSuggestionApplicationRef.current !== identity) {
         return;
       }
       disposeActiveSuggestion(
-        cancellationReason("The suggestion preview reached a terminal state."),
+        cancellationReason(
+          "The suggestion application reached a terminal state.",
+        ),
       );
       if (!mounted.current) {
         return;
@@ -3207,6 +3103,142 @@ export function AiReviewerPanelView({
     [disposeActiveSuggestion, now, updateDiscussions],
   );
 
+  const applyAllSuggestionHunks = useCallback(
+    (identity: Omit<ActiveSuggestionApplication, "controller">) => {
+      if (activeSuggestionApplicationRef.current != null) {
+        return;
+      }
+      const controller = new AbortController();
+      const application = { ...identity, controller };
+      activeSuggestionApplicationRef.current = application;
+      setActiveSuggestionApplication(application);
+      setActionNotice(null);
+
+      void (async () => {
+        let selectedHunkIds: unknown;
+        try {
+          const plannedHunkIds = await getSuggestionHunkIds({
+            request: application.session.request,
+            suggestion: application.suggestion,
+          });
+          selectedHunkIds = Array.isArray(plannedHunkIds)
+            ? Object.freeze([...plannedHunkIds])
+            : plannedHunkIds;
+        } catch {
+          if (
+            activeSuggestionApplicationRef.current === application &&
+            !controller.signal.aborted
+          ) {
+            setActionNotice(t("ai_reviewer_suggestion_apply_failed"));
+            recordSuggestionDecision(application, { status: "error" });
+          }
+          return;
+        }
+
+        if (
+          activeSuggestionApplicationRef.current !== application ||
+          controller.signal.aborted
+        ) {
+          return;
+        }
+
+        try {
+          const result = await applySelectionSuggestion({
+            session: application.session,
+            suggestion: application.suggestion,
+            selectedHunkIds,
+            getContext: getSelectionContext!,
+            signal: controller.signal,
+          });
+          if (
+            activeSuggestionApplicationRef.current !== application ||
+            controller.signal.aborted
+          ) {
+            return;
+          }
+          if (result.status === "empty") {
+            setActionNotice(t("ai_reviewer_suggestion_no_applicable_change"));
+            recordSuggestionDecision(application, { status: "error" });
+          } else if (result.status === "conflict") {
+            recordSuggestionDecision(application, {
+              status: "conflict",
+              code: result.code,
+            });
+          } else {
+            recordSuggestionDecision(application, { status: result.status });
+          }
+        } catch {
+          if (
+            activeSuggestionApplicationRef.current === application &&
+            !controller.signal.aborted
+          ) {
+            setActionNotice(t("ai_reviewer_suggestion_apply_failed"));
+            recordSuggestionDecision(application, { status: "error" });
+          }
+        }
+      })();
+    },
+    [
+      applySelectionSuggestion,
+      getSelectionContext,
+      getSuggestionHunkIds,
+      recordSuggestionDecision,
+      t,
+    ],
+  );
+
+  const applyRunSuggestion = useCallback(
+    (runState: SelectionWorkspaceState, suggestion: UnresolvedSuggestion) => {
+      const session =
+        runState.session ??
+        (runState.request == null
+          ? null
+          : rebindSuggestionSession(runState.request));
+      const requestId = runState.requestId;
+      if (
+        persistenceConflictRef.current ||
+        runState.status !== "completed" ||
+        session == null ||
+        requestId == null ||
+        getSelectionContext == null ||
+        session.request.scope == null ||
+        session.request.scope.kind === "project" ||
+        session.request.requestId !== requestId ||
+        suggestion.requestId !== requestId ||
+        suggestionStatus(runState.suggestionStatuses, suggestion.id) !==
+          "unresolved"
+      ) {
+        if (
+          runState.status === "completed" &&
+          runState.request?.scope?.kind !== "project" &&
+          session == null
+        ) {
+          setActionNotice(
+            t("ai_reviewer_open_reviewed_document_in_source_mode"),
+          );
+        }
+        return;
+      }
+
+      if (runState.session == null) {
+        dispatch({
+          type: "rebind-session",
+          generation: runState.generation,
+          requestId,
+          session,
+        });
+      }
+      applyAllSuggestionHunks({
+        generation: runState.generation,
+        requestId,
+        discussionId: null,
+        session,
+        suggestion,
+      });
+    },
+    [applyAllSuggestionHunks, getSelectionContext, rebindSuggestionSession, t],
+  );
+
   const discardSuggestion = useCallback(
     (runState: SelectionWorkspaceState, suggestion: UnresolvedSuggestion) => {
       const requestId = runState.requestId;
@@ -3224,7 +3256,7 @@ export function AiReviewerPanelView({
       ) {
         return;
       }
-      if (activeSuggestionIdentity.current?.suggestion === suggestion) {
+      if (activeSuggestionApplicationRef.current?.suggestion === suggestion) {
         disposeActiveSuggestion(
           cancellationReason("The suggestion was discarded."),
         );
@@ -3818,7 +3850,7 @@ export function AiReviewerPanelView({
     updateDiscussions,
   ]);
 
-  const openDiscussionSuggestionPreview = useCallback(
+  const applyDiscussionSuggestion = useCallback(
     (discussion: Discussion, suggestion: UnresolvedSuggestion) => {
       const sourceRequest = discussion.suggestionRequests[suggestion.id];
       if (sourceRequest == null) {
@@ -3861,22 +3893,16 @@ export function AiReviewerPanelView({
           ),
         );
       }
-      setActionNotice(null);
-      disposeActiveSuggestion(
-        cancellationReason("Another suggestion preview was selected."),
-      );
-      const identity: ActiveSuggestionPreview = {
+      applyAllSuggestionHunks({
         generation: discussion.sourceGeneration ?? discussion.createdOrder,
         requestId: session.request.requestId,
         discussionId: discussion.id,
         session,
         suggestion,
-      };
-      activeSuggestionIdentity.current = identity;
-      setActiveSuggestionPreview(identity);
+      });
     },
     [
-      disposeActiveSuggestion,
+      applyAllSuggestionHunks,
       getSelectionContext,
       rebindSuggestionSession,
       t,
@@ -3897,7 +3923,7 @@ export function AiReviewerPanelView({
       ) {
         return;
       }
-      if (activeSuggestionIdentity.current?.suggestion === suggestion) {
+      if (activeSuggestionApplicationRef.current?.suggestion === suggestion) {
         disposeActiveSuggestion(
           cancellationReason("The suggestion was discarded."),
         );
@@ -4015,7 +4041,9 @@ export function AiReviewerPanelView({
           );
         }
       }
-      if (activeSuggestionIdentity.current?.discussionId === discussionId) {
+      if (
+        activeSuggestionApplicationRef.current?.discussionId === discussionId
+      ) {
         disposeActiveSuggestion(
           cancellationReason("The discussion was deleted."),
         );
@@ -4042,7 +4070,9 @@ export function AiReviewerPanelView({
       ) {
         return;
       }
-      if (activeSuggestionIdentity.current?.discussionId === discussion.id) {
+      if (
+        activeSuggestionApplicationRef.current?.discussionId === discussion.id
+      ) {
         disposeActiveSuggestion(
           cancellationReason("The discussion was deleted."),
         );
@@ -4348,26 +4378,6 @@ export function AiReviewerPanelView({
     ? persistenceNotice
     : (actionNotice ?? persistenceNotice ?? modeInstructionNotice);
 
-  const renderSuggestionPreview = (
-    identity: ActiveSuggestionPreview,
-    suggestion: UnresolvedSuggestion,
-  ) =>
-    getSelectionContext == null || persistenceConflict ? null : (
-      <AiReviewerSuggestionPreview
-        key={`${identity.discussionId ?? "run"}:${identity.generation}:${identity.requestId}:${suggestion.id}`}
-        session={identity.session}
-        suggestion={suggestion}
-        getContext={getSelectionContext}
-        mountPreview={mountSuggestionPreview}
-        applySuggestion={applySelectionSuggestion}
-        registerLease={activeLeaseRegistrar}
-        onErrorNotice={setActionNotice}
-        onDecision={(nextDecision) =>
-          recordSuggestionDecision(identity, nextDecision)
-        }
-      />
-    );
-
   const renderCommentDraft = (key: string) => {
     if (commentDraft?.key !== key) {
       return null;
@@ -4439,6 +4449,7 @@ export function AiReviewerPanelView({
     status: FindingArtifactStatus | SuggestionArtifactStatus,
     body: ReactNode,
     jumpTarget = false,
+    headingAction: ReactNode = null,
   ) => {
     const statusLabel = t("ai_reviewer_artifact_status", {
       status: artifactStatusLabel(status, t),
@@ -4451,6 +4462,25 @@ export function AiReviewerPanelView({
       : {};
 
     if (isTerminalArtifactStatus(status)) {
+      const disclosure = (
+        <details
+          className={`ai-reviewer-artifact-disclosure${
+            headingAction == null ? "" : " flex-grow-1"
+          }`}
+        >
+          <summary className="ai-reviewer-artifact-summary">
+            <span className="ai-reviewer-artifact-summary-content">
+              {title != null && (
+                <span className="ai-reviewer-artifact-title">{title}</span>
+              )}
+              <span className="ai-reviewer-artifact-status">
+                {statusLabel}
+              </span>
+            </span>
+          </summary>
+          <div className="ai-reviewer-artifact-body">{body}</div>
+        </details>
+      );
       return (
         <article
           key={key}
@@ -4458,27 +4488,29 @@ export function AiReviewerPanelView({
         >
           {/* Native disclosure semantics keep completed work to one line while
               leaving its details and historical actions available on demand. */}
-          <details className="ai-reviewer-artifact-disclosure">
-            <summary className="ai-reviewer-artifact-summary">
-              <span className="ai-reviewer-artifact-summary-content">
-                {title != null && (
-                  <span className="ai-reviewer-artifact-title">{title}</span>
-                )}
-                <span className="ai-reviewer-artifact-status">
-                  {statusLabel}
-                </span>
-              </span>
-            </summary>
-            <div className="ai-reviewer-artifact-body">{body}</div>
-          </details>
+          {headingAction == null ? (
+            disclosure
+          ) : (
+            <div className="d-flex align-items-start justify-content-between gap-2">
+              {disclosure}
+              {headingAction}
+            </div>
+          )}
         </article>
       );
     }
 
     return (
       <article key={key} className="ai-reviewer-artifact" {...jumpTargetProps}>
-        {title != null && (
-          <h5 className="ai-reviewer-artifact-title">{title}</h5>
+        {title != null && headingAction != null ? (
+          <div className="d-flex align-items-center justify-content-between gap-2">
+            <h5 className="ai-reviewer-artifact-title">{title}</h5>
+            {headingAction}
+          </div>
+        ) : (
+          title != null && (
+            <h5 className="ai-reviewer-artifact-title">{title}</h5>
+          )
         )}
         <p className="ai-reviewer-artifact-status">{statusLabel}</p>
         {body}
@@ -4721,7 +4753,7 @@ export function AiReviewerPanelView({
   ) => {
     const commentDraftKey = `run:${runState.generation}:suggestion:${suggestion.id}`;
     const status = suggestionStatus(runState.suggestionStatuses, suggestion.id);
-    const previewAvailable =
+    const applyAvailable =
       runState.status === "completed" &&
       runState.request != null &&
       getSelectionContext != null &&
@@ -4734,13 +4766,11 @@ export function AiReviewerPanelView({
       runState.status === "completed" &&
       suggestion.requestId === runState.requestId &&
       (status === "unresolved" || status === "conflict");
-    const previewActive =
-      status === "unresolved" &&
-      activeSuggestionPreview != null &&
-      activeSuggestionPreview.discussionId == null &&
-      activeSuggestionPreview.generation === runState.generation &&
-      activeSuggestionPreview.requestId === runState.requestId &&
-      activeSuggestionPreview.suggestion === suggestion;
+    const applying =
+      activeSuggestionApplication?.discussionId == null &&
+      activeSuggestionApplication?.generation === runState.generation &&
+      activeSuggestionApplication?.requestId === runState.requestId &&
+      activeSuggestionApplication?.suggestion === suggestion;
     return renderArtifact(
       commentDraftKey,
       t("ai_reviewer_suggestion_title", { index: index + 1 }),
@@ -4790,17 +4820,6 @@ export function AiReviewerPanelView({
               {t("ai_reviewer_discuss_suggestion")}
             </OLButton>
           )}
-          {previewAvailable && (
-            <OLButton
-              type="button"
-              variant="secondary"
-              size="sm"
-              disabled={persistenceConflict}
-              onClick={() => openSuggestionPreview(runState, suggestion)}
-            >
-              {t("ai_reviewer_preview_diff", { index: index + 1 })}
-            </OLButton>
-          )}
           {status === "unresolved" &&
             runState.status === "completed" &&
             runState.request != null &&
@@ -4841,9 +4860,6 @@ export function AiReviewerPanelView({
           )}
         </div>
         {renderCommentDraft(commentDraftKey)}
-        {previewActive &&
-          activeSuggestionPreview != null &&
-          renderSuggestionPreview(activeSuggestionPreview, suggestion)}
         {status === "conflict" && (
           <p aria-live="polite">
             {runState.suggestionConflictCodes[suggestion.id] == null
@@ -4854,6 +4870,16 @@ export function AiReviewerPanelView({
           </p>
         )}
       </>,
+      false,
+      <OLButton
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled={!applyAvailable || applying || persistenceConflict}
+        onClick={() => applyRunSuggestion(runState, suggestion)}
+      >
+        {t("ai_reviewer_apply_suggestion")}
+      </OLButton>,
     );
   };
 
@@ -5087,10 +5113,14 @@ export function AiReviewerPanelView({
       discussion.suggestionStatuses,
       suggestion.id,
     );
-    const previewActive =
+    const applyAvailable =
       status === "unresolved" &&
-      activeSuggestionPreview?.discussionId === discussion.id &&
-      activeSuggestionPreview.suggestion === suggestion;
+      getSelectionContext != null &&
+      sourceRequest?.scope != null &&
+      sourceRequest.scope.kind !== "project";
+    const applying =
+      activeSuggestionApplication?.discussionId === discussion.id &&
+      activeSuggestionApplication.suggestion === suggestion;
     return renderArtifact(
       commentDraftKey,
       t("ai_reviewer_suggestion_title", { index: index + 1 }),
@@ -5108,22 +5138,6 @@ export function AiReviewerPanelView({
           translate="no"
         />
         <div className="ai-reviewer-panel-actions">
-          {status === "unresolved" &&
-            getSelectionContext != null &&
-            sourceRequest?.scope != null &&
-            sourceRequest.scope.kind !== "project" && (
-              <OLButton
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={persistenceConflict}
-                onClick={() =>
-                  openDiscussionSuggestionPreview(discussion, suggestion)
-                }
-              >
-                {t("ai_reviewer_preview_discussion_diff", { index: index + 1 })}
-              </OLButton>
-            )}
           {status === "unresolved" &&
             sourceRequest != null &&
             postEditorComment != null &&
@@ -5167,9 +5181,6 @@ export function AiReviewerPanelView({
           )}
         </div>
         {renderCommentDraft(commentDraftKey)}
-        {previewActive &&
-          activeSuggestionPreview != null &&
-          renderSuggestionPreview(activeSuggestionPreview, suggestion)}
         {status === "conflict" && (
           <p aria-live="polite">
             {discussion.suggestionConflictCodes[suggestion.id] == null
@@ -5180,6 +5191,16 @@ export function AiReviewerPanelView({
           </p>
         )}
       </>,
+      false,
+      <OLButton
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled={!applyAvailable || applying || persistenceConflict}
+        onClick={() => applyDiscussionSuggestion(discussion, suggestion)}
+      >
+        {t("ai_reviewer_apply_suggestion")}
+      </OLButton>,
     );
   };
 

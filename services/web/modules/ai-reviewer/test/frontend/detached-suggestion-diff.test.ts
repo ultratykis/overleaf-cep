@@ -3,13 +3,12 @@ import { EditorState } from "@codemirror/state";
 // @ts-expect-error diff-match-patch is vendored without a declaration file.
 import DiffMatchPatch from "diff-match-patch";
 import { expect } from "chai";
-import i18next from "i18next";
 import sinon from "sinon";
 
 import {
   compileSelectedSuggestionHunks,
   DetachedSuggestionDiffError,
-  mountDetachedSuggestionDiff,
+  getSuggestionHunkIds,
   mountSuggestionCardDiff,
 } from "../../frontend/js/services/detached-suggestion-diff";
 import diffFixtureSet from "../fixtures/oss-adoption/diff-fixtures.json";
@@ -27,8 +26,6 @@ type SuggestionCase = {
   expectedText: string;
   documentLength: number;
 };
-
-type MountedDiff = Awaited<ReturnType<typeof mountDetachedSuggestionDiff>>;
 
 const baseTextHash = "a".repeat(64);
 const fixtures = diffFixtureSet.cases as DiffFixture[];
@@ -126,14 +123,6 @@ async function captureError(operation: () => Promise<unknown>) {
   throw new Error("Expected the operation to reject.");
 }
 
-function hunkInputs(parent: HTMLElement) {
-  return Array.from(
-    parent.querySelectorAll<HTMLInputElement>(
-      'input[type="checkbox"][data-ai-reviewer-hunk-id]',
-    ),
-  );
-}
-
 function renderedVersions(parent: HTMLElement) {
   const text = parent.querySelector<HTMLElement>(
     ".ai-reviewer-detached-diff-text",
@@ -155,7 +144,6 @@ function renderedVersions(parent: HTMLElement) {
 }
 
 describe("AI reviewer: single document detached diff", function () {
-  const mountedDiffs: MountedDiff[] = [];
   const parents: HTMLElement[] = [];
 
   function createParent() {
@@ -165,71 +153,32 @@ describe("AI reviewer: single document detached diff", function () {
     return parent;
   }
 
-  async function mountCase(
-    testCase: SuggestionCase,
-    onSelectionChange?: (selectedHunkIds: readonly string[]) => void,
-  ) {
-    const parent = createParent();
-    const mounted = await mountDetachedSuggestionDiff({
-      parent,
+  async function planCase(testCase: SuggestionCase) {
+    return getSuggestionHunkIds({
       request: testCase.request,
       suggestion: testCase.suggestion,
-      onSelectionChange,
-      t: i18next.t,
     });
-    mountedDiffs.push(mounted);
-    return {
-      mounted,
-      parent,
-    };
   }
 
   afterEach(function () {
     sinon.restore();
-    for (const mounted of mountedDiffs.splice(0).reverse()) {
-      mounted.destroy();
-    }
     for (const parent of parents.splice(0).reverse()) {
       parent.remove();
     }
   });
 
   for (const fixture of fixtures) {
-    it(`renders and compiles the ${fixture.id} fixture without mutating the preview`, async function () {
+    it(`plans and compiles every hunk of the ${fixture.id} fixture`, async function () {
       const testCase = createSuggestionCase(fixture);
-      const selectionEvents: string[][] = [];
-      const { mounted, parent } = await mountCase(
-        testCase,
-        (selectedHunkIds) => {
-          selectionEvents.push([...selectedHunkIds]);
-        },
-      );
-
-      const previewText = parent.querySelector(
-        ".ai-reviewer-detached-diff-text",
-      )?.textContent;
-      expect(renderedVersions(parent)).to.deep.equal({
-        original: fixture.original,
-        replacement: fixture.replacement,
-      });
-      expect(mounted.hunkIds).to.have.length.greaterThan(0);
-      expect(new Set(mounted.hunkIds).size).to.equal(mounted.hunkIds.length);
-      expect(hunkInputs(parent)).to.have.length(mounted.hunkIds.length);
-      expect(selectionEvents).to.deep.equal([[]]);
-
-      for (const input of hunkInputs(parent)) {
-        input.checked = true;
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      expect(selectionEvents.at(-1)).to.deep.equal(mounted.hunkIds);
-      expect(
-        parent.querySelector(".ai-reviewer-detached-diff-text")?.textContent,
-      ).to.equal(previewText);
+      const hunkIds = await planCase(testCase);
+      expect(hunkIds).to.have.length.greaterThan(0);
+      expect(new Set(hunkIds).size).to.equal(hunkIds.length);
+      expect(Object.isFrozen(hunkIds)).to.equal(true);
 
       const compiled = await compileSelectedSuggestionHunks({
         request: testCase.request,
         suggestion: testCase.suggestion,
-        selectedHunkIds: mounted.hunkIds,
+        selectedHunkIds: hunkIds,
         documentLength: testCase.documentLength,
       });
       expect(compiled.status).to.equal("ready");
@@ -246,16 +195,11 @@ describe("AI reviewer: single document detached diff", function () {
     });
   }
 
-  it("renders one inline unified block with semantic segments in document order", async function () {
+  it("renders one card-integrated unified block in document order", function () {
     const original = "Your introduction goes beyond the topic.";
     const replacement = "This document explores the topic.";
-    const { parent } = await mountCase(
-      createSuggestionCase({
-        id: "readable-unified-preview",
-        original,
-        replacement,
-      }),
-    );
+    const parent = createParent();
+    mountSuggestionCardDiff({ parent, original, replacement });
     const blocks = Array.from(
       parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-block"),
     );
@@ -312,12 +256,12 @@ describe("AI reviewer: single document detached diff", function () {
       replacement: "alpha\ndifferent\nomega\n",
     });
 
-    const first = await mountCase(firstCase);
-    const remounted = await mountCase(remountedCase);
-    const changed = await mountCase(changedCase);
+    const first = await planCase(firstCase);
+    const remounted = await planCase(remountedCase);
+    const changed = await planCase(changedCase);
 
-    expect(remounted.mounted.hunkIds).to.deep.equal(first.mounted.hunkIds);
-    expect(changed.mounted.hunkIds).not.to.deep.equal(first.mounted.hunkIds);
+    expect(remounted).to.deep.equal(first);
+    expect(changed).not.to.deep.equal(first);
   });
 
   it("binds every hunk ID to the complete suggestion identity and base state", async function () {
@@ -325,7 +269,7 @@ describe("AI reviewer: single document detached diff", function () {
       original: "alpha\nold\nomega\n",
       replacement: "alpha\nnew\nomega\n",
     };
-    const baseline = await mountCase(
+    const baseline = await planCase(
       createSuggestionCase({
         id: "identity",
         ...common,
@@ -375,63 +319,22 @@ describe("AI reviewer: single document detached diff", function () {
     ];
 
     for (const variant of variants) {
-      const mounted = await mountCase(variant);
-      expect(mounted.mounted.hunkIds).not.to.deep.equal(
-        baseline.mounted.hunkIds,
-      );
+      const hunkIds = await planCase(variant);
+      expect(hunkIds).not.to.deep.equal(baseline);
     }
   });
 
-  it("returns only opaque hunk IDs and an idempotent destroy function", async function () {
+  it("returns only frozen opaque hunk IDs", async function () {
     const testCase = createSuggestionCase({
       id: "public-shape",
       original: "old",
       replacement: "new",
     });
-    const { mounted } = await mountCase(testCase);
+    const hunkIds = await planCase(testCase);
 
-    expect(Object.keys(mounted).sort()).to.deep.equal(["destroy", "hunkIds"]);
-    expect(Object.isFrozen(mounted)).to.equal(true);
-    expect(Object.isFrozen(mounted.hunkIds)).to.equal(true);
-    expect(mounted).not.to.have.any.keys(
-      "a",
-      "b",
-      "chunks",
-      "dom",
-      "mergeView",
-      "view",
-    );
-  });
-
-  it("reports selection in plan order without changing either preview document", async function () {
-    const testCase = createSuggestionCase({
-      id: "selection-order",
-      original:
-        "start\nold-one\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nold-two\nend\n",
-      replacement:
-        "start\nnew-one\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nnew-two\nend\n",
-    });
-    const selectionEvents: string[][] = [];
-    const { mounted, parent } = await mountCase(testCase, (selectedHunkIds) => {
-      selectionEvents.push([...selectedHunkIds]);
-    });
-    const inputs = hunkInputs(parent);
-    expect(inputs).to.have.length(2);
-    const before = Array.from(
-      parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
-    ).map((element) => element.textContent);
-
-    inputs[1].checked = true;
-    inputs[1].dispatchEvent(new Event("change", { bubbles: true }));
-    inputs[0].checked = true;
-    inputs[0].dispatchEvent(new Event("change", { bubbles: true }));
-
-    expect(selectionEvents.at(-1)).to.deep.equal(mounted.hunkIds);
-    expect(
-      Array.from(
-        parent.querySelectorAll<HTMLElement>(".ai-reviewer-detached-diff-text"),
-      ).map((element) => element.textContent),
-    ).to.deep.equal(before);
+    expect(Object.isFrozen(hunkIds)).to.equal(true);
+    expect(hunkIds).to.have.length(1);
+    expect(hunkIds[0]).to.match(/^ai-hunk-v1-[0-9a-f]{64}$/);
   });
 
   it("compiles only the selected separated hunk and leaves the other change untouched", async function () {
@@ -442,13 +345,13 @@ describe("AI reviewer: single document detached diff", function () {
       replacement:
         "start\nnew-one\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nnew-two\nend\n",
     });
-    const { mounted } = await mountCase(testCase);
-    expect(mounted.hunkIds).to.have.length(2);
+    const hunkIds = await planCase(testCase);
+    expect(hunkIds).to.have.length(2);
 
     const compiled = await compileSelectedSuggestionHunks({
       request: testCase.request,
       suggestion: testCase.suggestion,
-      selectedHunkIds: [mounted.hunkIds[0]],
+      selectedHunkIds: [hunkIds[0]],
       documentLength: testCase.documentLength,
     });
     expect(compiled.status).to.equal("ready");
@@ -473,13 +376,13 @@ describe("AI reviewer: single document detached diff", function () {
         "start\nalpha new omega\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nalpha new omega\nend\n",
       suffix: ":後",
     });
-    const { mounted } = await mountCase(testCase);
-    expect(mounted.hunkIds).to.have.length(2);
+    const hunkIds = await planCase(testCase);
+    expect(hunkIds).to.have.length(2);
 
     const compiled = await compileSelectedSuggestionHunks({
       request: testCase.request,
       suggestion: testCase.suggestion,
-      selectedHunkIds: [...mounted.hunkIds].reverse(),
+      selectedHunkIds: [...hunkIds].reverse(),
       documentLength: testCase.documentLength,
     });
     expect(compiled.status).to.equal("ready");
@@ -506,7 +409,7 @@ describe("AI reviewer: single document detached diff", function () {
     const firstOld = testCase.fullText.indexOf("old");
     const secondOld = testCase.fullText.lastIndexOf("old");
 
-    expect(compiled.selectedHunkIds).to.deep.equal(mounted.hunkIds);
+    expect(compiled.selectedHunkIds).to.deep.equal(hunkIds);
     expect(observedChanges).to.deep.equal([
       {
         fromA: firstOld,
@@ -538,12 +441,12 @@ describe("AI reviewer: single document detached diff", function () {
       replacement: "日本語😺です",
       suffix: "\n後文",
     });
-    const { mounted } = await mountCase(testCase);
+    const hunkIds = await planCase(testCase);
 
     const compiled = await compileSelectedSuggestionHunks({
       request: testCase.request,
       suggestion: testCase.suggestion,
-      selectedHunkIds: mounted.hunkIds,
+      selectedHunkIds: hunkIds,
       documentLength: testCase.documentLength,
     });
     expect(compiled.status).to.equal("ready");
@@ -583,14 +486,9 @@ describe("AI reviewer: single document detached diff", function () {
       original: "same",
       replacement: "same",
     });
-    const selectionEvents: string[][] = [];
-    const { mounted, parent } = await mountCase(testCase, (selectedHunkIds) => {
-      selectionEvents.push([...selectedHunkIds]);
-    });
+    const hunkIds = await planCase(testCase);
 
-    expect(mounted.hunkIds).to.deep.equal([]);
-    expect(hunkInputs(parent)).to.deep.equal([]);
-    expect(selectionEvents).to.deep.equal([[]]);
+    expect(hunkIds).to.deep.equal([]);
     expect(
       await compileSelectedSuggestionHunks({
         request: testCase.request,
@@ -630,12 +528,12 @@ describe("AI reviewer: single document detached diff", function () {
         ),
     );
     sinon.stub(Chunk, "build").returns(impreciseChunks);
-    const { mounted } = await mountCase(testCase);
+    const hunkIds = await planCase(testCase);
 
     const compiled = await compileSelectedSuggestionHunks({
       request: testCase.request,
       suggestion: testCase.suggestion,
-      selectedHunkIds: mounted.hunkIds,
+      selectedHunkIds: hunkIds,
       documentLength: testCase.documentLength,
     });
     expect(compiled.status).to.equal("ready");
@@ -660,13 +558,13 @@ describe("AI reviewer: single document detached diff", function () {
       original: "old",
       replacement: "different",
     });
-    const own = await mountCase(testCase);
-    const foreign = await mountCase(foreignCase);
+    const own = await planCase(testCase);
+    const foreign = await planCase(foreignCase);
 
     const cases = [
       {
         name: "duplicate",
-        selectedHunkIds: [own.mounted.hunkIds[0], own.mounted.hunkIds[0]],
+        selectedHunkIds: [own[0], own[0]],
         code: "AI_DIFF_HUNK_DUPLICATE",
       },
       {
@@ -676,7 +574,7 @@ describe("AI reviewer: single document detached diff", function () {
       },
       {
         name: "foreign",
-        selectedHunkIds: [foreign.mounted.hunkIds[0]],
+        selectedHunkIds: [foreign[0]],
         code: "AI_DIFF_HUNK_UNKNOWN",
       },
     ];
@@ -725,17 +623,17 @@ describe("AI reviewer: single document detached diff", function () {
       original: "old",
       replacement: "new",
     });
-    const { mounted } = await mountCase(testCase);
+    const hunkIds = await planCase(testCase);
     const invalidInputs = [
       {
         name: "short document",
-        selectedHunkIds: mounted.hunkIds,
+        selectedHunkIds: hunkIds,
         documentLength: 2,
         code: "AI_DIFF_DOCUMENT_LENGTH_INVALID",
       },
       {
         name: "fractional document",
-        selectedHunkIds: mounted.hunkIds,
+        selectedHunkIds: hunkIds,
         documentLength: 10.5,
         code: "AI_DIFF_DOCUMENT_LENGTH_INVALID",
       },
@@ -768,87 +666,44 @@ describe("AI reviewer: single document detached diff", function () {
     }
   });
 
-  it("rejects malformed suggestions before mounting a preview", async function () {
+  it("rejects malformed suggestions before building an apply plan", async function () {
     const testCase = createSuggestionCase({
       id: "malformed",
       original: "old",
       replacement: "new",
     });
-    const parent = createParent();
     const malformedSuggestion = {
       ...testCase.suggestion,
       unguardedWrite: true,
     };
 
     const error = await captureError(() =>
-      mountDetachedSuggestionDiff({
-        parent,
+      getSuggestionHunkIds({
         request: testCase.request,
         suggestion: malformedSuggestion,
-        t: i18next.t,
       }),
     );
 
     expect(error).to.have.property("code", "AI_SUGGESTION_SCHEMA_INVALID");
-    expect(parent.childElementCount).to.equal(0);
   });
 
-  it("rejects a preview whose rendered segments disagree with the suggestion", async function () {
+  it("rejects an apply plan whose rendered segments disagree with the suggestion", async function () {
     const testCase = createSuggestionCase({
       id: "plan-mismatch",
       original: "alpha\nold\nomega\n",
       replacement: "alpha\nnew\nomega\n",
     });
     sinon.stub(DiffMatchPatch.prototype, "diff_main").returns([[0, "wrong"]]);
-    const parent = createParent();
 
     const error = await captureError(() =>
-      mountDetachedSuggestionDiff({
-        parent,
+      getSuggestionHunkIds({
         request: testCase.request,
         suggestion: testCase.suggestion,
-        t: i18next.t,
       }),
     );
 
     expect(error)
       .to.be.instanceOf(DetachedSuggestionDiffError)
       .and.have.property("code", "AI_DIFF_PLAN_MISMATCH");
-    expect(parent.childElementCount).to.equal(0);
-  });
-
-  it("destroys the unified preview and selection controls", async function () {
-    const testCase = createSuggestionCase({
-      id: "destroy",
-      original: "old",
-      replacement: "new",
-    });
-    const { mounted, parent } = await mountCase(testCase);
-    expect(parent.childElementCount).to.be.greaterThan(0);
-
-    mounted.destroy();
-    mounted.destroy();
-
-    expect(parent.childElementCount).to.equal(0);
-  });
-
-  it("removes selection listeners when the preview is destroyed", async function () {
-    const testCase = createSuggestionCase({
-      id: "destroy-listener",
-      original: "old",
-      replacement: "new",
-    });
-    const selectionEvents: string[][] = [];
-    const { mounted, parent } = await mountCase(testCase, (selectedHunkIds) => {
-      selectionEvents.push([...selectedHunkIds]);
-    });
-    const input = hunkInputs(parent)[0];
-    expect(selectionEvents).to.deep.equal([[]]);
-
-    mounted.destroy();
-    input.checked = true;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-
-    expect(selectionEvents).to.deep.equal([[]]);
   });
 });

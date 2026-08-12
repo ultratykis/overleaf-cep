@@ -17,6 +17,7 @@ const {
 } = require("../../frontend/js/components/ai-reviewer-panel");
 const { AgentStreamError } = require("../../frontend/js/services/agent-stream");
 const {
+  compileSelectedSuggestionHunks,
   DetachedSuggestionDiffError,
 } = require("../../frontend/js/services/detached-suggestion-diff");
 const {
@@ -204,7 +205,7 @@ function renderPanel({
   navigateEvidence,
   resolveEvidenceDocument,
   openEvidenceDocument,
-  mountSuggestionPreview,
+  getSuggestionHunkIds,
   applySelectionSuggestion,
   copyText,
 }) {
@@ -224,7 +225,7 @@ function renderPanel({
       navigateEvidence,
       resolveEvidenceDocument,
       openEvidenceDocument,
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
       applySelectionSuggestion,
       copyText,
     }),
@@ -435,16 +436,7 @@ describe("AI reviewer: single document selection workspace", function () {
       within(suggestionsSection)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal([
-      "Discuss suggestion",
-      "Preview diff 1",
-      "Discard suggestion",
-    ]);
-    expect(
-      within(suggestionsSection).queryByRole("button", {
-        name: "Apply selected changes",
-      }),
-    ).not.to.exist;
+    ).to.deep.equal(["Apply", "Discuss suggestion", "Discard suggestion"]);
 
     fireEvent.click(
       within(citationCard).getByRole("button", {
@@ -510,7 +502,10 @@ describe("AI reviewer: single document selection workspace", function () {
     ).to.equal(true);
     const suggestionDisclosure = suggestionCard.querySelector("details");
     expect(suggestionDisclosure.open).to.equal(false);
-    expect(within(suggestionCard).queryAllByRole("button")).to.have.length(1);
+    expect(within(suggestionCard).queryAllByRole("button")).to.have.length(2);
+    expect(
+      within(suggestionCard).getByRole("button", { name: "Apply" }).disabled,
+    ).to.equal(true);
     fireEvent.click(suggestionCard.querySelector("summary"));
     expect(suggestionDisclosure.open).to.equal(true);
     expect(
@@ -625,10 +620,7 @@ describe("AI reviewer: single document selection workspace", function () {
       streamCall = call;
       return stream.promise;
     });
-    const mountSuggestionPreview = sinon.stub().resolves({
-      hunkIds: Object.freeze(["ai-hunk-v1-workspace"]),
-      destroy: sinon.stub(),
-    });
+    const getSuggestionHunkIds = sinon.stub();
     renderPanel({
       captureSelectionSession: async () => ({
         status: "ready",
@@ -636,7 +628,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
     });
     await clickSelectionAction(
       "Review selection",
@@ -658,23 +650,19 @@ describe("AI reviewer: single document selection workspace", function () {
     });
     expect(screen.getByText("Finalizing")).to.exist;
     expect(screen.queryByText("Completed")).not.to.exist;
-    expect(
-      screen.queryByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).not.to.exist;
-    expect(mountSuggestionPreview.called).to.equal(false);
+    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
+      true,
+    );
+    expect(getSuggestionHunkIds.called).to.equal(false);
     await act(async () => {
       stream.resolve();
       await stream.promise;
     });
     await screen.findByText("Completed");
-    expect(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).to.exist;
-    expect(mountSuggestionPreview.called).to.equal(false);
+    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
+      false,
+    );
+    expect(getSuggestionHunkIds.called).to.equal(false);
   });
   it("turns a parser rejection after completed into an error without an actionable window", async function () {
     const session = selectionSession({
@@ -687,10 +675,7 @@ describe("AI reviewer: single document selection workspace", function () {
       streamCall = call;
       return stream.promise;
     });
-    const mountSuggestionPreview = sinon.stub().resolves({
-      hunkIds: Object.freeze(["ai-hunk-v1-workspace"]),
-      destroy: sinon.stub(),
-    });
+    const getSuggestionHunkIds = sinon.stub();
     renderPanel({
       captureSelectionSession: async () => ({
         status: "ready",
@@ -698,7 +683,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
     });
     await clickSelectionAction(
       "Rewrite selection",
@@ -720,12 +705,10 @@ describe("AI reviewer: single document selection workspace", function () {
     });
     expect(screen.getByText("Finalizing")).to.exist;
     expect(screen.queryByRole("button", { name: /accept/i })).not.to.exist;
-    expect(
-      screen.queryByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).not.to.exist;
-    expect(mountSuggestionPreview.called).to.equal(false);
+    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
+      true,
+    );
+    expect(getSuggestionHunkIds.called).to.equal(false);
     await act(async () => {
       stream.reject(
         new AgentStreamError({
@@ -745,12 +728,10 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     expect(screen.queryByText("Completed")).not.to.exist;
     expect(screen.queryByRole("button", { name: /accept/i })).not.to.exist;
-    expect(
-      screen.queryByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).not.to.exist;
-    expect(mountSuggestionPreview.called).to.equal(false);
+    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
+      true,
+    );
+    expect(getSuggestionHunkIds.called).to.equal(false);
   });
   it("rejects duplicate suggestion identities instead of overwriting them", async function () {
     const session = selectionSession({
@@ -958,7 +939,7 @@ describe("AI reviewer: single document selection workspace", function () {
       "before completion",
     );
   });
-  it("mounts and applies only the exact completed selection suggestion", async function () {
+  it("applies every hunk of the exact completed selection suggestion from its card", async function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -977,16 +958,11 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    let onSelectionChange;
-    const destroy = sinon.stub();
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      onSelectionChange = options.onSelectionChange;
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-workspace"]),
-        destroy,
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(
+        Object.freeze(["ai-hunk-v1-workspace-a", "ai-hunk-v1-workspace-b"]),
+      );
     const applySelectionSuggestion = sinon.stub().resolves({
       status: "applied",
     });
@@ -998,7 +974,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext,
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
       applySelectionSuggestion,
     });
     await clickSelectionAction(
@@ -1006,30 +982,19 @@ describe("AI reviewer: single document selection workspace", function () {
       "Rewrite the selected phrase.",
     );
     await screen.findByText("Completed");
-    expect(mountSuggestionPreview.called).to.equal(false);
-
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Preview diff 1",
+        name: "Apply",
       }),
     );
-    await screen.findByText("Suggestion preview ready");
-    expect(mountSuggestionPreview.calledOnce).to.equal(true);
-    expect(mountSuggestionPreview.firstCall.args[0].request).to.equal(
+    expect(getSuggestionHunkIds.calledOnce).to.equal(true);
+    expect(getSuggestionHunkIds.firstCall.args[0].request).to.equal(
       session.request,
     );
-    expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
+    expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
       emittedSuggestion,
     );
     expect(getSelectionContext.called).to.equal(false);
-    act(() => {
-      onSelectionChange(["ai-hunk-v1-workspace"]);
-    });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Apply selected changes",
-      }),
-    );
 
     await screen.findByText("Status: Applied");
     expect(applySelectionSuggestion.calledOnce).to.equal(true);
@@ -1037,16 +1002,16 @@ describe("AI reviewer: single document selection workspace", function () {
     expect(application.session).to.equal(session);
     expect(application.suggestion).to.equal(emittedSuggestion);
     expect(application.getContext).to.equal(getSelectionContext);
-    expect(application.selectedHunkIds).to.deep.equal(["ai-hunk-v1-workspace"]);
+    expect(application.selectedHunkIds).to.deep.equal([
+      "ai-hunk-v1-workspace-a",
+      "ai-hunk-v1-workspace-b",
+    ]);
     expect(Object.isFrozen(application.selectedHunkIds)).to.equal(true);
-    expect(destroy.calledOnce).to.equal(true);
-    expect(
-      screen.queryByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).not.to.exist;
+    expect(screen.getByRole("button", { name: "Apply" }).disabled).to.equal(
+      true,
+    );
   });
-  it("closes a failed suggestion preview and lifts its message into the panel", async function () {
+  it("fails closed on AI_DIFF_PLAN_MISMATCH from the card Apply entry point", async function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1064,12 +1029,12 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    const mountSuggestionPreview = sinon
+    const getSuggestionHunkIds = sinon
       .stub()
       .rejects(
         new DetachedSuggestionDiffError(
-          "AI_DIFF_CRYPTO_UNAVAILABLE",
-          "private preview failure",
+          "AI_DIFF_PLAN_MISMATCH",
+          "private plan mismatch detail",
         ),
       );
     renderPanel({
@@ -1079,7 +1044,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
     });
 
     await clickSelectionAction(
@@ -1087,25 +1052,71 @@ describe("AI reviewer: single document selection workspace", function () {
       "Rewrite the selected phrase.",
     );
     await screen.findByText("Completed");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     expect((await screen.findByRole("alert")).textContent).to.equal(
-      "AI Reviewer needs browser APIs that are only available on a secure connection. Open this Overleaf instance over HTTPS (or localhost) and try again.",
+      "The suggestion could not be applied.",
     );
-    expect(screen.queryByLabelText("Suggestion preview")).not.to.exist;
-    expect(document.body.textContent).not.to.include("private preview failure");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
+    expect(document.body.textContent).not.to.include(
+      "private plan mismatch detail",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(getSuggestionHunkIds.callCount).to.equal(2));
+  });
+  it("rejects a foreign hunk ID from the card Apply entry point", async function () {
+    const session = selectionSession({
+      action: "rewrite",
+      instruction: "Rewrite the selected phrase.",
+    });
+    const emittedSuggestion = suggestion(session.request);
+    const streamRequest = sinon.stub().callsFake(async (call) => {
+      call.onEvent(startedEvent(session.request));
+      call.onEvent({
+        ...eventBase(session.request.requestId, 1, "suggestion"),
+        type: "suggestion",
+        suggestion: emittedSuggestion,
+      });
+      call.onEvent({
+        ...eventBase(session.request.requestId, 2, "completed"),
+        type: "completed",
+        finishReason: "stop",
+      });
+    });
+    const applySelectionSuggestion = sinon.stub().callsFake((options) =>
+      compileSelectedSuggestionHunks({
+        request: options.session.request,
+        suggestion: options.suggestion,
+        selectedHunkIds: options.selectedHunkIds,
+        documentLength: baseText.length,
       }),
     );
-    await waitFor(() => expect(mountSuggestionPreview.callCount).to.equal(2));
+    renderPanel({
+      captureSelectionSession: sinon.stub().resolves({
+        status: "ready",
+        session,
+      }),
+      streamRequest,
+      getSelectionContext: sinon.stub(),
+      getSuggestionHunkIds: sinon
+        .stub()
+        .resolves(Object.freeze(["ai-hunk-v1-foreign"])),
+      applySelectionSuggestion,
+    });
+
+    await clickSelectionAction(
+      "Rewrite selection",
+      "Rewrite the selected phrase.",
+    );
+    await screen.findByText("Completed");
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    expect((await screen.findByRole("alert")).textContent).to.equal(
+      "The suggestion could not be applied.",
+    );
+    expect(applySelectionSuggestion.calledOnce).to.equal(true);
+    expect(screen.getByText("Status: Unresolved")).to.exist;
   });
-  it("leaves only discard when a suggestion enters conflict", async function () {
+  it("fails closed on a stale plan and disables card Apply", async function () {
     const instruction = "Rewrite the selected phrase.";
     const session = selectionSession({
       action: "rewrite",
@@ -1124,15 +1135,9 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    let onSelectionChange;
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      onSelectionChange = options.onSelectionChange;
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-conflict"]),
-        destroy: sinon.stub(),
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["ai-hunk-v1-conflict"]));
     renderPanel({
       captureSelectionSession: sinon.stub().resolves({
         status: "ready",
@@ -1140,7 +1145,7 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
       applySelectionSuggestion: sinon.stub().resolves({
         status: "conflict",
         code: "AI_SUGGESTION_HASH_STALE",
@@ -1149,20 +1154,7 @@ describe("AI reviewer: single document selection workspace", function () {
 
     await clickSelectionAction("Rewrite selection", instruction);
     await screen.findByText("Completed");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await screen.findByText("Suggestion preview ready");
-    act(() => {
-      onSelectionChange(["ai-hunk-v1-conflict"]);
-    });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Apply selected changes",
-      }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 
     await screen.findByText("Conflict: AI_SUGGESTION_HASH_STALE");
     const suggestionsSection = screen.getByRole("region", {
@@ -1172,7 +1164,11 @@ describe("AI reviewer: single document selection workspace", function () {
       within(suggestionsSection)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal(["Discuss suggestion", "Discard suggestion"]);
+    ).to.deep.equal(["Apply", "Discuss suggestion", "Discard suggestion"]);
+    expect(
+      within(suggestionsSection).getByRole("button", { name: "Apply" })
+        .disabled,
+    ).to.equal(true);
     const conflictStatus =
       within(suggestionsSection).getByText("Status: Conflict");
     const conflictCard = conflictStatus.closest(".ai-reviewer-artifact");
@@ -1187,7 +1183,7 @@ describe("AI reviewer: single document selection workspace", function () {
         .closest("details"),
     ).to.equal(null);
   });
-  it("synchronously aborts and destroys an applying preview before a new run", async function () {
+  it("synchronously aborts an in-flight card application before a new run", async function () {
     const sessionA = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1197,7 +1193,6 @@ describe("AI reviewer: single document selection workspace", function () {
       instruction: "Review the selected phrase.",
     });
     let applicationSignal;
-    const destroy = sinon.stub();
     const captureSelectionSession = sinon
       .stub()
       .onFirstCall()
@@ -1208,7 +1203,6 @@ describe("AI reviewer: single document selection workspace", function () {
       .onSecondCall()
       .callsFake(async () => {
         expect(applicationSignal?.aborted).to.equal(true);
-        expect(destroy.calledOnce).to.equal(true);
         return {
           status: "ready",
           session: sessionB,
@@ -1230,22 +1224,16 @@ describe("AI reviewer: single document selection workspace", function () {
       });
     });
     streamRequest.onSecondCall().callsFake(() => replacementStream.promise);
-    let onSelectionChange;
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      onSelectionChange = options.onSelectionChange;
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-workspace"]),
-        destroy,
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["ai-hunk-v1-workspace"]));
     const application = deferred();
     const applySelectionSuggestion = sinon.stub().returns(application.promise);
     const rendered = renderPanel({
       captureSelectionSession,
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
       applySelectionSuggestion,
     });
     await clickSelectionAction(
@@ -1253,19 +1241,9 @@ describe("AI reviewer: single document selection workspace", function () {
       "Rewrite the selected phrase.",
     );
     await screen.findByText("Completed");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await screen.findByText("Suggestion preview ready");
-    act(() => {
-      onSelectionChange(["ai-hunk-v1-workspace"]);
-    });
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Apply selected changes",
-      }),
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() =>
+      expect(applySelectionSuggestion.calledOnce).to.equal(true),
     );
     applicationSignal = applySelectionSuggestion.firstCall.args[0].signal;
     expect(applicationSignal.aborted).to.equal(false);
@@ -1276,8 +1254,6 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
     );
     expect(applicationSignal.aborted).to.equal(true);
-    expect(destroy.calledOnce).to.equal(true);
-    expect(screen.queryByLabelText("Suggestion preview")).not.to.exist;
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
     expect(screen.getByText("Streaming")).to.exist;
 
@@ -1291,7 +1267,7 @@ describe("AI reviewer: single document selection workspace", function () {
     rendered.unmount();
     replacementStream.resolve();
   });
-  it("destroys the active preview before switching to another suggestion", async function () {
+  it("does not start a second card application while one is in flight", async function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1321,23 +1297,11 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    const firstDestroy = sinon.stub();
-    const secondDestroy = sinon.stub();
-    const mountSuggestionPreview = sinon.stub();
-    mountSuggestionPreview.onFirstCall().callsFake(async (options) => {
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-first"]),
-        destroy: firstDestroy,
-      };
-    });
-    mountSuggestionPreview.onSecondCall().callsFake(async (options) => {
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-second"]),
-        destroy: secondDestroy,
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["ai-hunk-v1-first"]));
+    const application = deferred();
+    const applySelectionSuggestion = sinon.stub().returns(application.promise);
     renderPanel({
       captureSelectionSession: async () => ({
         status: "ready",
@@ -1345,8 +1309,8 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
-      applySelectionSuggestion: sinon.stub(),
+      getSuggestionHunkIds,
+      applySelectionSuggestion,
     });
     await clickSelectionAction(
       "Rewrite selection",
@@ -1354,26 +1318,19 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     await screen.findByText("Completed");
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
+    const applyButtons = screen.getAllByRole("button", { name: "Apply" });
+    fireEvent.click(applyButtons[0]);
+    await waitFor(() =>
+      expect(applySelectionSuggestion.calledOnce).to.equal(true),
     );
-    await waitFor(() => expect(mountSuggestionPreview.callCount).to.equal(1));
-    await screen.findByText("Suggestion preview ready");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 2",
-      }),
+    fireEvent.click(applyButtons[1]);
+    expect(getSuggestionHunkIds.calledOnce).to.equal(true);
+    expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
+      firstSuggestion,
     );
-    expect(firstDestroy.calledOnce).to.equal(true);
-    await waitFor(() => expect(mountSuggestionPreview.callCount).to.equal(2));
-    expect(mountSuggestionPreview.secondCall.args[0].suggestion).to.equal(
-      secondSuggestion,
-    );
-    expect(secondDestroy.called).to.equal(false);
+    application.resolve({ status: "cancelled" });
   });
-  it("offers a preview for a prototype-shaped suggestion ID with no decision", async function () {
+  it("applies a prototype-shaped suggestion ID from its card", async function () {
     const session = selectionSession({
       action: "rewrite",
       instruction: "Rewrite the selected phrase.",
@@ -1395,12 +1352,11 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-prototype"]),
-        destroy: sinon.stub(),
-      };
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["ai-hunk-v1-prototype"]));
+    const applySelectionSuggestion = sinon.stub().resolves({
+      status: "applied",
     });
     renderPanel({
       captureSelectionSession: async () => ({
@@ -1409,7 +1365,8 @@ describe("AI reviewer: single document selection workspace", function () {
       }),
       streamRequest,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
+      applySelectionSuggestion,
     });
     await clickSelectionAction(
       "Rewrite selection",
@@ -1417,13 +1374,9 @@ describe("AI reviewer: single document selection workspace", function () {
     );
     await screen.findByText("Completed");
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await screen.findByText("Suggestion preview ready");
-    expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByText("Status: Applied");
+    expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
       prototypeSuggestion,
     );
   });
@@ -1502,19 +1455,18 @@ describe("AI reviewer: single document selection workspace", function () {
         finishReason: "stop",
       });
     });
-    const mountSuggestionPreview = sinon.stub().callsFake(async (options) => {
-      options.onSelectionChange([]);
-      return {
-        hunkIds: Object.freeze(["ai-hunk-v1-generation"]),
-        destroy: sinon.stub(),
-      };
-    });
+    const getSuggestionHunkIds = sinon
+      .stub()
+      .resolves(Object.freeze(["ai-hunk-v1-generation"]));
     renderPanel({
       captureSelectionSession,
       streamRequest,
       createRequestId: () => session.request.requestId,
       getSelectionContext: sinon.stub(),
-      mountSuggestionPreview,
+      getSuggestionHunkIds,
+      applySelectionSuggestion: sinon.stub().resolves({
+        status: "cancelled",
+      }),
     });
     await clickSelectionAction(
       "Rewrite selection",
@@ -1524,33 +1476,23 @@ describe("AI reviewer: single document selection workspace", function () {
     const replacementRunButton = screen.getByRole("button", {
       name: "Rewrite selection",
     });
-    const stalePreviewButton = screen.getByRole("button", {
-      name: "Preview diff 1",
-    });
-
-    await act(async () => {
-      replacementRunButton.click();
-      stalePreviewButton.click();
-    });
+    fireEvent.click(replacementRunButton);
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
     await waitFor(() =>
       expect(screen.getAllByText("Completed")).to.have.length(2),
     );
 
     expect(captureSelectionSession.callCount).to.equal(2);
-    expect(mountSuggestionPreview.calledOnce).to.equal(true);
-    expect(mountSuggestionPreview.firstCall.args[0].request).to.equal(
+    const applyButtons = screen.getAllByRole("button", { name: "Apply" });
+    expect(applyButtons).to.have.length(2);
+    fireEvent.click(applyButtons[1]);
+    await waitFor(() => expect(getSuggestionHunkIds.calledOnce).to.equal(true));
+    expect(getSuggestionHunkIds.firstCall.args[0].request).to.equal(
       session.request,
     );
-    expect(mountSuggestionPreview.firstCall.args[0].suggestion).to.equal(
+    expect(getSuggestionHunkIds.firstCall.args[0].suggestion).to.equal(
       emittedSuggestion,
     );
-    expect(screen.getByLabelText("Suggestion preview")).to.exist;
-    expect(
-      screen.getAllByRole("button", {
-        name: "Preview diff 1",
-      }),
-    ).to.have.length(2);
   });
 });
 async function renderCompletedEvidenceWorkspace({

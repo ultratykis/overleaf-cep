@@ -25,7 +25,7 @@ const {
   applySelectedEditorSelectionSuggestion,
 } = require("../../frontend/js/services/editor-suggestion-host-application");
 const {
-  mountDetachedSuggestionDiff,
+  getSuggestionHunkIds,
 } = require("../../frontend/js/services/detached-suggestion-diff");
 const {
   createStatefulHistoryDocument,
@@ -183,17 +183,12 @@ function editorContext({
 }
 
 async function selectedHunkIds() {
-  const parent = document.createElement("div");
-  document.body.appendChild(parent);
-  const mounted = await mountDetachedSuggestionDiff({
-    parent,
-    request: multiHunkRequest(),
-    suggestion: multiHunkSuggestion(),
-    t,
-  });
-  const hunkIds = [...mounted.hunkIds];
-  mounted.destroy();
-  parent.remove();
+  const hunkIds = [
+    ...(await getSuggestionHunkIds({
+      request: multiHunkRequest(),
+      suggestion: multiHunkSuggestion(),
+    })),
+  ];
   expect(hunkIds).to.have.length(2);
   return hunkIds;
 }

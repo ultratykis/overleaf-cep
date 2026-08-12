@@ -2,7 +2,6 @@ import { Chunk, type DiffConfig } from "@codemirror/merge";
 import { ChangeSet, EditorState } from "@codemirror/state";
 // @ts-expect-error diff-match-patch is vendored without a declaration file.
 import DiffMatchPatch from "diff-match-patch";
-import type { TFunction } from "i18next";
 
 import type { UnresolvedSuggestion } from "../../../shared/contract-types";
 import { prepareSingleDocumentSuggestion } from "./single-document-suggestions";
@@ -37,12 +36,9 @@ type DisplayDiffSegment = {
   text: string;
 };
 
-type MountDetachedSuggestionDiffOptions = {
-  parent: HTMLElement;
+type GetSuggestionHunkIdsOptions = {
   request: unknown;
   suggestion: unknown;
-  onSelectionChange?: (selectedHunkIds: readonly string[]) => void;
-  t: TFunction<"translation">;
 };
 
 type CompileSelectedSuggestionHunksOptions = {
@@ -50,11 +46,6 @@ type CompileSelectedSuggestionHunksOptions = {
   suggestion: unknown;
   selectedHunkIds: unknown;
   documentLength: unknown;
-};
-
-export type MountedDetachedSuggestionDiff = {
-  readonly hunkIds: readonly string[];
-  destroy(): void;
 };
 
 export type CompiledSuggestionHunks =
@@ -318,7 +309,7 @@ function buildDisplayDiff(original: string, replacement: string) {
     }
     return fail(
       "AI_DIFF_PLAN_MISMATCH",
-      "The rendered preview does not match the suggestion plan.",
+      "The rendered diff does not match the suggestion plan.",
     );
   });
   const renderedOriginal = segments
@@ -332,7 +323,7 @@ function buildDisplayDiff(original: string, replacement: string) {
   if (renderedOriginal !== original || renderedReplacement !== replacement) {
     return fail(
       "AI_DIFF_PLAN_MISMATCH",
-      "The rendered preview does not match the suggestion plan.",
+      "The rendered diff does not match the suggestion plan.",
     );
   }
   return segments;
@@ -429,111 +420,16 @@ function assertDocumentLength(value: unknown): asserts value is number {
   }
 }
 
-export async function mountDetachedSuggestionDiff({
-  parent,
+export async function getSuggestionHunkIds({
   request,
   suggestion,
-  onSelectionChange,
-  t,
-}: MountDetachedSuggestionDiffOptions): Promise<MountedDetachedSuggestionDiff> {
+}: GetSuggestionHunkIdsOptions): Promise<readonly string[]> {
   const plan = await buildPlan({
     request,
     suggestion,
   });
-  const ownerDocument = parent.ownerDocument;
-  const container = ownerDocument.createElement("div");
-  container.className = "ai-reviewer-detached-diff";
-  const preview = ownerDocument.createElement("div");
-  preview.className = "ai-reviewer-detached-diff-preview";
-  renderDisplayDiff(
-    ownerDocument,
-    preview,
-    plan.suggestion.original,
-    plan.suggestion.replacement,
-  );
-  const controls = ownerDocument.createElement("fieldset");
-  controls.className = "ai-reviewer-detached-diff-hunks";
-  const legend = ownerDocument.createElement("legend");
-  legend.className = "ai-reviewer-detached-diff-hunks-title";
-  legend.textContent = t("ai_reviewer_select_proposed_changes");
-  controls.appendChild(legend);
-  container.append(preview, controls);
-
-  let destroyed = false;
-  const removeListeners: Array<() => void> = [];
-  const selected = new Set<string>();
-
-  const selectedInPlanOrder = () =>
-    Object.freeze(
-      plan.hunks.filter((hunk) => selected.has(hunk.id)).map((hunk) => hunk.id),
-    );
-
-  const destroy = () => {
-    if (destroyed) {
-      return;
-    }
-    destroyed = true;
-    for (const removeListener of removeListeners.splice(0)) {
-      removeListener();
-    }
-    container.remove();
-  };
-
-  try {
-    for (const hunk of plan.hunks) {
-      const label = ownerDocument.createElement("label");
-      label.className = "ai-reviewer-detached-diff-hunk";
-      const checkbox = ownerDocument.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.dataset.aiReviewerHunkId = hunk.id;
-      checkbox.setAttribute(
-        "aria-label",
-        t("ai_reviewer_select_proposed_change_n", {
-          number: hunk.ordinal + 1,
-        }),
-      );
-      const onChange = () => {
-        if (destroyed) {
-          return;
-        }
-        if (checkbox.checked) {
-          selected.add(hunk.id);
-        } else {
-          selected.delete(hunk.id);
-        }
-        onSelectionChange?.(selectedInPlanOrder());
-      };
-      checkbox.addEventListener("change", onChange);
-      removeListeners.push(() =>
-        checkbox.removeEventListener("change", onChange),
-      );
-      label.append(
-        checkbox,
-        ownerDocument.createTextNode(
-          t("ai_reviewer_change_n", { number: hunk.ordinal + 1 }),
-        ),
-      );
-      controls.appendChild(label);
-    }
-
-    parent.appendChild(container);
-    onSelectionChange?.(Object.freeze([]));
-  } catch (error) {
-    destroy();
-    if (error instanceof DetachedSuggestionDiffError) {
-      throw error;
-    }
-    return fail(
-      "AI_DIFF_PREVIEW_FAILED",
-      "The detached suggestion preview could not be mounted.",
-    );
-  }
-
-  const hunkIds = Object.freeze(plan.hunks.map((hunk) => hunk.id));
-  return Object.freeze({
-    hunkIds,
-    destroy,
-  });
+  buildDisplayDiff(plan.suggestion.original, plan.suggestion.replacement);
+  return Object.freeze(plan.hunks.map((hunk) => hunk.id));
 }
 
 export async function compileSelectedSuggestionHunks({

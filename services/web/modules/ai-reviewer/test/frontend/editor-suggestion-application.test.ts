@@ -6,7 +6,6 @@ import {
   visual,
 } from "@/features/source-editor/extensions/visual/visual";
 import { expect } from "chai";
-import i18next from "i18next";
 import sinon from "sinon";
 
 import "../../../../test/frontend/cut-log-noise";
@@ -22,7 +21,7 @@ import {
 } from "../../frontend/js/services/editor-suggestion-application";
 import {
   DetachedSuggestionDiffError,
-  mountDetachedSuggestionDiff,
+  getSuggestionHunkIds,
 } from "../../frontend/js/services/detached-suggestion-diff";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
@@ -938,21 +937,16 @@ describe("AI reviewer: OT safety Editor application", function () {
 
 describe("AI reviewer: single document selected-hunk application", function () {
   let parent: HTMLDivElement;
-  let previewParent: HTMLDivElement;
   let view: EditorView;
   let currentDocument: SyntheticDocument;
   let context: MutableContext;
   let aiTransactions: Transaction[];
   let documentTransactions: Transaction[];
   let identityBinding: Compartment;
-  let mountedPreview:
-    | Awaited<ReturnType<typeof mountDetachedSuggestionDiff>>
-    | undefined;
 
   beforeEach(function () {
     parent = document.createElement("div");
-    previewParent = document.createElement("div");
-    document.body.append(parent, previewParent);
+    document.body.append(parent);
     currentDocument = {
       doc_id: "document-0001",
       doc: {},
@@ -1018,21 +1012,17 @@ describe("AI reviewer: single document selected-hunk application", function () {
 
   afterEach(function () {
     sinon.restore();
-    mountedPreview?.destroy();
     view.destroy();
-    previewParent.remove();
     parent.remove();
   });
 
   async function hunkIds() {
-    mountedPreview = await mountDetachedSuggestionDiff({
-      parent: previewParent,
+    const ids = await getSuggestionHunkIds({
       request: multiHunkRequest(),
       suggestion: multiHunkSuggestion(),
-      t: i18next.t,
     });
-    expect(mountedPreview.hunkIds).to.have.length(2);
-    return mountedPreview.hunkIds;
+    expect(ids).to.have.length(2);
+    return ids;
   }
 
   function applicationOptions(selectedHunkIds: unknown) {

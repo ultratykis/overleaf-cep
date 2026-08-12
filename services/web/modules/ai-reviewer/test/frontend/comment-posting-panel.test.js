@@ -406,13 +406,7 @@ describe("AI reviewer comment-posting panel", function () {
       .to.exist;
     fireEvent.click(
       within(suggestions).getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await within(suggestions).findByText("Suggestion preview ready");
-    fireEvent.click(
-      within(suggestions).getByRole("button", {
-        name: "Apply selected changes",
+        name: "Apply",
       }),
     );
 
@@ -467,13 +461,7 @@ describe("AI reviewer comment-posting panel", function () {
     });
     fireEvent.click(
       within(suggestions).getByRole("button", {
-        name: "Preview diff 1",
-      }),
-    );
-    await within(suggestions).findByText("Suggestion preview ready");
-    fireEvent.click(
-      within(suggestions).getByRole("button", {
-        name: "Apply selected changes",
+        name: "Apply",
       }),
     );
 
