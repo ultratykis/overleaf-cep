@@ -411,12 +411,17 @@ describe("AI reviewer: single document selection workspace", function () {
         .map(
           (button) => button.getAttribute("aria-label") ?? button.textContent,
         ),
-    ).to.deep.equal(["Discuss finding", "Discard finding", "Go to text"]);
+    ).to.deep.equal([
+      "Discuss finding",
+      "Discard finding",
+      "More options",
+      "Go to text",
+    ]);
     expect(
       within(findingHeadingActions)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal(["forum", "delete"]);
+    ).to.deep.equal(["forum", "delete", "more_vert"]);
     expect(within(findingCard).queryByText(/Apply/u)).not.to.exist;
     expect(within(findingCard).queryByText(/Copy proposed text/u)).not.to.exist;
 
@@ -433,13 +438,14 @@ describe("AI reviewer: single document selection workspace", function () {
       "Discuss citation finding",
       "Copy proposed text",
       "Discard citation finding",
+      "More options",
       "Go to text",
     ]);
     expect(
       within(citationHeadingActions)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal(["forum", "content_copy", "delete"]);
+    ).to.deep.equal(["forum", "content_copy", "delete", "more_vert"]);
     expect(within(citationCard).queryByText(/Apply/u)).not.to.exist;
 
     const suggestionsSection = within(run).getByRole("region", {
@@ -458,7 +464,12 @@ describe("AI reviewer: single document selection workspace", function () {
         .map(
           (button) => button.getAttribute("aria-label") ?? button.textContent,
         ),
-    ).to.deep.equal(["Discuss suggestion", "Discard suggestion", "Apply"]);
+    ).to.deep.equal([
+      "Discuss suggestion",
+      "Discard suggestion",
+      "Apply",
+      "More options",
+    ]);
     const suggestionHeadingActions = suggestionCard.querySelector(
       ".ai-reviewer-artifact-heading-actions",
     );
@@ -466,13 +477,12 @@ describe("AI reviewer: single document selection workspace", function () {
       within(suggestionHeadingActions)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).to.deep.equal(["forum", "delete", "Apply"]);
+    ).to.deep.equal(["forum", "delete", "check", "more_vert"]);
     expect(
       within(suggestionHeadingActions)
         .getByRole("button", { name: "Apply" })
-        .classList.contains("ai-reviewer-artifact-apply"),
-    ).to.equal(true);
-
+        .closest(".ai-reviewer-artifact-apply"),
+    ).not.to.equal(null);
     fireEvent.click(
       within(citationCard).getByRole("button", {
         name: "Copy proposed text",
@@ -497,7 +507,11 @@ describe("AI reviewer: single document selection workspace", function () {
     ).to.equal(true);
     const findingDisclosure = findingCard.querySelector("details");
     expect(findingDisclosure.open).to.equal(false);
-    expect(within(findingCard).queryAllByRole("button")).to.have.length(1);
+    expect(
+      within(findingCard)
+        .queryAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).to.deep.equal(["Discuss finding", "More options"]);
     fireEvent.click(findingCard.querySelector("summary"));
     expect(findingDisclosure.open).to.equal(true);
     expect(
@@ -517,7 +531,11 @@ describe("AI reviewer: single document selection workspace", function () {
     ).to.equal(true);
     const citationDisclosure = citationCard.querySelector("details");
     expect(citationDisclosure.open).to.equal(false);
-    expect(within(citationCard).queryAllByRole("button")).to.have.length(1);
+    expect(
+      within(citationCard)
+        .queryAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).to.deep.equal(["Discuss citation finding", "More options"]);
     fireEvent.click(citationCard.querySelector("summary"));
     expect(citationDisclosure.open).to.equal(true);
     expect(
@@ -537,7 +555,11 @@ describe("AI reviewer: single document selection workspace", function () {
     ).to.equal(true);
     const suggestionDisclosure = suggestionCard.querySelector("details");
     expect(suggestionDisclosure.open).to.equal(false);
-    expect(within(suggestionCard).queryAllByRole("button")).to.have.length(2);
+    expect(
+      within(suggestionCard)
+        .queryAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).to.deep.equal(["Discuss suggestion", "Apply", "More options"]);
     expect(
       within(suggestionCard).getByRole("button", { name: "Apply" }).disabled,
     ).to.equal(true);
@@ -1199,7 +1221,12 @@ describe("AI reviewer: single document selection workspace", function () {
         .map(
           (button) => button.getAttribute("aria-label") ?? button.textContent,
         ),
-    ).to.deep.equal(["Discuss suggestion", "Discard suggestion", "Apply"]);
+    ).to.deep.equal([
+      "Discuss suggestion",
+      "Discard suggestion",
+      "Apply",
+      "More options",
+    ]);
     expect(
       within(suggestionsSection).getByRole("button", { name: "Apply" })
         .disabled,

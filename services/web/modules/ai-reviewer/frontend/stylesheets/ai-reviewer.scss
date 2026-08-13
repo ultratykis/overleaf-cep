@@ -1003,6 +1003,12 @@
   gap: var(--spacing-01);
 }
 
+.ai-reviewer-artifact-overflow,
+.ai-reviewer-run-overflow {
+  display: none;
+  flex: none;
+}
+
 .ai-reviewer-tooltip-icon-button {
   display: inline-flex;
   align-items: center;
@@ -1535,8 +1541,7 @@
 
 // Portaled menus are outside the panel container, so the resize observer adds
 // the matching narrow class to the open menu while the query hides its toggles.
-.ai-reviewer-panel-portaled-menu-narrow
-  .ai-reviewer-panel-overflow-narrow {
+.ai-reviewer-panel-portaled-menu-narrow .ai-reviewer-panel-overflow-narrow {
   display: block;
 }
 
@@ -1546,8 +1551,15 @@
     display: none;
   }
 
-  .ai-reviewer-panel-overflow-narrow {
+  .ai-reviewer-panel-overflow-narrow,
+  .ai-reviewer-artifact-overflow,
+  .ai-reviewer-run-overflow {
     display: block;
+  }
+
+  .ai-reviewer-artifact-action-collapsible,
+  .ai-reviewer-run-action-collapsible {
+    display: none;
   }
 }
 
@@ -1596,12 +1608,20 @@
  */
 .ai-reviewer-panel-model-menu,
 .ai-reviewer-panel-mode-menu,
-.ai-reviewer-panel-overflow-menu {
+.ai-reviewer-panel-overflow-menu,
+.ai-reviewer-artifact-overflow-menu,
+.ai-reviewer-run-overflow-menu {
   max-height: min(60vh, 20rem);
   overflow-y: auto;
   min-width: 0;
   max-width: calc(100vw - (2 * var(--spacing-04)));
   width: max-content;
+}
+
+.ai-reviewer-run-overflow-model {
+  padding: var(--spacing-02) var(--spacing-03);
+  color: var(--content-secondary-themed);
+  overflow-wrap: anywhere;
 }
 
 .ai-reviewer-panel-overflow-section {

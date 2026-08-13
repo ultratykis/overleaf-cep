@@ -141,12 +141,14 @@ function AiReviewerTooltipIconButton({
   id,
   label,
   icon,
+  className,
   disabled = false,
   onClick,
 }: {
   id: string;
   label: string;
   icon: string;
+  className?: string;
   disabled?: boolean;
   onClick: () => void;
 }) {
@@ -156,7 +158,11 @@ function AiReviewerTooltipIconButton({
       description={label}
       overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
     >
-      <span className="ai-reviewer-tooltip-icon-button">
+      <span
+        className={`ai-reviewer-tooltip-icon-button${
+          className == null ? "" : ` ${className}`
+        }`}
+      >
         <button
           type="button"
           tabIndex={0}
@@ -637,6 +643,42 @@ function AiReviewerPortaledMenu({
       {children}
     </DropdownMenu>,
     document.body,
+  );
+}
+
+function AiReviewerOverflowMenu({
+  id,
+  className,
+  menuClassName,
+  children,
+}: {
+  id: string;
+  className: string;
+  menuClassName: string;
+  children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Dropdown align="end" className={className}>
+      <OLTooltip
+        id={id}
+        description={t("more_options")}
+        overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
+      >
+        <span>
+          <DropdownToggle
+            bsPrefix="ai-reviewer-panel-overflow-toggle"
+            variant="ghost"
+            aria-label={t("more_options")}
+          >
+            <MaterialIcon type="more_vert" />
+          </DropdownToggle>
+        </span>
+      </OLTooltip>
+      <AiReviewerPortaledMenu className={menuClassName}>
+        {children}
+      </AiReviewerPortaledMenu>
+    </Dropdown>
   );
 }
 
@@ -5044,6 +5086,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discuss`}
               label={t("ai_reviewer_discuss_finding")}
               icon="forum"
+              className="ai-reviewer-artifact-action-collapsible"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -5062,6 +5105,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_finding_as_comment")}
               icon="add_comment"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -5081,12 +5125,67 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discard`}
               label={t("ai_reviewer_discard_finding")}
               icon="delete"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={
                 persistenceConflict || commentDraft?.key === commentDraftKey
               }
               onClick={() => discardFinding(runState, finding)}
             />
           )}
+          <AiReviewerOverflowMenu
+            id={`${commentDraftKey}-more`}
+            className="ai-reviewer-artifact-overflow"
+            menuClassName="ai-reviewer-artifact-overflow-menu"
+          >
+            {discussAvailable && (
+              <OLDropdownMenuItem
+                as="button"
+                onClick={() =>
+                  openDiscussion(
+                    runState,
+                    {
+                      kind: "finding",
+                      sourceRequest: runState.request!,
+                      artifact: finding,
+                    },
+                    `finding:${finding.id}`,
+                  )
+                }
+              >
+                {t("ai_reviewer_discuss_finding")}
+              </OLDropdownMenuItem>
+            )}
+            {postAvailable && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
+                onClick={() =>
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation: runState.generation,
+                    request: runState.request!,
+                    artifact: finding,
+                  })
+                }
+              >
+                {t("ai_reviewer_post_finding_as_comment")}
+              </OLDropdownMenuItem>
+            )}
+            {discardAvailable && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={
+                  persistenceConflict || commentDraft?.key === commentDraftKey
+                }
+                onClick={() => discardFinding(runState, finding)}
+              >
+                {t("ai_reviewer_discard_finding")}
+              </OLDropdownMenuItem>
+            )}
+          </AiReviewerOverflowMenu>
         </div>
       ) : null,
     );
@@ -5151,6 +5250,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discuss`}
               label={t("ai_reviewer_discuss_citation_finding")}
               icon="forum"
+              className="ai-reviewer-artifact-action-collapsible"
               onClick={() =>
                 openDiscussion(
                   runState,
@@ -5169,6 +5269,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-copy`}
               label={t("ai_reviewer_copy_proposed_text")}
               icon="content_copy"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={persistenceConflict || copyNotice?.status === "copying"}
               onClick={() => copyCitationProposedText(runState, finding)}
             />
@@ -5178,10 +5279,55 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-discard`}
               label={t("ai_reviewer_discard_citation_finding")}
               icon="delete"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={persistenceConflict}
               onClick={() => discardFinding(runState, finding)}
             />
           )}
+          <AiReviewerOverflowMenu
+            id={`${commentDraftKey}-more`}
+            className="ai-reviewer-artifact-overflow"
+            menuClassName="ai-reviewer-artifact-overflow-menu"
+          >
+            {discussAvailable && (
+              <OLDropdownMenuItem
+                as="button"
+                onClick={() =>
+                  openDiscussion(
+                    runState,
+                    {
+                      kind: "citation-finding",
+                      sourceRequest: runState.request!,
+                      artifact: finding,
+                    },
+                    `citation-finding:${finding.id}`,
+                  )
+                }
+              >
+                {t("ai_reviewer_discuss_citation_finding")}
+              </OLDropdownMenuItem>
+            )}
+            {unresolved && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={
+                  persistenceConflict || copyNotice?.status === "copying"
+                }
+                onClick={() => copyCitationProposedText(runState, finding)}
+              >
+                {t("ai_reviewer_copy_proposed_text")}
+              </OLDropdownMenuItem>
+            )}
+            {unresolved && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={persistenceConflict}
+                onClick={() => discardFinding(runState, finding)}
+              >
+                {t("ai_reviewer_discard_citation_finding")}
+              </OLDropdownMenuItem>
+            )}
+          </AiReviewerOverflowMenu>
         </div>
       ) : null,
     );
@@ -5258,6 +5404,7 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discuss`}
             label={t("ai_reviewer_discuss_suggestion")}
             icon="forum"
+            className="ai-reviewer-artifact-action-collapsible"
             onClick={() =>
               openDiscussion(
                 runState,
@@ -5280,6 +5427,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_suggestion_as_comment")}
               icon="add_comment"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -5299,22 +5447,79 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discard`}
             label={t("ai_reviewer_discard_suggestion")}
             icon="delete"
+            className="ai-reviewer-artifact-action-collapsible"
             disabled={
               persistenceConflict || commentDraft?.key === commentDraftKey
             }
             onClick={() => discardSuggestion(runState, suggestion)}
           />
         )}
-        <OLButton
-          type="button"
-          variant="secondary"
-          size="sm"
+        <AiReviewerTooltipIconButton
+          id={`${commentDraftKey}-apply`}
+          label={t("ai_reviewer_apply_suggestion")}
+          icon="check"
           className="ai-reviewer-artifact-apply"
           disabled={!applyAvailable || applying || persistenceConflict}
           onClick={() => applyRunSuggestion(runState, suggestion)}
+        />
+        <AiReviewerOverflowMenu
+          id={`${commentDraftKey}-more`}
+          className="ai-reviewer-artifact-overflow"
+          menuClassName="ai-reviewer-artifact-overflow-menu"
         >
-          {t("ai_reviewer_apply_suggestion")}
-        </OLButton>
+          {canDiscussRun(runState) && runState.request != null && (
+            <OLDropdownMenuItem
+              as="button"
+              onClick={() =>
+                openDiscussion(
+                  runState,
+                  {
+                    kind: "suggestion",
+                    sourceRequest: runState.request!,
+                    artifact: suggestion,
+                  },
+                  `suggestion:${suggestion.id}`,
+                )
+              }
+            >
+              {t("ai_reviewer_discuss_suggestion")}
+            </OLDropdownMenuItem>
+          )}
+          {status === "unresolved" &&
+            runState.status === "completed" &&
+            runState.request != null &&
+            postEditorComment != null &&
+            getSelectionContext != null && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
+                onClick={() =>
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation: runState.generation,
+                    request: runState.request!,
+                    artifact: suggestion,
+                  })
+                }
+              >
+                {t("ai_reviewer_post_suggestion_as_comment")}
+              </OLDropdownMenuItem>
+            )}
+          {discardAvailable && (
+            <OLDropdownMenuItem
+              as="button"
+              disabled={
+                persistenceConflict || commentDraft?.key === commentDraftKey
+              }
+              onClick={() => discardSuggestion(runState, suggestion)}
+            >
+              {t("ai_reviewer_discard_suggestion")}
+            </OLDropdownMenuItem>
+          )}
+        </AiReviewerOverflowMenu>
       </div>,
     );
   };
@@ -5418,7 +5623,7 @@ export function AiReviewerPanelView({
                   }}
                 >
                   <span
-                    className="ai-reviewer-run-model"
+                    className="ai-reviewer-run-model ai-reviewer-run-action-collapsible"
                     role="img"
                     tabIndex={0}
                     aria-label={t("ai_reviewer_run_model", {
@@ -5451,6 +5656,7 @@ export function AiReviewerPanelView({
                 id={`ai-reviewer-run-${runState.generation}-delete`}
                 label={t("ai_reviewer_delete_run")}
                 icon="delete"
+                className="ai-reviewer-run-action-collapsible"
                 disabled={
                   busy ||
                   persistenceSaveFailed ||
@@ -5463,6 +5669,34 @@ export function AiReviewerPanelView({
                 }
                 onClick={() => requestRunDeletion(runState)}
               />
+              <AiReviewerOverflowMenu
+                id={`ai-reviewer-run-${runState.generation}-more`}
+                className="ai-reviewer-run-overflow"
+                menuClassName="ai-reviewer-run-overflow-menu"
+              >
+                {runState.provider != null && runState.model != null && (
+                  <div className="ai-reviewer-run-overflow-model">
+                    {`${runState.provider} · ${runState.model}`}
+                  </div>
+                )}
+                <OLDropdownMenuItem
+                  as="button"
+                  variant="danger"
+                  disabled={
+                    busy ||
+                    persistenceSaveFailed ||
+                    isRunBusy(runState) ||
+                    discussions.some(
+                      (discussion) =>
+                        discussionBelongsToRun(discussion, runState) &&
+                        discussion.status === "streaming",
+                    )
+                  }
+                  onClick={() => requestRunDeletion(runState)}
+                >
+                  {t("ai_reviewer_delete_run")}
+                </OLDropdownMenuItem>
+              </AiReviewerOverflowMenu>
             </div>
           </div>
           <span className="ai-reviewer-run-status" aria-live="polite">
@@ -5625,6 +5859,7 @@ export function AiReviewerPanelView({
               id={`${commentDraftKey}-post-comment`}
               label={t("ai_reviewer_post_suggestion_as_comment")}
               icon="add_comment"
+              className="ai-reviewer-artifact-action-collapsible"
               disabled={
                 persistenceConflict ||
                 (commentDraft != null && commentDraft.key !== commentDraftKey)
@@ -5646,22 +5881,64 @@ export function AiReviewerPanelView({
             id={`${commentDraftKey}-discard`}
             label={t("ai_reviewer_discard_suggestion")}
             icon="delete"
+            className="ai-reviewer-artifact-action-collapsible"
             disabled={
               persistenceConflict || commentDraft?.key === commentDraftKey
             }
             onClick={() => discardDiscussionSuggestion(discussion, suggestion)}
           />
         )}
-        <OLButton
-          type="button"
-          variant="secondary"
-          size="sm"
+        <AiReviewerTooltipIconButton
+          id={`${commentDraftKey}-apply`}
+          label={t("ai_reviewer_apply_suggestion")}
+          icon="check"
           className="ai-reviewer-artifact-apply"
           disabled={!applyAvailable || applying || persistenceConflict}
           onClick={() => applyDiscussionSuggestion(discussion, suggestion)}
+        />
+        <AiReviewerOverflowMenu
+          id={`${commentDraftKey}-more`}
+          className="ai-reviewer-artifact-overflow"
+          menuClassName="ai-reviewer-artifact-overflow-menu"
         >
-          {t("ai_reviewer_apply_suggestion")}
-        </OLButton>
+          {status === "unresolved" &&
+            sourceRequest != null &&
+            postEditorComment != null &&
+            getSelectionContext != null && (
+              <OLDropdownMenuItem
+                as="button"
+                disabled={
+                  persistenceConflict ||
+                  (commentDraft != null && commentDraft.key !== commentDraftKey)
+                }
+                onClick={() =>
+                  openCommentDraft({
+                    key: commentDraftKey,
+                    generation:
+                      discussion.sourceGeneration ?? discussion.createdOrder,
+                    request: sourceRequest,
+                    artifact: suggestion,
+                    discussionId: discussion.id,
+                  })
+                }
+              >
+                {t("ai_reviewer_post_suggestion_as_comment")}
+              </OLDropdownMenuItem>
+            )}
+          {(status === "unresolved" || status === "conflict") && (
+            <OLDropdownMenuItem
+              as="button"
+              disabled={
+                persistenceConflict || commentDraft?.key === commentDraftKey
+              }
+              onClick={() =>
+                discardDiscussionSuggestion(discussion, suggestion)
+              }
+            >
+              {t("ai_reviewer_discard_suggestion")}
+            </OLDropdownMenuItem>
+          )}
+        </AiReviewerOverflowMenu>
       </div>,
     );
   };

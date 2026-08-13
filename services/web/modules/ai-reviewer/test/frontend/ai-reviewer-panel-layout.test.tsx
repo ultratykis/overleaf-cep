@@ -619,7 +619,27 @@ describe("AI reviewer panel width", function () {
       narrowDeclarations(".ai-reviewer-panel-overflow-narrow").get("display"),
     ).to.equal("block");
     expect(
+      narrowDeclarations(".ai-reviewer-artifact-overflow").get("display"),
+    ).to.equal("block");
+    expect(
+      narrowDeclarations(".ai-reviewer-run-overflow").get("display"),
+    ).to.equal("block");
+    expect(
+      narrowDeclarations(".ai-reviewer-artifact-action-collapsible").get(
+        "display",
+      ),
+    ).to.equal("none");
+    expect(
+      narrowDeclarations(".ai-reviewer-run-action-collapsible").get("display"),
+    ).to.equal("none");
+    expect(
       declarationsFor(".ai-reviewer-panel-overflow-narrow").get("display"),
+    ).to.equal("none");
+    expect(
+      declarationsFor(".ai-reviewer-artifact-overflow").get("display"),
+    ).to.equal("none");
+    expect(
+      declarationsFor(".ai-reviewer-run-overflow").get("display"),
     ).to.equal("none");
     expect(
       declarationsFor(

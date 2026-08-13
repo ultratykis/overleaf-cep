@@ -569,7 +569,11 @@ describe("AI reviewer: panel layout", function () {
     expect(modeMenu?.classList.contains("ide-redesign-main")).to.equal(true);
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Freeform" }));
-    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(
+      within(
+        screen.getByTestId("ai-reviewer-panel").querySelector("header")!,
+      ).getByRole("button", { name: "More options" }),
+    );
     const overflowMenu = document.querySelector<HTMLElement>(
       ".ai-reviewer-panel-overflow-menu",
     );
@@ -812,6 +816,25 @@ describe("AI reviewer: panel layout", function () {
     expect(discussRun.className).to.equal("btn");
     expect(within(run).getByRole("heading", { name: "Claim support" })).to
       .exist;
+
+    const runOverflow = run.querySelector<HTMLElement>(
+      ".ai-reviewer-run-overflow",
+    );
+    expect(runOverflow).not.to.equal(null);
+    fireEvent.click(
+      within(runOverflow!).getByRole("button", { name: "More options" }),
+    );
+    const runOverflowMenu = document.querySelector<HTMLElement>(
+      ".ai-reviewer-run-overflow-menu.show",
+    );
+    expect(runOverflowMenu).not.to.equal(null);
+    expect(within(runOverflowMenu!).getByText("fake · deterministic-v1")).to
+      .exist;
+    expect(
+      within(runOverflowMenu!)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).to.deep.equal(["Delete run"]);
   });
 
   it("keeps No subject when a completed review emitted none", async function () {
@@ -892,7 +915,11 @@ describe("AI reviewer: panel layout", function () {
       }),
     ).not.to.exist;
 
-    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(
+      within(
+        screen.getByTestId("ai-reviewer-panel").querySelector("header")!,
+      ).getByRole("button", { name: "More options" }),
+    );
     fireEvent.click(
       screen.getByRole("menuitem", {
         name: "Delete all saved review work",
@@ -935,7 +962,11 @@ describe("AI reviewer: panel layout", function () {
         sinon.match.has("aborted", false),
       );
     });
-    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(
+      within(
+        screen.getByTestId("ai-reviewer-panel").querySelector("header")!,
+      ).getByRole("button", { name: "More options" }),
+    );
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Review perspectives" }),
     );

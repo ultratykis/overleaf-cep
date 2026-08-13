@@ -318,6 +318,7 @@ describe("AI reviewer comment-posting panel", function () {
       "Discuss finding",
       "Post finding as comment",
       "Discard finding",
+      "More options",
     ]);
 
     fireEvent.click(postFinding);
@@ -371,6 +372,7 @@ describe("AI reviewer comment-posting panel", function () {
       "Post suggestion as comment",
       "Discard suggestion",
       "Apply",
+      "More options",
     ]);
 
     fireEvent.click(postSuggestion);
@@ -405,6 +407,41 @@ describe("AI reviewer comment-posting panel", function () {
       }),
     ).to.equal(true);
     expect(within(suggestions).getByText("Status: Posted")).to.exist;
+  });
+
+  it("lists the suggestion actions in the narrow overflow menu", async function () {
+    await renderCompletedPanel();
+    const suggestions = screen.getByRole("region", {
+      name: "Review suggestions",
+    });
+    const apply = within(suggestions).getByRole("button", { name: "Apply" });
+    expect(apply.textContent).to.equal("check");
+
+    const suggestionActions = apply.closest(
+      ".ai-reviewer-artifact-heading-actions",
+    );
+    const overflowToggle = suggestionActions?.querySelector(
+      '.ai-reviewer-artifact-overflow button[aria-label="More options"]',
+    );
+    expect(overflowToggle).not.to.equal(null);
+    fireEvent.click(overflowToggle);
+
+    const overflowMenu = await waitFor(() => {
+      const menu = document.querySelector(
+        ".ai-reviewer-artifact-overflow-menu.show",
+      );
+      expect(menu).not.to.equal(null);
+      return menu;
+    });
+    expect(
+      within(overflowMenu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).to.deep.equal([
+      "Discuss suggestion",
+      "Post suggestion as comment",
+      "Discard suggestion",
+    ]);
   });
 
   it("releases a suggestion comment draft when the suggestion is applied", async function () {

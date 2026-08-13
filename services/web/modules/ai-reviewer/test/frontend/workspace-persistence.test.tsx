@@ -589,7 +589,13 @@ function getDeleteAllMenuItem() {
   if (visibleItem != null) {
     return visibleItem;
   }
-  fireEvent.click(screen.getByRole("button", { name: "More options" }));
+  const panelOverflowToggle = document.querySelector<HTMLButtonElement>(
+    ".ai-reviewer-panel-header .ai-reviewer-panel-overflow-toggle",
+  );
+  if (panelOverflowToggle == null) {
+    throw new Error("The panel overflow toggle must render.");
+  }
+  fireEvent.click(panelOverflowToggle);
   return screen.getByRole("menuitem", {
     name: "Delete all saved review work",
   });

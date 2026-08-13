@@ -622,7 +622,7 @@ describe("AI reviewer: context-driven panel", function () {
       .getByRole("button", { name: "Selected model — None" })
       .closest(".dropdown");
     const modeDropdown = modeToggle.closest(".dropdown");
-    const overflowDropdown = screen
+    const overflowDropdown = within(header!)
       .getByRole("button", { name: "More options" })
       .closest(".dropdown");
     expect(header?.contains(modeToggle)).to.equal(true);
@@ -671,7 +671,11 @@ describe("AI reviewer: context-driven panel", function () {
         .textContent,
     ).to.equal("Mode");
 
-    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    fireEvent.click(
+      within(
+        screen.getByTestId("ai-reviewer-panel").querySelector("header")!,
+      ).getByRole("button", { name: "More options" }),
+    );
     const overflowMode = document.querySelector<HTMLElement>(
       ".ai-reviewer-panel-overflow-mode",
     );
