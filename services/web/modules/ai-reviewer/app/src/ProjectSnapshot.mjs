@@ -12,9 +12,12 @@ import {
   ReadProjectFileArgumentsSchema,
 } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
-import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
+import { estimateAgentPromptTokens } from "./AiReviewerPrompt.mjs";
 import { extractLatexProjectRelations } from "./LatexProjectRelations.mjs";
-import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
+import {
+  estimateModelInputTokens,
+  modelInputTokenBudget,
+} from "./ModelContextBudget.mjs";
 
 export const PROJECT_SNAPSHOT_DOCUMENT_LIMIT = 200;
 const MAX_DOCUMENT_CHARACTERS = 200_000;
@@ -320,9 +323,9 @@ export function createProjectSnapshot(
     projectId,
   );
   const { currentDocumentPath } = projectRequest;
-  let maxModelInputCharacters;
+  let maxModelInputTokens;
   try {
-    maxModelInputCharacters = modelInputCharacterBudget(contextLength);
+    maxModelInputTokens = modelInputTokenBudget(contextLength);
   } catch {
     throw unavailable();
   }
@@ -462,7 +465,7 @@ export function createProjectSnapshot(
   let modelInputBudgetFailureCount = 0;
   let context;
   /** @type {number} */
-  let modelInputCharacters;
+  let modelInputTokens;
   const exposesProjectContext =
     promptRequest.scope == null || promptRequest.scope.kind === "project";
   while (true) {
@@ -494,11 +497,11 @@ export function createProjectSnapshot(
     // request is scoped. Budget the exact prompt the gateway will send, and add
     // project context only on the paths where the gateway exposes it.
     const modelProjectContext = exposesProjectContext ? context : null;
-    modelInputCharacters = formatAgentPrompt(
+    modelInputTokens = estimateAgentPromptTokens(
       promptRequest,
       modelProjectContext,
-    ).length;
-    if (modelInputCharacters <= maxModelInputCharacters) {
+    );
+    if (modelInputTokens <= maxModelInputTokens) {
       break;
     }
     if (relationships.length === 0) {
@@ -555,12 +558,12 @@ export function createProjectSnapshot(
           ? { fileExclusions: reportedFileExclusions }
           : {}),
       });
-      const resultCharacters = JSON.stringify(result).length;
-      if (resultCharacters > maxModelInputCharacters - modelInputCharacters) {
+      const resultTokens = estimateModelInputTokens(JSON.stringify(result));
+      if (resultTokens > maxModelInputTokens - modelInputTokens) {
         modelInputBudgetFailureCount += 1;
         throw modelContextTooSmall(contextLength, contextLengthSource);
       }
-      modelInputCharacters += resultCharacters;
+      modelInputTokens += resultTokens;
       fileExclusionsReported ||= reportFileExclusions;
       successfulReadCount += 1;
       return result;

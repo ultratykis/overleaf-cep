@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
-import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
-import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
+import { estimateAgentPromptTokens } from "../../../app/src/AiReviewerPrompt.mjs";
+import { modelInputTokenBudget } from "../../../app/src/ModelContextBudget.mjs";
 import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
 
 const projectId = "project-snapshot-0001";
@@ -376,24 +376,27 @@ describe("AI reviewer project snapshot", function () {
       { length: 150 },
       (_, index) => String.raw`\section{Section ${index}}`,
     );
-    const snapshot = createSnapshot({
-      "/main.tex": {
-        _id: "document-many-sections",
-        version: 1,
-        lines,
+    const snapshot = createSnapshot(
+      {
+        "/main.tex": {
+          _id: "document-many-sections",
+          version: 1,
+          lines,
+        },
       },
-    });
+      2_048,
+    );
 
     expect(snapshot.context.relationships.length).toBeGreaterThan(0);
     expect(snapshot.context.relationships.length).toBeLessThan(100);
     expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
     expect(
-      formatAgentPrompt(request(), snapshot.context).length,
-    ).toBeLessThanOrEqual(modelInputCharacterBudget(contextLength));
+      estimateAgentPromptTokens(request(), snapshot.context),
+    ).toBeLessThanOrEqual(modelInputTokenBudget(2_048));
   });
 
   it("derives a smaller model-facing read budget from a smaller context length", async function () {
-    const text = "x".repeat(3_000);
+    const text = "あ".repeat(3_000);
     const input = {
       "/main.tex": {
         _id: "document-context-budget",
@@ -405,7 +408,7 @@ describe("AI reviewer project snapshot", function () {
     const large = createSnapshot(input, 8_192);
     const read = {
       path: "main.tex",
-      range: { from: 0, to: 1_000 },
+      range: { from: 0, to: 1_400 },
     };
 
     expect(
@@ -420,7 +423,7 @@ describe("AI reviewer project snapshot", function () {
     ).toMatchObject({
       path: "main.tex",
       range: read.range,
-      text: "x".repeat(1_000),
+      text: "あ".repeat(1_400),
     });
   });
 
@@ -430,19 +433,19 @@ describe("AI reviewer project snapshot", function () {
         "/main.tex": {
           _id: "document-accumulated-budget",
           version: 1,
-          lines: ["x".repeat(3_000)],
+          lines: ["あ".repeat(3_000)],
         },
       },
       4_096,
     );
     const read = {
       path: "main.tex",
-      range: { from: 0, to: 700 },
+      range: { from: 0, to: 1_500 },
     };
 
     expect(
       await snapshot.readProjectFile(read, { request: request() }),
-    ).toMatchObject({ text: "x".repeat(700) });
+    ).toMatchObject({ text: "あ".repeat(1_500) });
     expect(
       await captureError(
         snapshot.readProjectFile(read, { request: request() }),

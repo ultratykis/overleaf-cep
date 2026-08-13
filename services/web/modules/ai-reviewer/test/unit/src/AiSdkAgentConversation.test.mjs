@@ -9,8 +9,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AiSdkAgentGateway } from "../../../app/src/AiSdkAgentGateway.mjs";
 import { AI_REVIEWER_COMPLETION_LOG_MESSAGE } from "../../../app/src/AiReviewerFailureLogger.mjs";
-import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
-import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
+import { estimateAgentPromptTokens } from "../../../app/src/AiReviewerPrompt.mjs";
+import {
+  estimateModelInputTokens,
+  modelInputTokenBudget,
+} from "../../../app/src/ModelContextBudget.mjs";
 import {
   AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH,
   DISCUSSION_CONTEXT_TURN_LIMIT,
@@ -379,9 +382,9 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       }).stream(projectRequest()),
     );
 
-    expect(sentSystemInstruction(model).length).toBeLessThanOrEqual(
-      modelInputCharacterBudget(8_192),
-    );
+    expect(
+      estimateModelInputTokens(sentSystemInstruction(model)),
+    ).toBeLessThanOrEqual(modelInputTokenBudget(8_192));
   });
 
   it.each([
@@ -1267,13 +1270,16 @@ describe("AI reviewer: one agent path for review and conversation", function () 
 
     await collect(createGateway(captureModel).stream(request));
 
-    const readablePrompt = formatAgentPrompt(request, null);
+    const readablePromptTokens = estimateAgentPromptTokens(request, null);
     const readableContext = sentPrompt(captureModel);
     const systemInstruction = sentSystemInstruction(captureModel);
-    const exactContextLength = readablePrompt.length * 2;
-    const shortContextLength = (readablePrompt.length - 1) * 2;
-    expect(modelInputCharacterBudget(exactContextLength)).toBe(
-      readablePrompt.length,
+    const exactContextLength = Math.ceil(readablePromptTokens / 0.7);
+    const shortContextLength = exactContextLength - 1;
+    expect(modelInputTokenBudget(exactContextLength)).toBe(
+      readablePromptTokens,
+    );
+    expect(estimateModelInputTokens(systemInstruction)).toBeLessThanOrEqual(
+      readablePromptTokens,
     );
 
     const { model: shortModel } = strictStreamModel([
@@ -1304,6 +1310,30 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     );
     expect(sentSystemInstruction(exactModel)).toBe(systemInstruction);
     expect(sentPrompt(exactModel)).toBe(readableContext);
+  });
+
+  it("fits a 6000-character English document and conversation in a 32k context", async function () {
+    const request = documentRequest({
+      scope: {
+        ...documentRequest().scope,
+        text: "a".repeat(6_000),
+      },
+      turns: Array.from({ length: 4 }, (_, index) => ({
+        role: index % 2 === 0 ? "user" : "assistant",
+        text: "b".repeat(3_000),
+      })),
+    });
+    const { model } = strictStreamModel([textStep("Fits.")]);
+
+    const events = await collect(
+      createGateway(model, { contextLength: 32_768 }).stream(request),
+    );
+
+    expect(model.doStreamCalls).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "completed",
+      finishReason: "stop",
+    });
   });
 
   it("keeps the provider response body and the credential out of a failure", async function () {

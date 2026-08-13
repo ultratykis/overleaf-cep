@@ -4362,7 +4362,7 @@ Cite \cite{missing}`;
   it("reports a model-input budget read failure without leaking numbers", async function () {
     let readFailure;
     const events = await projectCoverageStream({
-      text: "x".repeat(5_000),
+      text: "あ".repeat(5_000),
       configuredContextLength: 4_096,
       async performReads(readProjectFile, request, signal) {
         await readProjectFile(
@@ -4395,7 +4395,7 @@ Cite \cite{missing}`;
 
   it("keeps a handled all-read budget failure distinct at completion", async function () {
     const events = await projectCoverageStream({
-      text: "x".repeat(5_000),
+      text: "あ".repeat(5_000),
       configuredContextLength: 4_096,
       async performReads(readProjectFile, request, signal) {
         await captureError(
@@ -4627,7 +4627,7 @@ Cite \cite{missing}`;
     const response = new FakeResponse();
     const body = {
       ...selectionRequest(),
-      turns: [{ role: "user", text: "x".repeat(2_000) }],
+      turns: [{ role: "user", text: "あ".repeat(3_000) }],
     };
 
     await controller.stream(httpRequest({ body }), response);

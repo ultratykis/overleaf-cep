@@ -2,8 +2,8 @@
 
 import { AgentRequestSchema } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
-import { formatAgentPrompt } from "./AiReviewerPrompt.mjs";
-import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
+import { estimateAgentPromptTokens } from "./AiReviewerPrompt.mjs";
+import { modelInputTokenBudget } from "./ModelContextBudget.mjs";
 import { createProjectSnapshot } from "./ProjectSnapshot.mjs";
 
 function rejected() {
@@ -110,9 +110,9 @@ export function createRequestScopeReader({
       }
       const userId = authenticatedUserId(httpRequest);
       /** @type {number} */
-      let maxModelInputCharacters;
+      let maxModelInputTokens;
       try {
-        maxModelInputCharacters = modelInputCharacterBudget(contextLength);
+        maxModelInputTokens = modelInputTokenBudget(contextLength);
       } catch {
         throw rejected();
       }
@@ -170,7 +170,7 @@ export function createRequestScopeReader({
           : undefined;
       // Use the gateway's readable representation so this early rejection and
       // the transport boundary cannot disagree about the same scoped prompt.
-      if (formatAgentPrompt(request, null).length > maxModelInputCharacters) {
+      if (estimateAgentPromptTokens(request, null) > maxModelInputTokens) {
         // This request is valid and readable; only the selected model budget is
         // too small. Preserve that distinction so changing files or retrying the
         // same model is not presented as a remedy.

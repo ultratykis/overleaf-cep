@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   APICallError,
   NoObjectGeneratedError,
@@ -15,9 +17,12 @@ import {
   AI_REVIEWER_MAX_RETRIES,
   AiSdkAgentGateway,
 } from "../../../app/src/AiSdkAgentGateway.mjs";
-import { formatAgentPrompt } from "../../../app/src/AiReviewerPrompt.mjs";
+import { estimateAgentPromptTokens } from "../../../app/src/AiReviewerPrompt.mjs";
 import { AgentGatewayError } from "../../../app/src/AgentGateway.mjs";
-import { modelInputCharacterBudget } from "../../../app/src/ModelContextBudget.mjs";
+import {
+  estimateModelInputTokens,
+  modelInputTokenBudget,
+} from "../../../app/src/ModelContextBudget.mjs";
 import { createProjectSnapshot } from "../../../app/src/ProjectSnapshot.mjs";
 
 const createdAt = "2026-07-24T00:00:00.000Z";
@@ -2537,7 +2542,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
   });
 
   it("derives a smaller prompt budget from a smaller context length", async function () {
-    const text = "x".repeat(2_000);
+    const text = "あ".repeat(3_000);
     const boundedRequest = selectionRequest({
       scope: {
         kind: "selection",
@@ -2586,7 +2591,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
   });
 
   it("sends an instruction-bearing project prompt after snapshot budget shrinking", async function () {
-    const contextLength = 8_192;
+    const contextLength = 2_048;
     const request = projectRequest();
     const relationshipLines = Array.from(
       { length: 80 },
@@ -2622,14 +2627,18 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(snapshot.context.relationships.length).toBeLessThan(80);
     expect(snapshot.context.summary.relationshipsTruncated).toBe(true);
     const systemInstruction = model.doStreamCalls[0].prompt[0].content;
-    const readablePrompt = formatAgentPrompt(request, snapshot.context);
-    const promptBudget = modelInputCharacterBudget(contextLength);
+    const readablePromptTokens = estimateAgentPromptTokens(
+      request,
+      snapshot.context,
+    );
+    const systemInstructionTokens = estimateModelInputTokens(systemInstruction);
+    const promptBudget = modelInputTokenBudget(contextLength);
     expect(systemInstruction.length).toBeGreaterThan(0);
-    expect(readablePrompt.length).toBeLessThanOrEqual(promptBudget);
-    expect(systemInstruction.length).toBeLessThanOrEqual(promptBudget);
+    expect(readablePromptTokens).toBeLessThanOrEqual(promptBudget);
+    expect(systemInstructionTokens).toBeLessThanOrEqual(promptBudget);
     // This is the former regression boundary: the two reserved partitions may
     // legitimately total more than the manuscript-only half.
-    expect(systemInstruction.length + readablePrompt.length).toBeGreaterThan(
+    expect(systemInstructionTokens + readablePromptTokens).toBeGreaterThan(
       promptBudget,
     );
     expect(events.at(-1)).toMatchObject({
@@ -2641,7 +2650,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
   it("delivers a snapshot-accepted read instead of counting a gateway rejection as success", async function () {
     const contextLength = 8_192;
     const request = projectRequest();
-    const readText = `SNAPSHOT_ACCEPTED_READ_${"x".repeat(1_400)}`;
+    const readText = `SNAPSHOT_ACCEPTED_READ_${"x".repeat(20_000)}`;
     const snapshot = createProjectSnapshot(
       request.projectId,
       {
@@ -2676,13 +2685,26 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     );
 
     const systemInstruction = model.doStreamCalls[0].prompt[0].content;
-    const readablePrompt = formatAgentPrompt(request, snapshot.context);
-    const promptBudget = modelInputCharacterBudget(contextLength);
-    expect(systemInstruction.length + readablePrompt.length).toBeLessThan(
+    const readablePromptTokens = estimateAgentPromptTokens(
+      request,
+      snapshot.context,
+    );
+    const systemInstructionTokens = estimateModelInputTokens(systemInstruction);
+    const readResultTokens = estimateModelInputTokens(
+      JSON.stringify({
+        path: read.path,
+        range: read.range,
+        revision: 1,
+        textHash: createHash("sha256").update(readText).digest("hex"),
+        text: readText,
+      }),
+    );
+    const promptBudget = modelInputTokenBudget(contextLength);
+    expect(systemInstructionTokens + readablePromptTokens).toBeLessThan(
       promptBudget,
     );
     expect(
-      systemInstruction.length + readablePrompt.length + readText.length,
+      systemInstructionTokens + readablePromptTokens + readResultTokens,
     ).toBeGreaterThan(promptBudget);
     expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(readText);
     expect(snapshot.readProjectFile.reviewCoverage()).toEqual({

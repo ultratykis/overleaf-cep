@@ -1,5 +1,7 @@
 // @ts-check
 
+import { estimateModelInputTokens } from "./ModelContextBudget.mjs";
+
 /**
  * @import {
  *   AgentRequest,
@@ -83,10 +85,19 @@ export function formatAgentMessages(request, projectContext) {
 }
 
 /**
- * Serialize the exact role-bearing input for the shared character budget.
- * Project snapshots call this same formatter so
- * accepting a read cannot be followed by a second, differently measured
- * gateway rejection.
+ * Estimate the exact role-bearing input for the shared token budget. Project
+ * snapshots and the gateway must call this same function so accepting a read
+ * cannot be followed by a differently measured gateway rejection.
+ *
+ * @param {AgentRequest} request
+ * @param {unknown} projectContext
+ */
+export function estimateAgentPromptTokens(request, projectContext) {
+  return estimateModelInputTokens(formatAgentMessages(request, projectContext));
+}
+
+/**
+ * Serialize the role-bearing input for the external runner protocol.
  *
  * @param {AgentRequest} request
  * @param {unknown} projectContext

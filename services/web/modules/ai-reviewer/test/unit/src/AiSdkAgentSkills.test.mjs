@@ -241,7 +241,7 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
     ).not.toContain("read_skill");
   });
 
-  it("keeps stored-skill metadata inside the reserved instruction half", async function () {
+  it("keeps stored-skill metadata inside the reserved instruction budget", async function () {
     const contextLength = 8_192;
     const baseModel = strictStreamModel([textStep()]);
 
@@ -257,10 +257,10 @@ describe("AI reviewer: progressive stored-skill disclosure", function () {
         collect(
           createGateway(skillModel, {
             contextLength,
-            skills: Array.from({ length: 6 }, (_, index) =>
+            skills: Array.from({ length: 12 }, (_, index) =>
               storedSkill({
                 name: `Evidence audit ${index}`,
-                description: "x".repeat(500),
+                description: "あ".repeat(500),
               }),
             ),
           }).stream(request()),

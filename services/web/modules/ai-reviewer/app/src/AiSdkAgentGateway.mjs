@@ -42,8 +42,14 @@ import {
   recordAiReviewerCompletion,
   recordAiReviewerProviderDiagnostic,
 } from "./AiReviewerFailureLogger.mjs";
-import { formatAgentMessages, formatAgentPrompt } from "./AiReviewerPrompt.mjs";
-import { modelInputCharacterBudget } from "./ModelContextBudget.mjs";
+import {
+  estimateAgentPromptTokens,
+  formatAgentMessages,
+} from "./AiReviewerPrompt.mjs";
+import {
+  estimateModelInputTokens,
+  modelInputTokenBudget,
+} from "./ModelContextBudget.mjs";
 
 export const AI_REVIEWER_TOOL_NAMES = Object.freeze({
   readProjectFile: "read_project_file",
@@ -2529,7 +2535,7 @@ export class AiSdkAgentGateway {
     ) {
       throw new TypeError("providerOptions must be an object.");
     }
-    const maxModelInputCharacters = modelInputCharacterBudget(contextLength);
+    const maxModelInputTokens = modelInputTokenBudget(contextLength);
     const boundedSkills = boundedStoredSkills(skills);
     const boundedInstructions = boundedModeInstructions(modeInstructions);
     if (typeof readProjectFile !== "function") {
@@ -2550,7 +2556,7 @@ export class AiSdkAgentGateway {
     this.providerOptions = providerOptions;
     this.contextLength = contextLength;
     this.contextLengthSource = contextLengthSource;
-    this.maxModelInputCharacters = maxModelInputCharacters;
+    this.maxModelInputTokens = maxModelInputTokens;
     this.skills = boundedSkills;
     this.modeInstructions = boundedInstructions;
     this.readProjectFile = readProjectFile;
@@ -2650,13 +2656,13 @@ export class AiSdkAgentGateway {
       request,
       projectWide ? this.projectContext : null,
     );
-    const prompt = formatAgentPrompt(
+    let modelInputTokens = estimateAgentPromptTokens(
       request,
       projectWide ? this.projectContext : null,
     );
     if (
-      prompt.length > this.maxModelInputCharacters ||
-      instructions.length > this.maxModelInputCharacters
+      modelInputTokens > this.maxModelInputTokens ||
+      estimateModelInputTokens(instructions) > this.maxModelInputTokens
     ) {
       throw gatewayError(
         "The requested project content exceeds the configured model context.",
@@ -2669,21 +2675,16 @@ export class AiSdkAgentGateway {
         },
       );
     }
-    // ModelContextBudget gives the prompt and tool results one half of the
-    // context and reserves the other half for instructions and output. Keeping
-    // those partitions separate prevents both snapshot and gateway from
-    // charging the same instructions against the manuscript allowance.
-    let modelInputCharacters = prompt.length;
+    // ModelContextBudget gives the prompt and tool results 70% of the context.
+    // Keeping instructions in their reserved partition prevents both snapshot
+    // and gateway from charging them against the manuscript allowance.
     /**
      * @param {unknown} value
      */
     const consumeModelInput = (value) => {
       const parsedValue = JsonValueSchema.parse(value);
-      const valueCharacters = JSON.stringify(parsedValue).length;
-      if (
-        valueCharacters >
-        this.maxModelInputCharacters - modelInputCharacters
-      ) {
+      const valueTokens = estimateModelInputTokens(JSON.stringify(parsedValue));
+      if (valueTokens > this.maxModelInputTokens - modelInputTokens) {
         throw gatewayError(
           "The requested project content exceeds the configured model context.",
           {
@@ -2695,7 +2696,7 @@ export class AiSdkAgentGateway {
           },
         );
       }
-      modelInputCharacters += valueCharacters;
+      modelInputTokens += valueTokens;
       return parsedValue;
     };
     let sequence = 0;
@@ -3086,9 +3087,7 @@ export class AiSdkAgentGateway {
             description:
               "Read one explicitly authorized project-relative text range.",
             inputSchema:
-              providerToolInputSchemas[
-                AI_REVIEWER_TOOL_NAMES.readProjectFile
-              ],
+              providerToolInputSchemas[AI_REVIEWER_TOOL_NAMES.readProjectFile],
             strict: strictProviderTools,
             execute: async (toolInput, { toolCallId }) => {
               try {

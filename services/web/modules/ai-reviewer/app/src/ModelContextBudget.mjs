@@ -1,7 +1,9 @@
 // @ts-check
 
-const CONSERVATIVE_CHARACTERS_PER_TOKEN = 1;
-const MODEL_INPUT_CONTEXT_SHARE = 0.5;
+const MODEL_INPUT_CONTEXT_SHARE = 0.7;
+const MESSAGE_OVERHEAD_TOKENS = 4;
+const CJK_CHARACTER =
+  /[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\u3000-\u303f\uff00-\uffef]/u;
 
 /**
  * @param {unknown} input
@@ -14,22 +16,41 @@ export function parseModelContextLength(input) {
 }
 
 /**
- * Treat one UTF-16 character as one token so CJK, LaTeX, and JSON do not
- * inherit an optimistic prose ratio. Reserve the other half of the context
- * window for the system instruction, provider schema overhead, tokenization
- * variance, and the model response. Callers must not subtract the instruction
- * from this manuscript-and-tool allowance a second time.
+ * @param {string | ReadonlyArray<{ content: string }>} input
+ *
+ * @returns {number}
+ */
+export function estimateModelInputTokens(input) {
+  const contents =
+    typeof input === "string" ? [input] : input.map(({ content }) => content);
+  let tokens =
+    typeof input === "string" ? 0 : input.length * MESSAGE_OVERHEAD_TOKENS;
+
+  for (const content of contents) {
+    let cjkCharacters = 0;
+    let otherCharacters = 0;
+    for (const character of content) {
+      if (CJK_CHARACTER.test(character)) {
+        cjkCharacters += 1;
+      } else {
+        otherCharacters += 1;
+      }
+    }
+    tokens += cjkCharacters + Math.ceil(otherCharacters / 4);
+  }
+  return tokens;
+}
+
+/**
+ * Reserve 30% of the context window for system/schema overhead, tokenization
+ * variance, and the model response.
  *
  * @param {unknown} contextLength
  */
-export function modelInputCharacterBudget(contextLength) {
+export function modelInputTokenBudget(contextLength) {
   const parsedContextLength = parseModelContextLength(contextLength);
   return Math.min(
     Number.MAX_SAFE_INTEGER,
-    Math.floor(
-      parsedContextLength *
-        CONSERVATIVE_CHARACTERS_PER_TOKEN *
-        MODEL_INPUT_CONTEXT_SHARE,
-    ),
+    Math.floor(parsedContextLength * MODEL_INPUT_CONTEXT_SHARE),
   );
 }
