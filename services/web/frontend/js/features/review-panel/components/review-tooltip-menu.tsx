@@ -1,4 +1,4 @@
-import {
+import React, {
   CSSProperties,
   FC,
   memo,
@@ -39,6 +39,13 @@ import useEventListener from '@/shared/hooks/use-event-listener'
 import useReviewPanelLayout from '../hooks/use-review-panel-layout'
 import { usePermissionsContext } from '@/features/ide-react/context/permissions-context'
 import { sendMB } from '@/infrastructure/event-tracking'
+import importOverleafModules from '../../../../macros/import-overleaf-module.macro'
+
+// The same module slot the writefull-toolbar-migration menu renders, so
+// module actions appear in whichever selection menu is active.
+const editorFloatingMenuActions = importOverleafModules(
+  'editorFloatingMenuActions'
+) as { import: { default: React.ComponentType }; path: string }[]
 
 const EDIT_MODE_SWITCH_WIDGET_HEIGHT = 40
 const CM_LINE_RIGHT_PADDING = 8
@@ -300,6 +307,14 @@ const ReviewTooltipMenuContent = memo<{ onAddComment: () => void }>(
               </button>
             </OLTooltip>
           </>
+        )}
+        {editorFloatingMenuActions.map(
+          ({ import: { default: Component }, path }) => (
+            <React.Fragment key={path}>
+              <div className="review-tooltip-menu-divider" />
+              <Component />
+            </React.Fragment>
+          )
         )}
       </div>
     )

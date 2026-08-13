@@ -102,7 +102,7 @@ export function AiReviewerFloatingMenuActions({
           id={`ai-reviewer-selection-action-${action}`}
           label={t(labelKey)}
           icon={icon}
-          buttonClassName="editor-floating-menu-button"
+          buttonClassName="review-tooltip-menu-button"
           tooltipPlacement="right"
           disabled={busy || pendingAction != null}
           onClick={() => runAction(action)}
