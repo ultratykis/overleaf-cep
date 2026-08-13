@@ -326,11 +326,17 @@ describe("AI reviewer: inline completion", function () {
       await work;
 
       expect(providerSignal.aborted).toBe(true);
-      expect(response.statusCode).toBe(502);
-      expect(response.body).toMatchObject({
-        success: false,
-        error: { code: "AI_COMPLETION_PROVIDER_FAILED" },
-      });
+      if (cause === "timeout") {
+        expect(response.statusCode).toBe(502);
+        expect(response.body).toMatchObject({
+          success: false,
+          error: { code: "AI_COMPLETION_PROVIDER_FAILED" },
+        });
+      } else {
+        // The client is gone; nothing may be written to the closed response.
+        expect(response.body).toBeNull();
+        expect(response.writableEnded).toBe(false);
+      }
     },
   );
 

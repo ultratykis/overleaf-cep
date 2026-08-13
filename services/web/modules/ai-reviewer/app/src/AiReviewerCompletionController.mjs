@@ -346,6 +346,9 @@ export function createAiReviewerCompletionController(dependencies) {
       }
       const data = completionText(await providerResponse.json());
       record("success", startedAt, input.connectionId, resolvedModel);
+      if (disconnected.signal.aborted) {
+        return;
+      }
       return response.json({ success: true, data });
     } catch {
       record(
@@ -354,6 +357,10 @@ export function createAiReviewerCompletionController(dependencies) {
         input.connectionId,
         resolvedModel ?? requestedModel ?? "unavailable",
       );
+      // A departed client has no response stream left to write the 502 to.
+      if (disconnected.signal.aborted) {
+        return;
+      }
       return sendError(response, 502, "provider");
     } finally {
       if (onClose != null) response.removeListener?.("close", onClose);
