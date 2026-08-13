@@ -5250,47 +5250,66 @@ export function AiReviewerPanelView({
               {runState.group != null &&
                 ` ${runState.group.position}/${runState.group.total}`}
             </h3>
-            {runState.provider != null && runState.model != null && (
-              <OLTooltip
-                id={`ai-reviewer-run-${runState.generation}-model`}
-                description={t("ai_reviewer_run_model", {
-                  provider: runState.provider,
-                  model: runState.model,
-                })}
-                overlayProps={{
-                  placement: "top",
-                  trigger: ["hover", "focus"],
-                }}
-              >
-                <span
-                  className="ai-reviewer-run-model"
-                  role="img"
-                  tabIndex={0}
-                  aria-label={t("ai_reviewer_run_model", {
+            <div className="ai-reviewer-artifact-heading-actions">
+              {runState.provider != null && runState.model != null && (
+                <OLTooltip
+                  id={`ai-reviewer-run-${runState.generation}-model`}
+                  description={t("ai_reviewer_run_model", {
                     provider: runState.provider,
                     model: runState.model,
                   })}
+                  overlayProps={{
+                    placement: "top",
+                    trigger: ["hover", "focus"],
+                  }}
                 >
-                  <MaterialIcon type="info" className="icon-small" />
-                </span>
-              </OLTooltip>
-            )}
-            <AiReviewerTooltipIconButton
-              id={`ai-reviewer-run-${runState.generation}-delete`}
-              label={t("ai_reviewer_delete_run")}
-              icon="delete"
-              disabled={
-                busy ||
-                persistenceSaveFailed ||
-                isRunBusy(runState) ||
-                discussions.some(
-                  (discussion) =>
-                    discussionBelongsToRun(discussion, runState) &&
-                    discussion.status === "streaming",
-                )
-              }
-              onClick={() => requestRunDeletion(runState)}
-            />
+                  <span
+                    className="ai-reviewer-run-model"
+                    role="img"
+                    tabIndex={0}
+                    aria-label={t("ai_reviewer_run_model", {
+                      provider: runState.provider,
+                      model: runState.model,
+                    })}
+                  >
+                    <MaterialIcon type="info" />
+                  </span>
+                </OLTooltip>
+              )}
+              {canDiscussRun(runState) && runState.request != null && (
+                <AiReviewerTooltipIconButton
+                  id={`ai-reviewer-run-${runState.generation}-discuss`}
+                  label={t("ai_reviewer_discuss_run")}
+                  icon="forum"
+                  onClick={() =>
+                    openDiscussion(
+                      runState,
+                      {
+                        kind: "scope",
+                        sourceRequest: runState.request!,
+                      },
+                      "scope",
+                    )
+                  }
+                />
+              )}
+              <AiReviewerTooltipIconButton
+                id={`ai-reviewer-run-${runState.generation}-delete`}
+                label={t("ai_reviewer_delete_run")}
+                icon="delete"
+                disabled={
+                  busy ||
+                  persistenceSaveFailed ||
+                  isRunBusy(runState) ||
+                  discussions.some(
+                    (discussion) =>
+                      discussionBelongsToRun(discussion, runState) &&
+                      discussion.status === "streaming",
+                  )
+                }
+                onClick={() => requestRunDeletion(runState)}
+              />
+            </div>
           </div>
           <span className="ai-reviewer-run-status" aria-live="polite">
             {runStatusLabel(runState.status, t)}
@@ -5309,23 +5328,6 @@ export function AiReviewerPanelView({
             >
               {t("ai_reviewer_stop")}
             </OLButton>
-          )}
-          {canDiscussRun(runState) && runState.request != null && (
-            <AiReviewerTooltipIconButton
-              id={`ai-reviewer-run-${runState.generation}-discuss`}
-              label={t("ai_reviewer_discuss_run")}
-              icon="forum"
-              onClick={() =>
-                openDiscussion(
-                  runState,
-                  {
-                    kind: "scope",
-                    sourceRequest: runState.request!,
-                  },
-                  "scope",
-                )
-              }
-            />
           )}
         </div>
       </header>

@@ -778,7 +778,7 @@ describe("AI reviewer: panel layout", function () {
     }
   });
 
-  it("reuses the run header action slot for discuss after completion", async function () {
+  it("shows discuss in the run heading actions after completion", async function () {
     const streamRequest = sinon.stub().callsFake(async (call: StreamCall) => {
       emitCompletedReview(call);
     });
@@ -787,13 +787,9 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
     const run = await screen.findByRole("article", { name: "Review run 1" });
     await within(run).findByText("Completed");
-    const headerAction = within(run).getByTestId(
-      "ai-reviewer-run-header-action",
-    );
 
-    expect(within(headerAction).queryByRole("button", { name: "Stop" })).not.to
-      .exist;
-    const discussRun = within(headerAction).getByRole("button", {
+    expect(within(run).queryByRole("button", { name: "Stop" })).not.to.exist;
+    const discussRun = within(run).getByRole("button", {
       name: "Discuss this run",
     });
     expect(discussRun.querySelector(".material-symbols")?.textContent).to.equal(

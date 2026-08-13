@@ -960,7 +960,16 @@
 .ai-reviewer-run-model {
   display: inline-flex;
   flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: var(--spacing-01);
   cursor: help;
+
+  .material-symbols {
+    font-size: var(--font-size-05);
+  }
 }
 
 .ai-reviewer-artifact {
