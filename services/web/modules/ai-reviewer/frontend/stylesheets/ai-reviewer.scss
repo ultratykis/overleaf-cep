@@ -826,22 +826,6 @@
   overflow-wrap: anywhere;
 }
 
-.ai-reviewer-panel-mode-row {
-  display: flex;
-  flex: none;
-  align-items: center;
-  width: 100%;
-  max-width: 100%;
-  min-height: var(--spacing-07);
-  overflow: hidden;
-  white-space: nowrap;
-
-  > .dropdown {
-    min-width: 0;
-    max-width: 100%;
-  }
-}
-
 .ai-reviewer-panel-mode-chip {
   min-width: 0;
   max-width: 100%;
@@ -1545,6 +1529,28 @@
   }
 }
 
+.ai-reviewer-panel-overflow-narrow {
+  display: none;
+}
+
+// Portaled menus are outside the panel container, so the resize observer adds
+// the matching narrow class to the open menu while the query hides its toggles.
+.ai-reviewer-panel-portaled-menu-narrow
+  .ai-reviewer-panel-overflow-narrow {
+  display: block;
+}
+
+@container (max-width: 339px) {
+  .ai-reviewer-panel-header-model,
+  .ai-reviewer-panel-header-mode {
+    display: none;
+  }
+
+  .ai-reviewer-panel-overflow-narrow {
+    display: block;
+  }
+}
+
 .ai-reviewer-discussion-responding {
   align-self: flex-start;
   color: var(--content-secondary, #5d6879);
@@ -1596,6 +1602,17 @@
   min-width: 0;
   max-width: calc(100vw - (2 * var(--spacing-04)));
   width: max-content;
+}
+
+.ai-reviewer-panel-overflow-section {
+  padding-block: var(--spacing-01);
+  border-bottom: 1px solid var(--border-divider-themed);
+}
+
+.ai-reviewer-panel-overflow-section-title {
+  padding: var(--spacing-02) var(--spacing-03);
+  color: var(--content-secondary-themed);
+  font-weight: bold;
 }
 
 /* The menu lives beside the editor so the rail cannot clip it. Its own width

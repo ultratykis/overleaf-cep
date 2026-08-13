@@ -355,7 +355,14 @@ describe("AI reviewer: panel layout", function () {
     expect(screen.queryByRole("button", { name: "Rewrite selection" })).not.to
       .exist;
     expect(screen.queryByTestId("ai-reviewer-review-shortcuts")).not.to.exist;
-    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
+    expect(
+      screen
+        .getByTestId("ai-reviewer-panel")
+        .querySelector(".ai-reviewer-panel-header")
+        ?.contains(
+          screen.getByRole("button", { name: "Selected mode — Freeform" }),
+        ),
+    ).to.equal(true);
   });
 
   it("renders selection-only transforms while text is selected and drops them when it is deselected", function () {
@@ -396,7 +403,14 @@ describe("AI reviewer: panel layout", function () {
       .exist;
     expect(screen.queryByRole("button", { name: "Shorten selection" })).not.to
       .exist;
-    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
+    expect(
+      screen
+        .getByTestId("ai-reviewer-panel")
+        .querySelector(".ai-reviewer-panel-header")
+        ?.contains(
+          screen.getByRole("button", { name: "Selected mode — Freeform" }),
+        ),
+    ).to.equal(true);
   });
 
   it("selects a model per run and displays the persisted run origin", async function () {
@@ -926,9 +940,9 @@ describe("AI reviewer: panel layout", function () {
       await screen.findByRole("menuitem", { name: "Review perspectives" }),
     );
 
-    const review = screen.getByRole("textbox", { name: "Review mode" });
+    const review = screen.getByRole("textbox", { name: "Review" });
     const brainstorm = screen.getByRole("textbox", {
-      name: "Brainstorm mode",
+      name: "Brainstorm",
     });
     expect(review).to.have.property("value", "Check causal claims.");
     expect(brainstorm).to.have.property(

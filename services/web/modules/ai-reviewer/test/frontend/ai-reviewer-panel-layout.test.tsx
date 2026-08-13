@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect } from "chai";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import postcss, { type Root } from "postcss";
+import postcss, { type AtRule, type Root } from "postcss";
 import React from "react";
 import * as sass from "sass";
 
@@ -82,7 +82,7 @@ const discussionLayoutSelectors = [
   ".ai-reviewer-discussion-turns",
   ".ai-reviewer-discussion-quote",
   ".ai-reviewer-panel-footer",
-  ".ai-reviewer-panel-mode-row",
+  ".ai-reviewer-panel-mode-chip",
   ".ai-reviewer-panel-composer",
   ".ai-reviewer-panel .btn",
 ];
@@ -584,6 +584,48 @@ describe("AI reviewer panel width", function () {
     const composer = declarationsFor(".ai-reviewer-panel-composer textarea");
     expect(composer.get("color")).to.equal("var(--content-primary-themed)");
     expect(composer.get("background")).to.equal("var(--bg-primary-themed)");
+  });
+
+  it("consolidates model and mode controls below the 340px panel boundary", function () {
+    const css = sass.compileString(readFileSync(stylesheetPath, "utf8"), {
+      loadPaths: [path.dirname(stylesheetPath)],
+    }).css;
+    const parsed = postcss.parse(css);
+    let narrowRule: AtRule | undefined;
+    parsed.walkAtRules("container", (rule) => {
+      if (rule.params === "(max-width: 339px)") {
+        narrowRule = rule;
+      }
+    });
+    expect(narrowRule).not.to.equal(undefined);
+
+    const narrowDeclarations = (selector: string) => {
+      const declarations = new Map<string, string>();
+      narrowRule?.walkRules((rule) => {
+        if (!rule.selectors.includes(selector)) return;
+        rule.walkDecls((declaration) => {
+          declarations.set(declaration.prop, declaration.value);
+        });
+      });
+      return declarations;
+    };
+    expect(
+      narrowDeclarations(".ai-reviewer-panel-header-model").get("display"),
+    ).to.equal("none");
+    expect(
+      narrowDeclarations(".ai-reviewer-panel-header-mode").get("display"),
+    ).to.equal("none");
+    expect(
+      narrowDeclarations(".ai-reviewer-panel-overflow-narrow").get("display"),
+    ).to.equal("block");
+    expect(
+      declarationsFor(".ai-reviewer-panel-overflow-narrow").get("display"),
+    ).to.equal("none");
+    expect(
+      declarationsFor(
+        ".ai-reviewer-panel-portaled-menu-narrow .ai-reviewer-panel-overflow-narrow",
+      ).get("display"),
+    ).to.equal("block");
   });
 
   it("keeps run provenance and compact artifact controls themed", function () {

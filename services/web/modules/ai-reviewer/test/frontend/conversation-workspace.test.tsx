@@ -722,7 +722,14 @@ describe("AI reviewer: conversation workspace", function () {
     ).to.exist;
     expect(screen.queryByRole("article", { name: "Review run 1" })).not.to
       .exist;
-    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
+    expect(
+      screen
+        .getByTestId("ai-reviewer-panel")
+        .querySelector(".ai-reviewer-panel-header")
+        ?.contains(
+          screen.getByRole("button", { name: "Selected mode — Freeform" }),
+        ),
+    ).to.equal(true);
 
     for (let index = 1; index <= 13; index += 1) {
       await sendConversationMessage(`Conversation message ${index}`);
@@ -822,7 +829,7 @@ describe("AI reviewer: conversation workspace", function () {
     fireEvent.click(
       screen.getByRole("button", { name: "Selected mode — Freeform" }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "Review mode" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review" }));
     typeConversationMessage("Please propose a precise replacement.");
     const applyButton = await screen.findByRole("button", { name: "Apply" });
     const rationale = screen.getByText("precise term");

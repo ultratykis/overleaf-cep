@@ -612,11 +612,83 @@ describe("AI reviewer: context-driven panel", function () {
     expect(composerField()).to.exist;
     expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
     expect(screen.queryByTestId("ai-reviewer-review-shortcuts")).not.to.exist;
-    expect(screen.getByTestId("ai-reviewer-mode-row")).to.exist;
+    const header = screen
+      .getByTestId("ai-reviewer-panel")
+      .querySelector(".ai-reviewer-panel-header");
+    const modeToggle = screen.getByRole("button", {
+      name: "Selected mode — Freeform",
+    });
+    const modelDropdown = screen
+      .getByRole("button", { name: "Selected model — None" })
+      .closest(".dropdown");
+    const modeDropdown = modeToggle.closest(".dropdown");
+    const overflowDropdown = screen
+      .getByRole("button", { name: "More options" })
+      .closest(".dropdown");
+    expect(header?.contains(modeToggle)).to.equal(true);
+    expect(modeToggle.textContent).to.equal("Mode");
     expect(
-      screen.getByRole("button", { name: "Selected mode — Freeform" })
+      modelDropdown!.compareDocumentPosition(modeDropdown!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.to.equal(0);
+    expect(
+      modeDropdown!.compareDocumentPosition(overflowDropdown!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.to.equal(0);
+  });
+
+  it("keeps the mode labels and selected-mode aria label in both header and overflow menus", async function () {
+    renderPanel({ ...providerProps() });
+    await screen.findByRole("button", { name: "Selected model — None" });
+
+    const modeToggle = screen.getByRole("button", {
+      name: "Selected mode — Freeform",
+    });
+    expect(modeToggle.textContent).to.equal("Mode");
+    fireEvent.click(modeToggle);
+
+    const modeMenu = document.querySelector<HTMLElement>(
+      ".ai-reviewer-panel-mode-menu",
+    );
+    expect(modeMenu).not.to.equal(null);
+    if (modeMenu == null) {
+      throw new Error("The header mode menu must render.");
+    }
+    expect(
+      within(modeMenu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).to.deep.equal(["Review", "Brainstorm", "Freeform"]);
+    expect(
+      within(modeMenu)
+        .getByRole("menuitem", { name: "Freeform" })
+        .classList.contains("active"),
+    ).to.equal(true);
+
+    fireEvent.click(within(modeMenu).getByRole("menuitem", { name: "Review" }));
+    expect(
+      screen.getByRole("button", { name: "Selected mode — Review" })
         .textContent,
-    ).to.equal("Freeform");
+    ).to.equal("Mode");
+
+    fireEvent.click(screen.getByRole("button", { name: "More options" }));
+    const overflowMode = document.querySelector<HTMLElement>(
+      ".ai-reviewer-panel-overflow-mode",
+    );
+    expect(overflowMode).not.to.equal(null);
+    if (overflowMode == null) {
+      throw new Error("The overflow mode section must render.");
+    }
+    expect(
+      within(overflowMode)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).to.deep.equal(["Review", "Brainstorm", "Freeform"]);
+    expect(
+      within(overflowMode)
+        .getByRole("menuitem", { name: "Review" })
+        .classList.contains("active"),
+    ).to.equal(true);
   });
 
   it("sends a document-bound Agent turn with the selected review mode", async function () {
@@ -630,7 +702,7 @@ describe("AI reviewer: context-driven panel", function () {
     fireEvent.click(
       screen.getByRole("button", { name: "Selected mode — Freeform" }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "Review mode" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review" }));
     typeConversationMessage("Review chapter 3 as a referee.");
     await screen.findByText("A precise explanation.");
 
@@ -640,9 +712,9 @@ describe("AI reviewer: context-driven panel", function () {
     expect(request.scope?.kind).to.equal("document");
     expect(request.agentSessionId).to.equal("review-mode-discussion");
     expect(
-      screen.getByRole("button", { name: "Selected mode — Review mode" })
+      screen.getByRole("button", { name: "Selected mode — Review" })
         .textContent,
-    ).to.equal("Review mode");
+    ).to.equal("Mode");
   });
 
   it("sends a document-bound Agent turn with brainstorm mode", async function () {
@@ -656,7 +728,7 @@ describe("AI reviewer: context-driven panel", function () {
     fireEvent.click(
       screen.getByRole("button", { name: "Selected mode — Freeform" }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm mode" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm" }));
     typeConversationMessage("Generate alternative explanations.");
     await screen.findByText("A precise explanation.");
 
@@ -666,9 +738,9 @@ describe("AI reviewer: context-driven panel", function () {
     expect(request.agentSessionId).to.equal("brainstorm-mode-discussion");
     expect(
       screen.getByRole("button", {
-        name: "Selected mode — Brainstorm mode",
+        name: "Selected mode — Brainstorm",
       }).textContent,
-    ).to.equal("Brainstorm mode");
+    ).to.equal("Mode");
   });
 
   it("keeps earlier run findings visible while brainstorm mode is active", async function () {
@@ -680,7 +752,7 @@ describe("AI reviewer: context-driven panel", function () {
     fireEvent.click(
       screen.getByRole("button", { name: "Selected mode — Freeform" }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm mode" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Brainstorm" }));
 
     expect(within(run).getByRole("region", { name: "Review findings" })).to
       .exist;

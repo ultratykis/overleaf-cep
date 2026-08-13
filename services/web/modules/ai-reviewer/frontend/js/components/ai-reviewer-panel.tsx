@@ -16,6 +16,7 @@ import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
 import { useProjectContext } from "@/shared/context/project-context";
+import { useResizeObserver } from "@/shared/hooks/use-resize-observer";
 import type { TFunction } from "i18next";
 import {
   lazy,
@@ -481,6 +482,120 @@ function modelOptionLabel(
   )}`;
 }
 
+function AiReviewerModelMenuContents({
+  duplicateModelNames,
+  filteredModels,
+  modelQuery,
+  runModel,
+  searchId,
+  setModelQuery,
+  setSelectedModel,
+  t,
+}: {
+  duplicateModelNames: Set<string>;
+  filteredModels: AiProviderModel[];
+  modelQuery: string;
+  runModel: AiProviderModel | null;
+  searchId: string;
+  setModelQuery: (query: string) => void;
+  setSelectedModel: (selection: WorkspaceModelSelection) => void;
+  t: TFunction<"translation">;
+}) {
+  return (
+    <>
+      <div
+        className="ai-reviewer-panel-model-search"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <OLFormLabel className="visually-hidden" htmlFor={searchId}>
+          {t("ai_reviewer_model_filter")}
+        </OLFormLabel>
+        <OLFormControl
+          id={searchId}
+          type="text"
+          value={modelQuery}
+          placeholder={t("ai_reviewer_model_filter")}
+          autoComplete="off"
+          onChange={(event) => setModelQuery(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+              return;
+            }
+            // @restart/ui leaves arrow keys inside form controls. Move
+            // explicitly into this filtered menu without changing its query.
+            const options = event.currentTarget
+              .closest(".ai-reviewer-panel-portaled-menu")
+              ?.querySelectorAll<HTMLElement>(
+                '.ai-reviewer-panel-model-option[role="menuitem"]:not(:disabled)',
+              );
+            const option =
+              options == null
+                ? undefined
+                : event.key === "ArrowDown"
+                  ? options[0]
+                  : options[options.length - 1];
+            if (option == null) return;
+            event.preventDefault();
+            event.stopPropagation();
+            option.focus();
+          }}
+        />
+      </div>
+      {filteredModels.map((candidate) => (
+        <OLDropdownMenuItem
+          key={modelKey(candidate)}
+          as="button"
+          className="ai-reviewer-panel-model-option"
+          active={candidate === runModel}
+          aria-label={modelOptionLabel(
+            candidate,
+            duplicateModelNames.has(
+              candidate.displayName.trim().toLocaleLowerCase(),
+            ),
+            t,
+          )}
+          onClick={() => {
+            setSelectedModel({
+              connectionId: candidate.connectionId,
+              model: candidate.id,
+            });
+            setModelQuery("");
+          }}
+        >
+          <span className="ai-reviewer-panel-model-option-name">
+            {`${candidate.displayName}${
+              duplicateModelNames.has(
+                candidate.displayName.trim().toLocaleLowerCase(),
+              )
+                ? ` — ${candidate.id}`
+                : ""
+            } (${candidate.connectionLabel})`}
+          </span>
+          <span
+            className="ai-reviewer-panel-model-option-context"
+            title={modelContextLabel(
+              candidate.contextLength,
+              candidate.contextLengthSource,
+              t,
+            )}
+          >
+            {`· ${modelContextShortLabel(
+              candidate.contextLength,
+              candidate.contextLengthSource,
+              t,
+            )}`}
+          </span>
+        </OLDropdownMenuItem>
+      ))}
+      {filteredModels.length === 0 && (
+        <p className="ai-reviewer-panel-model-empty" role="status">
+          {t("ai_reviewer_model_filter_empty")}
+        </p>
+      )}
+    </>
+  );
+}
+
 const portaledMenuPopperConfig = {
   strategy: "fixed" as const,
   modifiers: [
@@ -495,12 +610,16 @@ const portaledMenuPopperConfig = {
   ],
 };
 
+const AI_REVIEWER_NARROW_PANEL_WIDTH = 340;
+
 function AiReviewerPortaledMenu({
   children,
   className,
+  narrow = false,
 }: {
   children: ReactNode;
   className: string;
+  narrow?: boolean;
 }) {
   if (typeof document === "undefined") {
     return null;
@@ -510,7 +629,9 @@ function AiReviewerPortaledMenu({
       flip
       // Body portals sit outside the editor's theme boundary. Reuse the host
       // marker that its file-tree and tab context menus use for both themes.
-      className={`ide-redesign-main ai-reviewer-panel-portaled-menu ${className}`}
+      className={`ide-redesign-main ai-reviewer-panel-portaled-menu ${
+        narrow ? "ai-reviewer-panel-portaled-menu-narrow " : ""
+      }${className}`}
       popperConfig={portaledMenuPopperConfig}
     >
       {children}
@@ -901,6 +1022,32 @@ function reviewModeLabel(mode: ReviewMode, t: TFunction<"translation">) {
     default:
       return t("ai_reviewer_mode_none");
   }
+}
+
+const reviewModes = ["referee-review", "brainstorm", null] as const;
+
+function AiReviewerModeMenuItems({
+  disabled,
+  selectedMode,
+  setSelectedMode,
+  t,
+}: {
+  disabled: boolean;
+  selectedMode: ReviewMode;
+  setSelectedMode: (mode: ReviewMode) => void;
+  t: TFunction<"translation">;
+}) {
+  return reviewModes.map((mode) => (
+    <OLDropdownMenuItem
+      key={mode ?? "none"}
+      as="button"
+      active={mode === selectedMode}
+      disabled={disabled}
+      onClick={() => setSelectedMode(mode)}
+    >
+      {reviewModeLabel(mode, t)}
+    </OLDropdownMenuItem>
+  ));
 }
 
 function discussionSubjectLabel(
@@ -1578,6 +1725,13 @@ export function AiReviewerPanelView({
   >(null);
   const [models, setModels] = useState<AiProviderModel[]>([]);
   const [modelQuery, setModelQuery] = useState("");
+  const [narrowPanel, setNarrowPanel] = useState(false);
+  const handlePanelResize = useCallback((element: Element) => {
+    setNarrowPanel(
+      (element as HTMLElement).clientWidth < AI_REVIEWER_NARROW_PANEL_WIDTH,
+    );
+  }, []);
+  const { elementRef: panelRef } = useResizeObserver(handlePanelResize);
   const [connectionCatalogError, setConnectionCatalogError] = useState(false);
   const [modelCatalogError, setModelCatalogError] = useState(false);
   const [modelFailures, setModelFailures] = useState<AiProviderModelFailure[]>(
@@ -5844,6 +5998,7 @@ export function AiReviewerPanelView({
   );
   return (
     <section
+      ref={panelRef}
       aria-label={t("ai_reviewer_title")}
       className="ai-reviewer-panel"
       data-testid="ai-reviewer-panel"
@@ -5887,7 +6042,7 @@ export function AiReviewerPanelView({
             what chooses the connection, so no separate picker is offered. With
             no connection at all there is nothing to choose between. */}
         {activeDiscussion == null && connectedModels.length > 0 && (
-          <Dropdown align="start">
+          <Dropdown align="start" className="ai-reviewer-panel-header-model">
             <DropdownToggle
               bsPrefix="ai-reviewer-panel-model-chip"
               variant="ghost"
@@ -5898,98 +6053,37 @@ export function AiReviewerPanelView({
               {selectedModelLabel}
             </DropdownToggle>
             <AiReviewerPortaledMenu className="ai-reviewer-panel-model-menu">
-              <div
-                className="ai-reviewer-panel-model-search"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <OLFormLabel
-                  className="visually-hidden"
-                  htmlFor="ai-reviewer-model-search"
-                >
-                  {t("ai_reviewer_model_filter")}
-                </OLFormLabel>
-                <OLFormControl
-                  id="ai-reviewer-model-search"
-                  type="text"
-                  value={modelQuery}
-                  placeholder={t("ai_reviewer_model_filter")}
-                  autoComplete="off"
-                  onChange={(event) => setModelQuery(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
-                      return;
-                    }
-                    // @restart/ui leaves arrow keys inside form controls. Move
-                    // explicitly into this filtered menu without changing its query.
-                    const options = event.currentTarget
-                      .closest(".ai-reviewer-panel-model-menu")
-                      ?.querySelectorAll<HTMLElement>(
-                        '[role="menuitem"]:not(:disabled)',
-                      );
-                    const option =
-                      options == null
-                        ? undefined
-                        : event.key === "ArrowDown"
-                          ? options[0]
-                          : options[options.length - 1];
-                    if (option == null) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    option.focus();
-                  }}
-                />
-              </div>
-              {filteredModels.map((candidate) => (
-                <OLDropdownMenuItem
-                  key={modelKey(candidate)}
-                  as="button"
-                  className="ai-reviewer-panel-model-option"
-                  active={candidate === runModel}
-                  aria-label={modelOptionLabel(
-                    candidate,
-                    duplicateModelNames.has(
-                      candidate.displayName.trim().toLocaleLowerCase(),
-                    ),
-                    t,
-                  )}
-                  onClick={() => {
-                    setSelectedModel({
-                      connectionId: candidate.connectionId,
-                      model: candidate.id,
-                    });
-                    setModelQuery("");
-                  }}
-                >
-                  <span className="ai-reviewer-panel-model-option-name">
-                    {`${candidate.displayName}${
-                      duplicateModelNames.has(
-                        candidate.displayName.trim().toLocaleLowerCase(),
-                      )
-                        ? ` — ${candidate.id}`
-                        : ""
-                    } (${candidate.connectionLabel})`}
-                  </span>
-                  <span
-                    className="ai-reviewer-panel-model-option-context"
-                    title={modelContextLabel(
-                      candidate.contextLength,
-                      candidate.contextLengthSource,
-                      t,
-                    )}
-                  >
-                    {`· ${modelContextShortLabel(
-                      candidate.contextLength,
-                      candidate.contextLengthSource,
-                      t,
-                    )}`}
-                  </span>
-                </OLDropdownMenuItem>
-              ))}
-              {filteredModels.length === 0 && (
-                <p className="ai-reviewer-panel-model-empty" role="status">
-                  {t("ai_reviewer_model_filter_empty")}
-                </p>
-              )}
+              <AiReviewerModelMenuContents
+                duplicateModelNames={duplicateModelNames}
+                filteredModels={filteredModels}
+                modelQuery={modelQuery}
+                runModel={runModel}
+                searchId="ai-reviewer-model-search"
+                setModelQuery={setModelQuery}
+                setSelectedModel={setSelectedModel}
+                t={t}
+              />
+            </AiReviewerPortaledMenu>
+          </Dropdown>
+        )}
+        {!noConnections && (
+          <Dropdown align="start" className="ai-reviewer-panel-header-mode">
+            <DropdownToggle
+              bsPrefix="ai-reviewer-panel-mode-chip"
+              variant="ghost"
+              size="sm"
+              aria-label={selectedModeDescription}
+              disabled={busy || answerStreaming}
+            >
+              {t("ai_reviewer_mode")}
+            </DropdownToggle>
+            <AiReviewerPortaledMenu className="ai-reviewer-panel-mode-menu">
+              <AiReviewerModeMenuItems
+                disabled={busy || answerStreaming}
+                selectedMode={selectedMode}
+                setSelectedMode={setSelectedMode}
+                t={t}
+              />
             </AiReviewerPortaledMenu>
           </Dropdown>
         )}
@@ -6009,7 +6103,48 @@ export function AiReviewerPanelView({
               </DropdownToggle>
             </span>
           </OLTooltip>
-          <AiReviewerPortaledMenu className="ai-reviewer-panel-overflow-menu">
+          <AiReviewerPortaledMenu
+            className="ai-reviewer-panel-overflow-menu"
+            narrow={narrowPanel}
+          >
+            <div className="ai-reviewer-panel-overflow-narrow">
+              <div
+                className="ai-reviewer-panel-overflow-section ai-reviewer-panel-overflow-mode"
+                role="group"
+                aria-label={t("ai_reviewer_mode")}
+              >
+                <div className="ai-reviewer-panel-overflow-section-title">
+                  {t("ai_reviewer_mode")}
+                </div>
+                <AiReviewerModeMenuItems
+                  disabled={busy || answerStreaming}
+                  selectedMode={selectedMode}
+                  setSelectedMode={setSelectedMode}
+                  t={t}
+                />
+              </div>
+              {activeDiscussion == null && connectedModels.length > 0 && (
+                <div
+                  className="ai-reviewer-panel-overflow-section ai-reviewer-panel-overflow-model"
+                  role="group"
+                  aria-label={t("model")}
+                >
+                  <div className="ai-reviewer-panel-overflow-section-title">
+                    {t("model")}
+                  </div>
+                  <AiReviewerModelMenuContents
+                    duplicateModelNames={duplicateModelNames}
+                    filteredModels={filteredModels}
+                    modelQuery={modelQuery}
+                    runModel={runModel}
+                    searchId="ai-reviewer-overflow-model-search"
+                    setModelQuery={setModelQuery}
+                    setSelectedModel={setSelectedModel}
+                    t={t}
+                  />
+                </div>
+              )}
+            </div>
             <OLDropdownMenuItem
               as="button"
               disabled={
@@ -6209,36 +6344,6 @@ export function AiReviewerPanelView({
                 </div>
               </div>
             )}
-            <div
-              className="ai-reviewer-panel-mode-row"
-              data-testid="ai-reviewer-mode-row"
-            >
-              <Dropdown align="start">
-                <DropdownToggle
-                  bsPrefix="ai-reviewer-panel-mode-chip"
-                  variant="ghost"
-                  size="sm"
-                  aria-label={selectedModeDescription}
-                  disabled={busy || answerStreaming}
-                >
-                  {selectedModeLabel}
-                </DropdownToggle>
-                <AiReviewerPortaledMenu className="ai-reviewer-panel-mode-menu">
-                  {(["referee-review", "brainstorm", null] as const).map(
-                    (mode) => (
-                      <OLDropdownMenuItem
-                        key={mode ?? "none"}
-                        as="button"
-                        active={mode === selectedMode}
-                        onClick={() => setSelectedMode(mode)}
-                      >
-                        {reviewModeLabel(mode, t)}
-                      </OLDropdownMenuItem>
-                    ),
-                  )}
-                </AiReviewerPortaledMenu>
-              </Dropdown>
-            </div>
             <div className="ai-reviewer-panel-composer">
               <MessageInput
                 sendMessage={submitConversationMessage}
