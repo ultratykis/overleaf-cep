@@ -51,6 +51,7 @@ export const AiReviewerProviderConnectionSchema = new mongoose.Schema(
     // The escape hatch for a model whose advertised context length is wrong.
     // The effective value is resolved per review, not stored here.
     contextLengthOverride: contextLength,
+    supportsImages: { type: Boolean },
     reasoningModelCompatibility: { type: Boolean },
     // The parent document revision serializes all connection writes. This
     // connection-local revision distinguishes a real edit/delete conflict

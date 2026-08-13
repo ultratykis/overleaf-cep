@@ -15,6 +15,7 @@ export const AI_REVIEWER_COMPLETION_LOG_MESSAGE =
 const INTERNAL_FAILURE_CODE_PATTERN = /^AI_[A-Z0-9_]{1,125}$/u;
 const COMPLETION_TOOL_NAMES = new Set([
   "read_project_file",
+  "read_project_figure",
   "read_skill",
   "search_zotero",
   "report_subject",

@@ -53,12 +53,47 @@ import {
 
 export const AI_REVIEWER_TOOL_NAMES = Object.freeze({
   readProjectFile: "read_project_file",
+  readProjectFigure: "read_project_figure",
   readSkill: "read_skill",
   searchZotero: "search_zotero",
   reportSubject: "report_subject",
   reportFinding: "report_finding",
   proposeSuggestion: "propose_suggestion",
 });
+
+const ReadProjectFigureArgumentsSchema = z
+  .object({ path: ProjectRelativePathSchema })
+  .strict();
+const ProjectFigureResultSchema = z
+  .object({
+    path: ProjectRelativePathSchema,
+    mediaType: z.enum(["image/png", "image/jpeg"]),
+    bytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(4 * 1024 * 1024),
+    data: z.string(),
+  })
+  .strict();
+
+export function projectFigureModelOutput(output) {
+  const value = ProjectFigureResultSchema.parse(output);
+  return {
+    type: "content",
+    value: [
+      {
+        type: "text",
+        text: `${value.path} (${value.mediaType}, ${value.bytes} bytes)`,
+      },
+      {
+        type: "file-data",
+        data: value.data,
+        mediaType: value.mediaType,
+      },
+    ],
+  };
+}
 
 /**
  * @import {
@@ -484,6 +519,9 @@ export const SYSTEM_INSTRUCTION = [
   "Use search_zotero only to investigate a citation issue.",
   "Call propose_suggestion only for a concrete edit that is fully supported by the active scope.",
 ].join(" ");
+
+const READ_PROJECT_FIGURE_INSTRUCTION =
+  "Use read_project_figure only when a project figure is needed to answer the request.";
 
 const FINDING_INSTRUCTION = [
   "When report_finding is available, put every issue worth tracking in that tool instead of only describing it in prose.",
@@ -964,30 +1002,71 @@ export function assertNoGlobalTelemetryIntegration() {
  * at the per-model stream boundary without mutating process-global state.
  * Tools hidden by product policy remain parseable by the SDK so the gateway
  * can return its specific refusal code, but are removed from provider params.
+ * AI SDK 7 normalizes legacy `file-data` output to its v4 `file` shape before
+ * calling v3 models; restore the shape the installed Gemini converter accepts.
  *
  * @param {object} model
  * @param {ReadonlySet<string>} hiddenProviderTools
+ * @param {boolean} restoreFigureFileData
  */
-function withoutProviderWarnings(model, hiddenProviderTools) {
+function withoutProviderWarnings(
+  model,
+  hiddenProviderTools,
+  restoreFigureFileData,
+) {
   return wrapLanguageModel({
     model,
     middleware: {
       specificationVersion: "v3",
       transformParams({ params, type }) {
-        if (
-          type !== "stream" ||
-          hiddenProviderTools.size === 0 ||
-          params.tools == null
-        ) {
+        if (type !== "stream") {
           return params;
         }
+        const prompt = restoreFigureFileData
+          ? params.prompt.map((message) => ({
+              ...message,
+              content: Array.isArray(message.content)
+                ? message.content.map((part) => {
+                    if (
+                      part.type !== "tool-result" ||
+                      part.toolName !==
+                        AI_REVIEWER_TOOL_NAMES.readProjectFigure ||
+                      part.output.type !== "content"
+                    ) {
+                      return part;
+                    }
+                    return {
+                      ...part,
+                      output: {
+                        ...part.output,
+                        value: part.output.value.map((value) =>
+                          value.type === "file" &&
+                          value.data.type === "data"
+                            ? {
+                                type: "file-data",
+                                data: value.data.data,
+                                mediaType: value.mediaType,
+                              }
+                            : value,
+                        ),
+                      },
+                    };
+                  })
+                : message.content,
+            }))
+          : params.prompt;
         return {
           ...params,
-          tools: params.tools.filter(
-            (toolDefinition) =>
-              toolDefinition.type !== "function" ||
-              !hiddenProviderTools.has(toolDefinition.name),
-          ),
+          prompt,
+          ...(hiddenProviderTools.size === 0 || params.tools == null
+            ? {}
+            : {
+                tools: params.tools.filter(
+                  (toolDefinition) =>
+                    toolDefinition.type !== "function" ||
+                    !hiddenProviderTools.has(toolDefinition.name),
+                ),
+              }),
         };
       },
       async wrapStream({ doStream, params }) {
@@ -2464,8 +2543,13 @@ export class AiSdkAgentGateway {
    *   contextLengthSource?: unknown,
    *   skills?: readonly unknown[],
    *   modeInstructions?: unknown,
+   *   supportsImages?: boolean,
    *   readProjectFile: (
    *     input: z.infer<typeof ReadProjectFileArgumentsSchema>,
+   *     context: { request: AgentRequest, signal?: AbortSignal },
+   *   ) => unknown | Promise<unknown>,
+   *   readProjectFigure?: (
+   *     input: z.infer<typeof ReadProjectFigureArgumentsSchema>,
    *     context: { request: AgentRequest, signal?: AbortSignal },
    *   ) => unknown | Promise<unknown>,
    *   projectContext?: unknown,
@@ -2490,7 +2574,9 @@ export class AiSdkAgentGateway {
     contextLengthSource,
     skills = [],
     modeInstructions = {},
+    supportsImages = false,
     readProjectFile,
+    readProjectFigure,
     projectContext,
     searchZotero,
     validateEvidence,
@@ -2542,6 +2628,15 @@ export class AiSdkAgentGateway {
     if (typeof readProjectFile !== "function") {
       throw new TypeError("readProjectFile must be a function.");
     }
+    if (typeof supportsImages !== "boolean") {
+      throw new TypeError("supportsImages must be a boolean.");
+    }
+    if (
+      readProjectFigure !== undefined &&
+      typeof readProjectFigure !== "function"
+    ) {
+      throw new TypeError("readProjectFigure must be a function.");
+    }
     if (searchZotero !== undefined && typeof searchZotero !== "function") {
       throw new TypeError("searchZotero must be a function.");
     }
@@ -2560,7 +2655,9 @@ export class AiSdkAgentGateway {
     this.maxModelInputTokens = maxModelInputTokens;
     this.skills = boundedSkills;
     this.modeInstructions = boundedInstructions;
+    this.supportsImages = supportsImages;
     this.readProjectFile = readProjectFile;
+    this.readProjectFigure = readProjectFigure ?? null;
     this.projectContext = projectContext;
     this.searchZotero = searchZotero ?? null;
     this.validateEvidence = validateEvidence ?? null;
@@ -2597,6 +2694,10 @@ export class AiSdkAgentGateway {
       ReadProjectFileArgumentsSchema,
       this.provider,
     );
+    const readProjectFigureProviderSchema = providerToolSchema(
+      ReadProjectFigureArgumentsSchema,
+      this.provider,
+    );
     const readSkillProviderSchema = providerToolSchema(
       ReadSkillArgumentsSchema,
       this.provider,
@@ -2624,6 +2725,8 @@ export class AiSdkAgentGateway {
     );
     const providerToolInputSchemas = Object.freeze({
       [AI_REVIEWER_TOOL_NAMES.readProjectFile]: readProjectFileProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.readProjectFigure]:
+        readProjectFigureProviderSchema,
       [AI_REVIEWER_TOOL_NAMES.readSkill]: readSkillProviderSchema,
       [AI_REVIEWER_TOOL_NAMES.searchZotero]: zoteroSearchProviderSchema,
       [AI_REVIEWER_TOOL_NAMES.reportSubject]: subjectProviderSchema,
@@ -2644,15 +2747,18 @@ export class AiSdkAgentGateway {
       : [];
     const customModeInstruction =
       request.skill == null ? undefined : this.modeInstructions[request.skill];
+    const readProjectFigureAllowed =
+      !selectionTransform &&
+      this.supportsImages &&
+      this.readProjectFigure != null;
     const systemInstructionAuthorContent = [
       ...storedSkills.flatMap(({ name, description }) => [name, description]),
       ...(customModeInstruction == null ? [] : [customModeInstruction]),
     ];
-    const instructions = systemInstructionForRequest(
-      request,
-      storedSkills,
-      this.modeInstructions,
-    );
+    const instructions = [
+      systemInstructionForRequest(request, storedSkills, this.modeInstructions),
+      ...(readProjectFigureAllowed ? [READ_PROJECT_FIGURE_INSTRUCTION] : []),
+    ].join("\n\n");
     const messages = formatAgentMessages(
       request,
       projectWide ? this.projectContext : null,
@@ -2931,6 +3037,22 @@ export class AiSdkAgentGateway {
             },
           );
         }
+      } else if (
+        toolCall.toolName === "read_project_figure" &&
+        readProjectFigureAllowed
+      ) {
+        if (
+          !ReadProjectFigureArgumentsSchema.safeParse(toolCall.input).success
+        ) {
+          error = gatewayError(
+            "The AI provider returned invalid figure-read arguments.",
+            {
+              code: "AI_TOOL_INPUT_INVALID",
+              category: "schema",
+              retryable: false,
+            },
+          );
+        }
       } else if (toolCall.toolName === "read_skill" && readSkillAllowed) {
         if (!ReadSkillArgumentsSchema.safeParse(toolCall.input).success) {
           error = gatewayError(
@@ -3041,6 +3163,7 @@ export class AiSdkAgentGateway {
         ? ["propose_suggestion"]
         : [
             "read_project_file",
+            ...(readProjectFigureAllowed ? ["read_project_figure"] : []),
             ...(readSkillAllowed ? ["read_skill"] : []),
             ...(zoteroSearchAllowed ? ["search_zotero"] : []),
             "report_subject",
@@ -3053,6 +3176,7 @@ export class AiSdkAgentGateway {
       const requestModel = withoutProviderWarnings(
         createSdkRequestModel(this.model, signal),
         hiddenProviderTools,
+        readProjectFigureAllowed && this.provider === "gemini",
       );
       assertNoGlobalTelemetryIntegration();
       // Invalid inputs already return through the SDK's tool-error continuation,
@@ -3150,6 +3274,68 @@ export class AiSdkAgentGateway {
                 throw error;
               }
             },
+          }),
+          [AI_REVIEWER_TOOL_NAMES.readProjectFigure]: tool({
+            description: "Read one PNG or JPEG project figure as image input.",
+            inputSchema:
+              providerToolInputSchemas[
+                AI_REVIEWER_TOOL_NAMES.readProjectFigure
+              ],
+            strict: strictProviderTools,
+            execute: async (toolInput, { toolCallId }) => {
+              try {
+                if (terminalToolPolicyError != null) {
+                  throw terminalToolPolicyError;
+                }
+                const readProjectFigure = this.readProjectFigure;
+                if (!readProjectFigureAllowed || readProjectFigure == null) {
+                  throw gatewayError(
+                    "Project figure reading is not available.",
+                    {
+                      code: "AI_TOOL_NOT_ALLOWED",
+                      category: "schema",
+                      retryable: false,
+                    },
+                  );
+                }
+                readToolCallCount += 1;
+                if (readToolCallCount > readToolCallLimit) {
+                  throw gatewayError(
+                    "The AI provider exceeded the read-tool call limit.",
+                    {
+                      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
+                      category: "schema",
+                      retryable: false,
+                    },
+                  );
+                }
+                const parsed =
+                  ReadProjectFigureArgumentsSchema.parse(toolInput);
+                const value = ProjectFigureResultSchema.parse(
+                  await readProjectFigure(parsed, { request, signal }),
+                );
+                if (value.path !== parsed.path) {
+                  throw gatewayError(
+                    "The project figure reader returned a different path.",
+                    {
+                      code: "AI_PROJECT_CONTENT_NOT_AVAILABLE",
+                      category: "configuration",
+                      retryable: false,
+                    },
+                  );
+                }
+                return value;
+              } catch (error) {
+                if (error instanceof AgentGatewayError) {
+                  const localError = localGatewayError(error);
+                  recoverableSdkToolErrorIds.add(toolCallId);
+                  throw localError;
+                }
+                terminalToolExecutionFailed = true;
+                throw error;
+              }
+            },
+            toModelOutput: ({ output }) => projectFigureModelOutput(output),
           }),
           [AI_REVIEWER_TOOL_NAMES.readSkill]: tool({
             description:

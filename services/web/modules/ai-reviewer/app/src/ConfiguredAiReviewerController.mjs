@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { expressify } from "@overleaf/promise-utils";
 import Settings from "@overleaf/settings";
 
+import HistoryManager from "../../../../app/src/Features/History/HistoryManager.mjs";
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
 import { createAiReviewerProviderCircuitBreakerStore } from "../models/AiReviewerProviderCircuitBreaker.mjs";
@@ -45,6 +46,7 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
+import { createProjectFigureReader } from "./ProjectFigureReader.mjs";
 import {
   authenticatedUserId,
   createRequestScopeReader,
@@ -364,6 +366,7 @@ async function resolveRunConfiguration(
     ...(connection.reasoningModelCompatibility === true
       ? { reasoningModelCompatibility: true }
       : {}),
+    ...(connection.supportsImages === true ? { supportsImages: true } : {}),
     model,
     ...resolution,
   });
@@ -537,6 +540,9 @@ export function createConfiguredAiReviewerController({
         skills,
         modeInstructions,
         readProjectFile: scope.readProjectFile,
+        ...(scope.readProjectFigure == null
+          ? {}
+          : { readProjectFigure: scope.readProjectFigure }),
         projectContext: scope.projectContext,
         searchZotero: scope.searchZotero,
         validateEvidence: scope.validateEvidence,
@@ -609,6 +615,10 @@ const providerService = createAiReviewerProviderService({
 const configStore = createAiReviewerProviderConfigStore();
 const requestScopeReader = createRequestScopeReader({
   loadProjectDocuments,
+  loadProjectFigure: createProjectFigureReader({
+    getAllFiles: ProjectEntityHandler.promises.getAllFiles,
+    requestBlobWithProjectId: HistoryManager.promises.requestBlobWithProjectId,
+  }),
   isZoteroLinked(userId) {
     return ZoteroApiClient.isLinked(userId);
   },

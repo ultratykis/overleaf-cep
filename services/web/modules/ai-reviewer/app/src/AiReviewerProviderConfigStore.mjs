@@ -184,6 +184,7 @@ function coreConnectionInput(value) {
     ...(value?.contextLengthOverride == null
       ? {}
       : { contextLengthOverride: value.contextLengthOverride }),
+    ...(value?.supportsImages === true ? { supportsImages: true } : {}),
     ...(value?.reasoningModelCompatibility === true
       ? { reasoningModelCompatibility: true }
       : {}),
@@ -572,6 +573,7 @@ export function createAiReviewerProviderConfigStore({
       ...(config.contextLengthOverrides == null
         ? {}
         : { contextLengthOverrides: config.contextLengthOverrides }),
+      ...(config.supportsImages === true ? { supportsImages: true } : {}),
       ...(config.reasoningModelCompatibility === true
         ? { reasoningModelCompatibility: true }
         : {}),

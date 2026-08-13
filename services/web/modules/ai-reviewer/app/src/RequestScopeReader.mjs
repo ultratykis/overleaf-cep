@@ -5,6 +5,7 @@ import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { estimateAgentPromptTokens } from "./AiReviewerPrompt.mjs";
 import { modelInputTokenBudget } from "./ModelContextBudget.mjs";
 import { createProjectSnapshot } from "./ProjectSnapshot.mjs";
+import { PROJECT_FIGURE_MODEL_INPUT_TOKENS } from "./ProjectFigureReader.mjs";
 
 function rejected() {
   return new AgentGatewayError(
@@ -73,6 +74,11 @@ function requestIdentity(input) {
  *     projectId: string,
  *     options: { signal?: AbortSignal },
  *   ) => unknown | Promise<unknown>,
+ *   loadProjectFigure?: (
+ *     projectId: string,
+ *     input: { path: string },
+ *     options: { signal?: AbortSignal },
+ *   ) => unknown | Promise<unknown>,
  *   isZoteroLinked?: (userId: string) => boolean | Promise<boolean>,
  *   searchZoteroItems?: (
  *     userId: string,
@@ -83,6 +89,7 @@ function requestIdentity(input) {
  */
 export function createRequestScopeReader({
   loadProjectDocuments,
+  loadProjectFigure,
   isZoteroLinked,
   searchZoteroItems,
 } = {}) {
@@ -145,6 +152,27 @@ export function createRequestScopeReader({
             ? (input, { signal }) =>
                 searchZoteroItems(userId, input, { signal })
             : undefined;
+        const readProjectFigure =
+          typeof loadProjectFigure === "function"
+            ? async (input, { request: active, signal }) => {
+                const activeRequest = AgentRequestSchema.safeParse(active);
+                if (
+                  !activeRequest.success ||
+                  activeRequest.data.projectId !== request.projectId
+                ) {
+                  throw rejected();
+                }
+                const result = await loadProjectFigure(
+                  request.projectId,
+                  input,
+                  { signal },
+                );
+                snapshot.chargeModelInputTokens(
+                  PROJECT_FIGURE_MODEL_INPUT_TOKENS,
+                );
+                return result;
+              }
+            : undefined;
 
         return Object.freeze({
           userId,
@@ -152,6 +180,7 @@ export function createRequestScopeReader({
           kind: "project",
           projectContext: snapshot.context,
           readProjectFile: snapshot.readProjectFile,
+          ...(readProjectFigure === undefined ? {} : { readProjectFigure }),
           searchZotero,
           validateEvidence: snapshot.validateEvidence,
         });
@@ -182,25 +211,10 @@ export function createRequestScopeReader({
       });
       let snapshotPromise;
 
-      /**
-       * @param {any} input
-       * @param {{ request: unknown, signal?: AbortSignal }} options
-       */
-      async function readProjectFile(input, { request: active, signal }) {
-        if (signal?.aborted) {
-          throw signal.reason instanceof AgentGatewayError
-            ? signal.reason
-            : new AgentGatewayAbortError();
-        }
-        if (
-          requestIdentity(active) !== identity ||
-          typeof loadProjectDocuments !== "function"
-        ) {
+      function projectSnapshot(signal) {
+        if (typeof loadProjectDocuments !== "function") {
           throw rejected();
         }
-        // The original scope remains the reporting authority. A project-shaped
-        // snapshot gives reads the project review's path, size, and budget
-        // protections without widening where artifacts may point.
         snapshotPromise ??= Promise.resolve(
           loadProjectDocuments(request.projectId, { signal }),
         ).then((documents) =>
@@ -211,12 +225,48 @@ export function createRequestScopeReader({
             modelRequest: request,
           }),
         );
-        const snapshot = await snapshotPromise;
+        return snapshotPromise;
+      }
+
+      /**
+       * @param {any} input
+       * @param {{ request: unknown, signal?: AbortSignal }} options
+       */
+      async function readProjectFile(input, { request: active, signal }) {
+        if (signal?.aborted) {
+          throw signal.reason instanceof AgentGatewayError
+            ? signal.reason
+            : new AgentGatewayAbortError();
+        }
+        if (requestIdentity(active) !== identity) {
+          throw rejected();
+        }
+        // The original scope remains the reporting authority. A project-shaped
+        // snapshot gives reads the project review's path, size, and budget
+        // protections without widening where artifacts may point.
+        const snapshot = await projectSnapshot(signal);
         return await snapshot.readProjectFile(input, {
           request: projectReadRequest,
           signal,
         });
       }
+
+      const readProjectFigure =
+        typeof loadProjectFigure === "function"
+          ? async (input, { request: active, signal }) => {
+              if (requestIdentity(active) !== identity) {
+                throw rejected();
+              }
+              const result = await loadProjectFigure(request.projectId, input, {
+                signal,
+              });
+              const snapshot = await projectSnapshot(signal);
+              snapshot.chargeModelInputTokens(
+                PROJECT_FIGURE_MODEL_INPUT_TOKENS,
+              );
+              return result;
+            }
+          : undefined;
 
       return Object.freeze({
         userId,
@@ -225,6 +275,7 @@ export function createRequestScopeReader({
         documentId: scope.documentId,
         path: scope.path,
         readProjectFile,
+        ...(readProjectFigure === undefined ? {} : { readProjectFigure }),
         searchZotero,
       });
     },

@@ -991,6 +991,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
      *   skills?: readonly unknown[],
      *   modeInstructions?: unknown,
      *   readProjectFile: Function,
+     *   readProjectFigure?: Function,
      *   projectContext?: unknown,
      *   searchZotero?: Function,
      *   validateEvidence?: Function,
@@ -1003,6 +1004,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
         skills,
         modeInstructions,
         readProjectFile,
+        readProjectFigure,
         projectContext,
         searchZotero,
         validateEvidence,
@@ -1016,9 +1018,18 @@ export function createAiReviewerProviderService(dependencies = {}) {
       return createTransport(config, connectionId).createAgentGateway({
         contextLength: config.contextLength,
         contextLengthSource: config.contextLengthSource,
+        // Chat Completions transports stringify `file-data` tool results, and
+        // Anthropic accepts that part only for PDFs. The installed Google
+        // transport forwards it as image input only for Gemini 3 models.
+        ...(config.supportsImages === true &&
+        config.provider === "gemini" &&
+        config.model.startsWith("gemini-3")
+          ? { supportsImages: true }
+          : {}),
         ...(skills === undefined ? {} : { skills }),
         ...(modeInstructions === undefined ? {} : { modeInstructions }),
         readProjectFile,
+        ...(readProjectFigure === undefined ? {} : { readProjectFigure }),
         projectContext,
         searchZotero,
         validateEvidence,

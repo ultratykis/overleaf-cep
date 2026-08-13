@@ -23,6 +23,7 @@ const ContextLengthSchema = z
   .int()
   .positive()
   .max(Number.MAX_SAFE_INTEGER);
+const SupportsImagesSchema = z.boolean();
 const ContextLengthOverridesSchema = z
   .array(
     z
@@ -340,6 +341,7 @@ const CONNECTION_KEYS = new Set([
   "label",
   "contextLengthOverride",
   "contextLengthOverrides",
+  "supportsImages",
   "reasoningModelCompatibility",
   "credential",
   "credentialUpdatedAt",
@@ -354,6 +356,7 @@ const CONNECTION_UPDATE_KEYS = new Set([
   "label",
   "contextLengthOverride",
   "contextLengthOverrides",
+  "supportsImages",
   "reasoningModelCompatibility",
   "credential",
 ]);
@@ -370,6 +373,7 @@ const RUN_CONFIG_KEYS = new Set([
   "model",
   "contextLength",
   "contextLengthSource",
+  "supportsImages",
   "reasoningModelCompatibility",
   "credential",
   "credentialUpdatedAt",
@@ -428,6 +432,9 @@ export function parseAiReviewerConnection(input) {
     value,
     destination,
   );
+  const supportsImages = Object.hasOwn(value, "supportsImages")
+    ? SupportsImagesSchema.parse(value.supportsImages)
+    : false;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -452,6 +459,7 @@ export function parseAiReviewerConnection(input) {
     label,
     ...(contextLengthOverride == null ? {} : { contextLengthOverride }),
     ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
+    ...(supportsImages ? { supportsImages: true } : {}),
     ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
@@ -485,6 +493,9 @@ export function parseAiReviewerConnectionUpdate(input) {
     value,
     destination,
   );
+  const supportsImages = Object.hasOwn(value, "supportsImages")
+    ? SupportsImagesSchema.parse(value.supportsImages)
+    : false;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -503,6 +514,7 @@ export function parseAiReviewerConnectionUpdate(input) {
     label,
     ...(contextLengthOverride === undefined ? {} : { contextLengthOverride }),
     ...(contextLengthOverrides === undefined ? {} : { contextLengthOverrides }),
+    ...(supportsImages ? { supportsImages: true } : {}),
     ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
   });
@@ -559,6 +571,9 @@ export function parseAiReviewerProviderConfig(input) {
   const contextLengthSource = Object.hasOwn(value, "contextLengthSource")
     ? ContextLengthSourceSchema.parse(value.contextLengthSource)
     : undefined;
+  const supportsImages = Object.hasOwn(value, "supportsImages")
+    ? SupportsImagesSchema.parse(value.supportsImages)
+    : false;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -604,6 +619,7 @@ export function parseAiReviewerProviderConfig(input) {
     model: config.model,
     contextLength,
     ...(contextLengthSource === undefined ? {} : { contextLengthSource }),
+    ...(supportsImages ? { supportsImages: true } : {}),
     ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
@@ -658,6 +674,7 @@ export function publicAiReviewerProviderConnection(input) {
           ? {}
           : { models: connection.models }),
       contextLengthOverride: connection.contextLengthOverride ?? null,
+      ...(connection.supportsImages ? { supportsImages: true } : {}),
       ...(connection.reasoningModelCompatibility
         ? { reasoningModelCompatibility: true }
         : {}),

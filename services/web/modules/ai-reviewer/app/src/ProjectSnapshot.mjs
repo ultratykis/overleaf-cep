@@ -514,9 +514,24 @@ export function createProjectSnapshot(
   }
 
   let fileExclusionsReported = exposesProjectContext;
+
+  /** @param {number} inputTokens */
+  function chargeModelInputTokens(inputTokens) {
+    if (
+      !Number.isSafeInteger(inputTokens) ||
+      inputTokens < 0 ||
+      inputTokens > maxModelInputTokens - modelInputTokens
+    ) {
+      modelInputBudgetFailureCount += 1;
+      throw modelContextTooSmall(contextLength, contextLengthSource);
+    }
+    modelInputTokens += inputTokens;
+  }
+
   const snapshot = {
     manifest: Object.freeze(manifest),
     context,
+    chargeModelInputTokens,
 
     /**
      * @param {unknown} input
@@ -559,11 +574,7 @@ export function createProjectSnapshot(
           : {}),
       });
       const resultTokens = estimateModelInputTokens(JSON.stringify(result));
-      if (resultTokens > maxModelInputTokens - modelInputTokens) {
-        modelInputBudgetFailureCount += 1;
-        throw modelContextTooSmall(contextLength, contextLengthSource);
-      }
-      modelInputTokens += resultTokens;
+      chargeModelInputTokens(resultTokens);
       fileExclusionsReported ||= reportFileExclusions;
       successfulReadCount += 1;
       return result;

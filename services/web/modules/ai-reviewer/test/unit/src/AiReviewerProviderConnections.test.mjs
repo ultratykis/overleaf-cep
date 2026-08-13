@@ -594,6 +594,30 @@ describe("AI reviewer provider connections", function () {
     );
   });
 
+  it("persists and reports optional image support", async function () {
+    const { records, store } = storeFixture();
+
+    const supported = await store.create(userId, {
+      ...geminiConnection,
+      supportsImages: true,
+    });
+
+    expect(supported.supportsImages).toBe(true);
+    expect((await store.get(userId, supported.id)).supportsImages).toBe(true);
+    expect(
+      publicAiReviewerProviderConnection(supported).config.supportsImages,
+    ).toBe(true);
+    expect(records.get(userId).connections[0]).toMatchObject({
+      supportsImages: true,
+    });
+
+    const existing = await store.create(otherUserId, geminiConnection);
+    expect(existing).not.toHaveProperty("supportsImages");
+    expect(await store.get(otherUserId, existing.id)).not.toHaveProperty(
+      "supportsImages",
+    );
+  });
+
   it("round-trips an OpenAI-compatible API version through connection details", async function () {
     const { records, store } = storeFixture();
 
