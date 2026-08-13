@@ -1076,7 +1076,7 @@ describe("AI reviewer: panel layout", function () {
     runSelectionReview();
 
     const run = await screen.findByRole("article", { name: "Review run 1" });
-    expect(within(run).getByText("Error")).to.exist;
+    expect(await within(run).findByText("Error")).to.exist;
     expect(
       within(run).getByText(
         "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",

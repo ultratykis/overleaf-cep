@@ -557,6 +557,22 @@ function selectionActionLabel(
   }
 }
 
+// The row only appears while a selection is active, so the visible label can
+// drop the word "selection"; the accessible name keeps the full phrase.
+function selectionActionShortLabel(
+  action: EditorSelectionSessionAction,
+  t: TFunction<"translation">,
+) {
+  switch (action) {
+    case "review":
+      return t("ai_reviewer_action_review");
+    case "rewrite":
+      return t("ai_reviewer_action_rewrite");
+    case "shorten":
+      return t("ai_reviewer_action_shorten");
+  }
+}
+
 function runTitle(
   runState: SelectionWorkspaceState,
   t: TFunction<"translation">,
@@ -6180,11 +6196,12 @@ export function AiReviewerPanelView({
                       variant={action === "review" ? "primary" : "secondary"}
                       size="sm"
                       disabled={busy}
+                      aria-label={selectionActionLabel(action, t)}
                       onClick={() => {
                         void runSelectionReview(action);
                       }}
                     >
-                      {selectionActionLabel(action, t)}
+                      {selectionActionShortLabel(action, t)}
                     </OLButton>
                   ))}
                 </div>
