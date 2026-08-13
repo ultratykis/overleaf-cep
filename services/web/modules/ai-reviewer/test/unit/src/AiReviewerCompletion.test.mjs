@@ -17,9 +17,10 @@ const localConnection = Object.freeze({
   label: "Local Ollama",
 });
 
-class FakeResponse {
+class FakeResponse extends EventEmitter {
   statusCode = 200;
   body = null;
+  writableEnded = false;
 
   status(statusCode) {
     this.statusCode = statusCode;
@@ -28,6 +29,7 @@ class FakeResponse {
 
   json(body) {
     this.body = body;
+    this.writableEnded = true;
     return this;
   }
 }
@@ -320,7 +322,7 @@ describe("AI reviewer: inline completion", function () {
       await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
 
       if (cause === "timeout") timeout.abort(new Error("timeout"));
-      else httpRequest.emit("close");
+      else response.emit("close");
       await work;
 
       expect(providerSignal.aborted).toBe(true);
@@ -331,6 +333,36 @@ describe("AI reviewer: inline completion", function () {
       });
     },
   );
+
+  it("ignores a response close that follows a finished response", async function () {
+    let providerSignal;
+    let resolveFetch;
+    const fetchImpl = vi.fn(async (_input, init) => {
+      providerSignal = init.signal;
+      return await new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+    });
+    const { controller } = fixture({ fetchImpl });
+    const response = new FakeResponse();
+    const work = controller.completion(request(), response);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+    // A keep-alive response stream can close after the answer was written;
+    // that must not read as a client disconnect.
+    response.writableEnded = true;
+    response.emit("close");
+    expect(providerSignal.aborted).toBe(false);
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await work;
+    expect(response.body).toEqual({ success: true, data: "ok" });
+  });
 
   it("allows three in-flight requests per user and rejects the fourth", async function () {
     const completions = [];

@@ -238,8 +238,15 @@ export function createAiReviewerCompletionController(dependencies) {
     try {
       const timeout = timeoutSignalFactory();
       const signal = AbortSignal.any([disconnected.signal, timeout]);
-      onClose = () => disconnected.abort(new Error("client disconnected"));
-      request.once?.("close", onClose);
+      // The request stream's "close" fires once the body is consumed, so it
+      // cannot signal a client disconnect. The response closes early only
+      // when the client goes away before the answer is written.
+      onClose = () => {
+        if (response.writableEnded !== true) {
+          disconnected.abort(new Error("client disconnected"));
+        }
+      };
+      response.once?.("close", onClose);
       let connection;
       try {
         connection = await configStore.get(userId, input.connectionId);
@@ -349,7 +356,7 @@ export function createAiReviewerCompletionController(dependencies) {
       );
       return sendError(response, 502, "provider");
     } finally {
-      if (onClose != null) request.removeListener?.("close", onClose);
+      if (onClose != null) response.removeListener?.("close", onClose);
       release(userId);
     }
   }
