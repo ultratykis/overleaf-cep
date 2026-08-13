@@ -1021,11 +1021,13 @@
     padding: var(--spacing-01);
     border-width: 0;
     background-color: transparent;
-    color: var(--content-primary);
+    // Themed: the panel follows the IDE theme, so the light-theme constants
+    // render dark-on-dark icons under the dark theme.
+    color: var(--content-primary-themed);
 
     &:hover,
     &:focus {
-      background-color: var(--neutral-20);
+      background-color: var(--bg-secondary-themed);
     }
 
     &:disabled {
