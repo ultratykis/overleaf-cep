@@ -23,6 +23,7 @@
  *   confirmSkillGitImport: (...args: any[]) => unknown,
  *   deleteSkill: (...args: any[]) => unknown,
  *   stream: (...args: any[]) => unknown,
+ *   completion: (...args: any[]) => unknown,
  *   getAgentSession: (...args: any[]) => unknown,
  *   resolveAgentSession: (...args: any[]) => unknown,
  *   reopenAgentSession: (...args: any[]) => unknown,
@@ -54,6 +55,7 @@ export function createAiReviewerRouter({
   confirmSkillGitImport,
   deleteSkill,
   stream,
+  completion,
   getAgentSession,
   resolveAgentSession,
   reopenAgentSession,
@@ -274,6 +276,11 @@ export function createAiReviewerRouter({
         "/project/:project_id/ai-reviewer/agent-sessions/:agent_session_id/reopen",
         ...commonMiddleware,
         reopenAgentSession,
+      );
+      webRouter.post(
+        "/project/:project_id/ai-reviewer/completion",
+        ...commonMiddleware,
+        completion,
       );
     },
   };

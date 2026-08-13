@@ -12,6 +12,7 @@ import { createAiReviewerProviderCircuitBreakerStore } from "../models/AiReviewe
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { createAiReviewerCommentProvenanceController } from "./AiReviewerCommentProvenanceController.mjs";
 import { createAiReviewerCommentProvenanceStore } from "./AiReviewerCommentProvenanceStore.mjs";
+import { createAiReviewerCompletionController } from "./AiReviewerCompletionController.mjs";
 import { createAiReviewerController } from "./AiReviewerController.mjs";
 import { recordAiReviewerFailure } from "./AiReviewerFailureLogger.mjs";
 import { createAiReviewerModeInstructionController } from "./AiReviewerModeInstructionController.mjs";
@@ -285,7 +286,12 @@ async function loadRunConnection(configStore, context, userId) {
  * @param {any} connection @param {any} context @param {any} providerService
  * @param {string} userId
  */
-async function resolveRunModel(connection, context, providerService, userId) {
+export async function resolveRunModel(
+  connection,
+  context,
+  providerService,
+  userId,
+) {
   const requestedModel = context.request.model ?? null;
   if (requestedModel == null) {
     throw modelSelectionRequired();
@@ -641,6 +647,11 @@ const providerController = createAiReviewerProviderController({
   circuitBreakerStore,
   externalHarnessEnabled,
 });
+const completionController = createAiReviewerCompletionController({
+  configStore,
+  providerService,
+  resolveModel: resolveRunModel,
+});
 const skillStore = createAiReviewerSkillStore();
 const modeInstructionStore = createAiReviewerModeInstructionStore();
 const externalSessionStore = createExternalAgentSessionStore();
@@ -698,6 +709,7 @@ export default {
   confirmSkillGitImport: expressify(skillController.confirmGitImport),
   deleteSkill: expressify(skillController.deleteSkill),
   stream: expressify(configuredController.stream),
+  completion: expressify(completionController.completion),
   getAgentSession: expressify(externalSessionController.getSession),
   resolveAgentSession: expressify(externalSessionController.resolveSession),
   reopenAgentSession: expressify(externalSessionController.reopenSession),

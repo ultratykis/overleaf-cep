@@ -363,6 +363,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     const listModels = vi.fn();
     const testConnection = vi.fn();
     const stream = vi.fn();
+    const completion = vi.fn();
     const getAgentSession = vi.fn();
     const resolveAgentSession = vi.fn();
     const reopenAgentSession = vi.fn();
@@ -407,6 +408,7 @@ describe("AI reviewer: module shell authenticated route", function () {
       listModels,
       testConnection,
       stream,
+      completion,
       getAgentSession,
       resolveAgentSession,
       reopenAgentSession,
@@ -724,6 +726,15 @@ describe("AI reviewer: module shell authenticated route", function () {
       ensureCanRead,
       reopenAgentSession,
     );
+    expect(post).toHaveBeenNthCalledWith(
+      14,
+      "/project/:project_id/ai-reviewer/completion",
+      login,
+      rateLimit,
+      blockRestricted,
+      ensureCanRead,
+      completion,
+    );
     expect(
       remove.mock.calls.some(([path]) =>
         String(path).includes("agent-sessions"),
@@ -731,7 +742,7 @@ describe("AI reviewer: module shell authenticated route", function () {
     ).toBe(false);
     expect(anotherRouter.get).toHaveBeenCalledTimes(9);
     expect(anotherRouter.put).toHaveBeenCalledTimes(5);
-    expect(anotherRouter.post).toHaveBeenCalledTimes(13);
+    expect(anotherRouter.post).toHaveBeenCalledTimes(14);
     expect(anotherRouter.delete).toHaveBeenCalledTimes(7);
     expect(anotherRouter.get.mock.calls).toEqual(get.mock.calls);
     expect(anotherRouter.put.mock.calls).toEqual(put.mock.calls);

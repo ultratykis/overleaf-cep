@@ -31,6 +31,7 @@ export default createAiReviewerRouter({
   confirmSkillGitImport: AiReviewerController.confirmSkillGitImport,
   deleteSkill: AiReviewerController.deleteSkill,
   stream: AiReviewerController.stream,
+  completion: AiReviewerController.completion,
   getAgentSession: AiReviewerController.getAgentSession,
   resolveAgentSession: AiReviewerController.resolveAgentSession,
   reopenAgentSession: AiReviewerController.reopenAgentSession,

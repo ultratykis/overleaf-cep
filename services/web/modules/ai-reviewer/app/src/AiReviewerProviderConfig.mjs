@@ -526,6 +526,19 @@ export function parseAiReviewerConnectionRevision(input) {
 }
 
 /**
+ * Classify a stored connection through the same endpoint policy used by its
+ * public DTO. Native providers have no configurable local endpoint.
+ *
+ * @param {unknown} input
+ */
+export function classifyAiReviewerProviderConnection(input) {
+  const connection = parseAiReviewerConnection(input);
+  return connection.provider === "openai-compatible"
+    ? parseOpenAiCompatibleBaseUrl(connection.baseUrl).classification
+    : "remote";
+}
+
+/**
  * An edit replaces one connection, so the HTTP request must identify the
  * exact connection revision the form was loaded from.
  *
@@ -643,10 +656,7 @@ export function publicAiReviewerProviderConnection(input) {
     id: parseAiReviewerConnectionId(connection.id),
     revision: parseAiReviewerConnectionRevision(revision),
     label: connection.label,
-    classification:
-      connection.provider === "openai-compatible"
-        ? parseOpenAiCompatibleBaseUrl(connection.baseUrl).classification
-        : "remote",
+    classification: classifyAiReviewerProviderConnection(connection),
     config: Object.freeze({
       provider: connection.provider,
       ...(connection.provider === "openai-compatible"
