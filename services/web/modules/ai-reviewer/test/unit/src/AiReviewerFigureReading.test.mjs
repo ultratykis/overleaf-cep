@@ -301,7 +301,12 @@ describe("AI reviewer: on-demand project figures", function () {
           {
             type: "file",
             mediaType: "image/png",
-            data: figure.data,
+            // azure's nested @ai-sdk/openai 4.x requires the structured data
+            // shape; @ai-sdk/openai-compatible requires the bare base64 string.
+            data:
+              provider === "azure"
+                ? { type: "data", data: figure.data }
+                : figure.data,
           },
         ],
       });

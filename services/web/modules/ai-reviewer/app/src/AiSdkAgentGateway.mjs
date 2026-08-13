@@ -1008,7 +1008,7 @@ export function assertNoGlobalTelemetryIntegration() {
  *
  * @param {object} model
  * @param {ReadonlySet<string>} hiddenProviderTools
- * @param {"gemini-restore" | "chat-inject" | null} figureMessageMode
+ * @param {"gemini-restore" | "chat-inject" | "chat-inject-structured" | null} figureMessageMode
  */
 function withoutProviderWarnings(
   model,
@@ -1055,7 +1055,16 @@ function withoutProviderWarnings(
                 })
               : message.content,
           }));
-        } else if (figureMessageMode === "chat-inject") {
+        } else if (
+          figureMessageMode === "chat-inject" ||
+          figureMessageMode === "chat-inject-structured"
+        ) {
+          // The installed converters disagree on the user file-part data
+          // shape: @ai-sdk/openai-compatible wants the bare base64 string,
+          // while azure's nested @ai-sdk/openai 4.x wants { type: "data" }
+          // and silently maps anything else to null, which the API rejects.
+          const structuredFileData =
+            figureMessageMode === "chat-inject-structured";
           prompt = params.prompt.flatMap((message) => {
             if (message.role !== "tool" || !Array.isArray(message.content)) {
               return [message];
@@ -1090,7 +1099,9 @@ function withoutProviderWarnings(
                   {
                     type: "file",
                     mediaType: entry.mediaType,
-                    data: entry.data.data,
+                    data: structuredFileData
+                      ? { type: "data", data: entry.data.data }
+                      : entry.data.data,
                   },
                 );
                 return {
@@ -2810,9 +2821,11 @@ export class AiSdkAgentGateway {
       ? null
       : this.provider === "gemini"
         ? "gemini-restore"
-        : this.provider === "openai-compatible" || this.provider === "azure"
+        : this.provider === "openai-compatible"
           ? "chat-inject"
-          : null;
+          : this.provider === "azure"
+            ? "chat-inject-structured"
+            : null;
     const systemInstructionAuthorContent = [
       ...storedSkills.flatMap(({ name, description }) => [name, description]),
       ...(customModeInstruction == null ? [] : [customModeInstruction]),
