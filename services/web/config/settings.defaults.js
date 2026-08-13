@@ -1135,6 +1135,10 @@ module.exports = {
               __dirname,
               '../modules/ai-reviewer/frontend/js/extensions/document-identity.ts'
             ),
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/extensions/inline-completion.ts'
+            ),
           ]
         : []),
     ],

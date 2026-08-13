@@ -12,6 +12,7 @@ import {
 import MaterialIcon from "@/shared/components/material-icon";
 import OLButton from "@/shared/components/ol/ol-button";
 import OLDropdownMenuItem from "@/shared/components/ol/ol-dropdown-menu-item";
+import OLFormCheckbox from "@/shared/components/ol/ol-form-checkbox";
 import OLFormControl from "@/shared/components/ol/ol-form-control";
 import OLFormLabel from "@/shared/components/ol/ol-form-label";
 import OLTooltip from "@/shared/components/ol/ol-tooltip";
@@ -140,6 +141,11 @@ import {
   type AiProviderModel,
   type AiProviderModelFailure,
 } from "../services/ai-provider-configuration";
+import {
+  isInlineCompletionEnabled,
+  publishInlineCompletionAvailability,
+  setInlineCompletionEnabled,
+} from "../services/inline-completion-state";
 import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
 import { AiReviewerTooltipIconButton } from "./ai-reviewer-tooltip-icon-button";
 
@@ -1710,6 +1716,9 @@ export function AiReviewerPanelView({
   const modelCatalogProjectId = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
+  const [inlineCompletionEnabled, setInlineCompletionEnabledState] = useState(
+    isInlineCompletionEnabled,
+  );
   const connectedModels = useMemo(() => {
     if (!connectionsLoaded) return models;
     const connectionIds = new Set(
@@ -2009,6 +2018,24 @@ export function AiReviewerPanelView({
       ) ?? null,
     [connectedModels, resolvedSelectedModel],
   );
+  const hasLocalConnection = connections.some(
+    (connection) => connection.classification === "local",
+  );
+  const noLocalConnection =
+    connectionsLoaded && !connectionCatalogError && !hasLocalConnection;
+  const selectedConnection = connections.find(
+    (connection) => connection.id === resolvedSelectedModel?.connectionId,
+  );
+
+  useEffect(() => {
+    publishInlineCompletionAvailability({
+      hasLocalConnection,
+      selectedConnectionClassification:
+        selectedConnection?.classification ?? null,
+      selectedConnectionId: resolvedSelectedModel?.connectionId ?? null,
+      selectedModel: resolvedSelectedModel?.model ?? null,
+    });
+  }, [hasLocalConnection, resolvedSelectedModel, selectedConnection]);
   const duplicateModelNames = useMemo(() => {
     const counts = new Map<string, number>();
     for (const model of connectedModels) {
@@ -6399,6 +6426,29 @@ export function AiReviewerPanelView({
             >
               {t("ai_reviewer_perspectives")}
             </OLDropdownMenuItem>
+            <div className="dropdown-item">
+              <OLFormCheckbox
+                id="ai-reviewer-inline-completion"
+                checked={inlineCompletionEnabled}
+                disabled={noLocalConnection}
+                label={t("ai_reviewer_inline_completion")}
+                onChange={(event) => {
+                  const enabled = event.currentTarget.checked;
+                  setInlineCompletionEnabled(enabled);
+                  setInlineCompletionEnabledState(isInlineCompletionEnabled());
+                }}
+              />
+              {noLocalConnection ? (
+                <p className="form-text mb-0" role="status">
+                  {t("ai_reviewer_inline_completion_requires_local")}
+                </p>
+              ) : inlineCompletionEnabled &&
+                selectedConnection?.classification === "remote" ? (
+                <p className="form-text mb-0" role="status">
+                  {t("ai_reviewer_inline_completion_paused_remote")}
+                </p>
+              ) : null}
+            </div>
             <OLDropdownMenuItem
               as="button"
               variant="danger"
