@@ -6,6 +6,8 @@ export function AiReviewerTooltipIconButton({
   label,
   icon,
   className,
+  buttonClassName = "btn",
+  tooltipPlacement = "top",
   disabled = false,
   onClick,
 }: {
@@ -13,6 +15,8 @@ export function AiReviewerTooltipIconButton({
   label: string;
   icon: string;
   className?: string;
+  buttonClassName?: string;
+  tooltipPlacement?: "top" | "right";
   disabled?: boolean;
   onClick: () => void;
 }) {
@@ -20,7 +24,10 @@ export function AiReviewerTooltipIconButton({
     <OLTooltip
       id={id}
       description={label}
-      overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
+      overlayProps={{
+        placement: tooltipPlacement,
+        trigger: ["hover", "focus"],
+      }}
     >
       <span
         className={`ai-reviewer-tooltip-icon-button${
@@ -30,7 +37,7 @@ export function AiReviewerTooltipIconButton({
         <button
           type="button"
           tabIndex={0}
-          className="btn"
+          className={buttonClassName}
           aria-label={label}
           disabled={disabled}
           onClick={onClick}

@@ -1038,15 +1038,19 @@
   }
 }
 
-.ai-reviewer-selection-toolbar {
+.ai-reviewer-floating-menu-actions {
   display: flex;
-  align-items: center;
-  padding: var(--spacing-01);
-  border: 1px solid var(--border-divider-themed);
-  border-radius: var(--border-radius-base);
-  background-color: var(--bg-primary-themed);
-  box-shadow: 0 2px 4px 0 #1e253029;
-  gap: var(--spacing-01);
+  flex-direction: column;
+  gap: var(--spacing-02);
+
+  .editor-floating-menu-button:disabled {
+    cursor: default;
+    opacity: 0.5;
+
+    &:hover {
+      background-color: inherit;
+    }
+  }
 }
 
 .ai-reviewer-artifact-apply {
@@ -1405,6 +1409,16 @@
   width: 100%;
   max-width: 100%;
   gap: var(--spacing-02);
+}
+
+.ai-reviewer-panel-selection-scope {
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: "DM Mono", monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ai-reviewer-discussion-quote {

@@ -60,7 +60,7 @@ export function readEditorSelectionScopeDescriptor(
  * Selection actions only make sense while text is selected, so the floating
  * toolbar needs the selection as it changes rather than at capture time.
  * CodeMirror mirrors its selection into the DOM, so the document event is
- * enough and the tooltip extension remains concerned only with placement.
+ * enough to refresh both the floating-menu label and panel descriptor.
  */
 export function useEditorSelectionPreview(
   getContext: () => EditorSelectionSessionContext,

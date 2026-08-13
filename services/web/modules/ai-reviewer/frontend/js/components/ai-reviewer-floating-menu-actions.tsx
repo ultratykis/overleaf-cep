@@ -1,22 +1,20 @@
-import {
-  useCodeMirrorStateContext,
-  useCodeMirrorViewContext,
-} from "@/features/source-editor/components/codemirror-context";
-import { getTooltip } from "@codemirror/view";
+import { useCodeMirrorStateContext } from "@/features/source-editor/components/codemirror-context";
 import { useCallback, useEffect, useRef, useState } from "react";
-import ReactDOM from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import { useEditorSelectionPreview } from "../hooks/use-editor-selection-preview";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
-import type { EditorSelectionSessionAction } from "../services/editor-selection-session";
+import type {
+  EditorSelectionSessionAction,
+  EditorSelectionSessionContext,
+} from "../services/editor-selection-session";
 import {
   AI_REVIEWER_SELECTION_TOOLBAR_BUSY_EVENT,
   AI_REVIEWER_SELECTION_TOOLBAR_READY_EVENT,
   aiReviewerSelectionActions,
-  aiReviewerSelectionTooltipStateField,
   dispatchAiReviewerSelectionAction,
-} from "../extensions/selection-tooltip";
+  isAiReviewerSelectionToolbarBusy,
+} from "../services/selection-toolbar-events";
 import { AiReviewerTooltipIconButton } from "./ai-reviewer-tooltip-icon-button";
 
 import "../../stylesheets/ai-reviewer.scss";
@@ -29,44 +27,15 @@ function openAiReviewerPanel() {
   );
 }
 
-export function AiReviewerSelectionToolbarActions({
-  disabled,
-  onAction,
+export function AiReviewerFloatingMenuActions({
+  getSelectionContext,
 }: {
-  disabled: boolean;
-  onAction: (action: EditorSelectionSessionAction) => void;
+  getSelectionContext: () => EditorSelectionSessionContext;
 }) {
   const { t } = useTranslation();
-  return (
-    <>
-      {aiReviewerSelectionActions.map(({ action, icon, labelKey }) => {
-        const label = t(labelKey);
-        return (
-          <AiReviewerTooltipIconButton
-            key={action}
-            id={`ai-reviewer-selection-action-${action}`}
-            label={label}
-            icon={icon}
-            disabled={disabled}
-            onClick={() => onAction(action)}
-          />
-        );
-      })}
-    </>
-  );
-}
-
-export default function AiReviewerSelectionToolbar() {
-  const { t } = useTranslation();
   const state = useCodeMirrorStateContext();
-  const view = useCodeMirrorViewContext();
-  const getSelectionContext = useEditorSelectionSessionContext();
   const selectionPreview = useEditorSelectionPreview(getSelectionContext);
-  const tooltip = state.field(
-    aiReviewerSelectionTooltipStateField,
-    false,
-  )?.tooltip;
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(isAiReviewerSelectionToolbarBusy);
   const [pendingAction, setPendingAction] =
     useState<EditorSelectionSessionAction | null>(null);
   const pendingActionRef = useRef(pendingAction);
@@ -111,11 +80,7 @@ export default function AiReviewerSelectionToolbar() {
     openAiReviewerPanel();
   }, []);
 
-  if (tooltip == null || selectionPreview == null) {
-    return null;
-  }
-  const tooltipView = getTooltip(view, tooltip);
-  if (tooltipView == null) {
+  if (state.selection.main.empty || selectionPreview == null) {
     return null;
   }
   const scopeLabel = t("ai_reviewer_selection_scope_descriptor", {
@@ -123,19 +88,33 @@ export default function AiReviewerSelectionToolbar() {
     count: selectionPreview.wordCount,
   });
 
-  return ReactDOM.createPortal(
-    <div
-      className="ai-reviewer-selection-toolbar"
+  return (
+    <span
+      className="ai-reviewer-floating-menu-actions"
       role="toolbar"
       aria-label={scopeLabel}
       title={scopeLabel}
       onMouseDown={(event) => event.preventDefault()}
     >
-      <AiReviewerSelectionToolbarActions
-        disabled={busy || pendingAction != null}
-        onAction={runAction}
-      />
-    </div>,
-    tooltipView.dom,
+      {aiReviewerSelectionActions.map(({ action, icon, labelKey }) => (
+        <AiReviewerTooltipIconButton
+          key={action}
+          id={`ai-reviewer-selection-action-${action}`}
+          label={t(labelKey)}
+          icon={icon}
+          buttonClassName="editor-floating-menu-button"
+          tooltipPlacement="right"
+          disabled={busy || pendingAction != null}
+          onClick={() => runAction(action)}
+        />
+      ))}
+    </span>
+  );
+}
+
+export default function AiReviewerFloatingMenuActionsContainer() {
+  const getSelectionContext = useEditorSelectionSessionContext();
+  return (
+    <AiReviewerFloatingMenuActions getSelectionContext={getSelectionContext} />
   );
 }

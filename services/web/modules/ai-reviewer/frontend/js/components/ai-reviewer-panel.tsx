@@ -68,12 +68,16 @@ import {
 } from "./ai-reviewer-markdown";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
+  useEditorSelectionPreview,
+  type EditorSelectionScopeDescriptor,
+} from "../hooks/use-editor-selection-preview";
+import {
   AI_REVIEWER_SELECTION_ACTION_EVENT,
   AI_REVIEWER_SELECTION_TOOLBAR_READY_EVENT,
   aiReviewerSelectionActions,
   dispatchAiReviewerSelectionToolbarBusy,
   isAiReviewerSelectionAction,
-} from "../extensions/selection-tooltip";
+} from "../services/selection-toolbar-events";
 import { AgentStreamError, streamAgentEvents } from "../services/agent-stream";
 import {
   createEditorEvidenceNavigationTarget,
@@ -1602,6 +1606,7 @@ export function AiReviewerPanelView({
   streamRequest = streamAgentEvents,
   captureSelectionSession,
   getSelectionContext,
+  selectionPreview = null,
   navigateEvidence = navigateToEditorEvidence,
   resolveEvidenceDocument,
   openEvidenceDocument,
@@ -1624,6 +1629,7 @@ export function AiReviewerPanelView({
   streamRequest?: StreamRequest;
   captureSelectionSession?: CaptureSelectionSession;
   getSelectionContext?: () => EditorSelectionSessionContext;
+  selectionPreview?: EditorSelectionScopeDescriptor | null;
   navigateEvidence?: NavigateEvidence;
   resolveEvidenceDocument?: ResolveEditorEvidenceDocument;
   openEvidenceDocument?: OpenEditorEvidenceDocument;
@@ -6538,6 +6544,21 @@ export function AiReviewerPanelView({
                 </OLButton>
               </div>
             )}
+            {selectionPreview != null && (
+              <p
+                className="ai-reviewer-panel-selection-scope"
+                data-testid="ai-reviewer-selection-scope"
+                title={t("ai_reviewer_selection_scope_descriptor", {
+                  ...selectionPreview,
+                  count: selectionPreview.wordCount,
+                })}
+              >
+                {t("ai_reviewer_selection_scope_descriptor", {
+                  ...selectionPreview,
+                  count: selectionPreview.wordCount,
+                })}
+              </p>
+            )}
             <div className="ai-reviewer-panel-composer">
               <MessageInput
                 sendMessage={submitConversationMessage}
@@ -6655,11 +6676,13 @@ export default function AiReviewerPanel() {
       }),
     [getSelectionContext],
   );
+  const selectionPreview = useEditorSelectionPreview(getSelectionContext);
   return (
     <AiReviewerPanelView
       projectId={projectId}
       captureSelectionSession={captureSelectionSession}
       getSelectionContext={getSelectionContext}
+      selectionPreview={selectionPreview}
       resolveEvidenceDocument={resolveEvidenceDocument}
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}
