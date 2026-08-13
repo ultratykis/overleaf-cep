@@ -1018,12 +1018,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
       return createTransport(config, connectionId).createAgentGateway({
         contextLength: config.contextLength,
         contextLengthSource: config.contextLengthSource,
-        // Chat Completions transports stringify `file-data` tool results, and
-        // Anthropic accepts that part only for PDFs. The installed Google
-        // transport forwards it as image input only for Gemini 3 models.
+        // Chat Completions transports receive figures through an injected user
+        // message. The installed Google transport accepts restored file-data
+        // only for Gemini 3 models. Keep the untested Anthropic path closed.
         ...(config.supportsImages === true &&
-        config.provider === "gemini" &&
-        config.model.startsWith("gemini-3")
+        ((config.provider === "gemini" &&
+          config.model.startsWith("gemini-3")) ||
+          config.provider === "openai-compatible" ||
+          config.provider === "azure")
           ? { supportsImages: true }
           : {}),
         ...(skills === undefined ? {} : { skills }),

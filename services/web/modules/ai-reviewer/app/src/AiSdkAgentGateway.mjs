@@ -1003,16 +1003,17 @@ export function assertNoGlobalTelemetryIntegration() {
  * Tools hidden by product policy remain parseable by the SDK so the gateway
  * can return its specific refusal code, but are removed from provider params.
  * AI SDK 7 normalizes legacy `file-data` output to its v4 `file` shape before
- * calling v3 models; restore the shape the installed Gemini converter accepts.
+ * calling v3 models. Restore the shape the installed Gemini converter accepts,
+ * or move Chat Completions images into an immediately following user message.
  *
  * @param {object} model
  * @param {ReadonlySet<string>} hiddenProviderTools
- * @param {boolean} restoreFigureFileData
+ * @param {"gemini-restore" | "chat-inject" | null} figureMessageMode
  */
 function withoutProviderWarnings(
   model,
   hiddenProviderTools,
-  restoreFigureFileData,
+  figureMessageMode,
 ) {
   return wrapLanguageModel({
     model,
@@ -1022,39 +1023,93 @@ function withoutProviderWarnings(
         if (type !== "stream") {
           return params;
         }
-        const prompt = restoreFigureFileData
-          ? params.prompt.map((message) => ({
-              ...message,
-              content: Array.isArray(message.content)
-                ? message.content.map((part) => {
-                    if (
-                      part.type !== "tool-result" ||
-                      part.toolName !==
-                        AI_REVIEWER_TOOL_NAMES.readProjectFigure ||
-                      part.output.type !== "content"
-                    ) {
-                      return part;
-                    }
-                    return {
-                      ...part,
-                      output: {
-                        ...part.output,
-                        value: part.output.value.map((value) =>
-                          value.type === "file" &&
-                          value.data.type === "data"
-                            ? {
-                                type: "file-data",
-                                data: value.data.data,
-                                mediaType: value.mediaType,
-                              }
-                            : value,
-                        ),
-                      },
-                    };
-                  })
-                : message.content,
-            }))
-          : params.prompt;
+        let prompt = params.prompt;
+        if (figureMessageMode === "gemini-restore") {
+          prompt = params.prompt.map((message) => ({
+            ...message,
+            content: Array.isArray(message.content)
+              ? message.content.map((part) => {
+                  if (
+                    part.type !== "tool-result" ||
+                    part.toolName !==
+                      AI_REVIEWER_TOOL_NAMES.readProjectFigure ||
+                    part.output.type !== "content"
+                  ) {
+                    return part;
+                  }
+                  return {
+                    ...part,
+                    output: {
+                      ...part.output,
+                      value: part.output.value.map((value) =>
+                        value.type === "file" && value.data.type === "data"
+                          ? {
+                              type: "file-data",
+                              data: value.data.data,
+                              mediaType: value.mediaType,
+                            }
+                          : value,
+                      ),
+                    },
+                  };
+                })
+              : message.content,
+          }));
+        } else if (figureMessageMode === "chat-inject") {
+          prompt = params.prompt.flatMap((message) => {
+            if (message.role !== "tool" || !Array.isArray(message.content)) {
+              return [message];
+            }
+            const injectedContent = [];
+            const content = message.content.map((part) => {
+              if (
+                part.type !== "tool-result" ||
+                part.toolName !== AI_REVIEWER_TOOL_NAMES.readProjectFigure ||
+                part.output.type !== "content"
+              ) {
+                return part;
+              }
+              const label = part.output.value.find(
+                (value) => value.type === "text",
+              )?.text;
+              let replacedFile = false;
+              const value = part.output.value.map((entry) => {
+                if (
+                  entry.type !== "file" ||
+                  entry.data?.type !== "data" ||
+                  typeof entry.data.data !== "string"
+                ) {
+                  return entry;
+                }
+                replacedFile = true;
+                injectedContent.push(
+                  {
+                    type: "text",
+                    text: `Figure content from read_project_figure: ${label ?? ""}`,
+                  },
+                  {
+                    type: "file",
+                    mediaType: entry.mediaType,
+                    data: entry.data.data,
+                  },
+                );
+                return {
+                  type: "text",
+                  text: "The figure image is attached in the user message that follows this tool result.",
+                };
+              });
+              return replacedFile
+                ? { ...part, output: { ...part.output, value } }
+                : part;
+            });
+            return injectedContent.length === 0
+              ? [message]
+              : [
+                  { ...message, content },
+                  { role: "user", content: injectedContent },
+                ];
+          });
+        }
         return {
           ...params,
           prompt,
@@ -2751,6 +2806,13 @@ export class AiSdkAgentGateway {
       !selectionTransform &&
       this.supportsImages &&
       this.readProjectFigure != null;
+    const figureMessageMode = !readProjectFigureAllowed
+      ? null
+      : this.provider === "gemini"
+        ? "gemini-restore"
+        : this.provider === "openai-compatible" || this.provider === "azure"
+          ? "chat-inject"
+          : null;
     const systemInstructionAuthorContent = [
       ...storedSkills.flatMap(({ name, description }) => [name, description]),
       ...(customModeInstruction == null ? [] : [customModeInstruction]),
@@ -3176,7 +3238,7 @@ export class AiSdkAgentGateway {
       const requestModel = withoutProviderWarnings(
         createSdkRequestModel(this.model, signal),
         hiddenProviderTools,
-        readProjectFigureAllowed && this.provider === "gemini",
+        figureMessageMode,
       );
       assertNoGlobalTelemetryIntegration();
       // Invalid inputs already return through the SDK's tool-error continuation,

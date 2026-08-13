@@ -239,6 +239,167 @@ describe("AI reviewer: on-demand project figures", function () {
     });
   });
 
+  it.each(["openai-compatible", "azure"])(
+    "injects figure files into a user message for %s",
+    async function (provider) {
+      const model = modelFor([
+        streamResult([
+          {
+            type: "tool-call",
+            toolCallId: "figure-call-chat-0001",
+            toolName: "read_project_figure",
+            input: JSON.stringify({ path: figure.path }),
+          },
+          finish("tool-calls"),
+        ]),
+        streamResult([finish()]),
+      ]);
+
+      await collect(
+        gateway(model, {
+          provider,
+          supportsImages: true,
+          readProjectFigure: vi.fn(async () => figure),
+        }).stream(request),
+      );
+
+      const prompt = model.doStreamCalls[1].prompt;
+      const toolMessageIndex = prompt.findIndex(
+        (message) => message.role === "tool",
+      );
+      expect(prompt[toolMessageIndex]).toMatchObject({
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "figure-call-chat-0001",
+            toolName: "read_project_figure",
+            output: {
+              type: "content",
+              value: [
+                {
+                  type: "text",
+                  text: "figures/result.PNG (image/png, 4 bytes)",
+                },
+                {
+                  type: "text",
+                  text: "The figure image is attached in the user message that follows this tool result.",
+                },
+              ],
+            },
+          },
+        ],
+      });
+      expect(JSON.stringify(prompt[toolMessageIndex])).not.toContain('"file"');
+      expect(prompt[toolMessageIndex + 1]).toEqual({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Figure content from read_project_figure: figures/result.PNG (image/png, 4 bytes)",
+          },
+          {
+            type: "file",
+            mediaType: "image/png",
+            data: figure.data,
+          },
+        ],
+      });
+    },
+  );
+
+  it("re-injects replayed figure results once per stream step", async function () {
+    const secondFigure = {
+      path: "figures/detail.jpg",
+      mediaType: "image/jpeg",
+      bytes: 3,
+      data: Buffer.from([4, 5, 6]).toString("base64"),
+    };
+    const model = modelFor([
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId: "figure-call-chat-step-1",
+          toolName: "read_project_figure",
+          input: JSON.stringify({ path: figure.path }),
+        },
+        finish("tool-calls"),
+      ]),
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId: "figure-call-chat-step-2",
+          toolName: "read_project_figure",
+          input: JSON.stringify({ path: secondFigure.path }),
+        },
+        finish("tool-calls"),
+      ]),
+      streamResult([finish()]),
+    ]);
+    const readProjectFigure = vi.fn(async ({ path }) =>
+      path === figure.path ? figure : secondFigure,
+    );
+
+    await collect(
+      gateway(model, {
+        provider: "openai-compatible",
+        supportsImages: true,
+        readProjectFigure,
+      }).stream(request),
+    );
+
+    expect(readProjectFigure).toHaveBeenCalledTimes(2);
+    const injectedMessages = (prompt) =>
+      prompt.filter(
+        (message) =>
+          message.role === "user" &&
+          Array.isArray(message.content) &&
+          message.content[0]?.text?.startsWith(
+            "Figure content from read_project_figure:",
+          ),
+      );
+    expect(injectedMessages(model.doStreamCalls[1].prompt)).toHaveLength(1);
+    expect(injectedMessages(model.doStreamCalls[2].prompt)).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Figure content from read_project_figure: figures/result.PNG (image/png, 4 bytes)",
+          },
+          {
+            type: "file",
+            mediaType: "image/png",
+            data: figure.data,
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Figure content from read_project_figure: figures/detail.jpg (image/jpeg, 3 bytes)",
+          },
+          {
+            type: "file",
+            mediaType: "image/jpeg",
+            data: secondFigure.data,
+          },
+        ],
+      },
+    ]);
+    for (const prompt of model.doStreamCalls
+      .slice(1)
+      .map(({ prompt }) => prompt)) {
+      for (const [index, message] of prompt.entries()) {
+        if (message.role === "tool") {
+          expect(prompt[index + 1]?.role).toBe("user");
+        }
+      }
+    }
+  });
+
   it("resolves fileRefs by project path and rejects media and size limits", async function () {
     const getAllFiles = vi.fn(async () => ({
       "/figures/result.PNG": { hash: "figure-hash" },
@@ -375,10 +536,16 @@ describe("AI reviewer: on-demand project figures", function () {
     );
   });
 
-  it("fails closed for Chat Completions transports", function () {
-    const transport = { createAgentGateway: vi.fn(() => ({})) };
+  it("enables supported image routes and keeps untested routes closed", function () {
+    const openAiTransport = { createAgentGateway: vi.fn(() => ({})) };
+    const azureTransport = { createAgentGateway: vi.fn(() => ({})) };
+    const geminiTransport = { createAgentGateway: vi.fn(() => ({})) };
+    const claudeTransport = { createAgentGateway: vi.fn(() => ({})) };
     const service = createOllamaProviderService({
-      transportFactory: vi.fn(() => transport),
+      transportFactory: vi.fn(() => openAiTransport),
+      azureTransportFactory: vi.fn(() => azureTransport),
+      geminiTransportFactory: vi.fn(() => geminiTransport),
+      claudeTransportFactory: vi.fn(() => claudeTransport),
     });
     service.createAgentGateway(
       {
@@ -393,15 +560,22 @@ describe("AI reviewer: on-demand project figures", function () {
         readProjectFigure: vi.fn(),
       },
     );
-    expect(transport.createAgentGateway.mock.calls[0][0]).not.toHaveProperty(
-      "supportsImages",
+    service.createAgentGateway(
+      {
+        provider: "azure",
+        baseUrl: "https://reviewer.openai.azure.com/openai",
+        requestStyle: "deployment",
+        model: "vision-deployment",
+        contextLength: 8_192,
+        credential: "fixture-credential",
+        supportsImages: true,
+      },
+      {
+        readProjectFile: vi.fn(),
+        readProjectFigure: vi.fn(),
+      },
     );
-
-    const geminiTransport = { createAgentGateway: vi.fn(() => ({})) };
-    const geminiService = createOllamaProviderService({
-      geminiTransportFactory: vi.fn(() => geminiTransport),
-    });
-    geminiService.createAgentGateway(
+    service.createAgentGateway(
       {
         provider: "gemini",
         model: "gemini-3-pro-preview",
@@ -414,8 +588,47 @@ describe("AI reviewer: on-demand project figures", function () {
         readProjectFigure: vi.fn(),
       },
     );
+    service.createAgentGateway(
+      {
+        provider: "gemini",
+        model: "gemini-2.5-pro",
+        contextLength: 8_192,
+        credential: "fixture-credential",
+        supportsImages: true,
+      },
+      {
+        readProjectFile: vi.fn(),
+        readProjectFigure: vi.fn(),
+      },
+    );
+    service.createAgentGateway(
+      {
+        provider: "claude",
+        model: "claude-sonnet-4-5",
+        contextLength: 8_192,
+        credential: "fixture-credential",
+        supportsImages: true,
+      },
+      {
+        readProjectFile: vi.fn(),
+        readProjectFigure: vi.fn(),
+      },
+    );
+
+    expect(openAiTransport.createAgentGateway.mock.calls[0][0]).toMatchObject({
+      supportsImages: true,
+    });
+    expect(azureTransport.createAgentGateway.mock.calls[0][0]).toMatchObject({
+      supportsImages: true,
+    });
     expect(geminiTransport.createAgentGateway.mock.calls[0][0]).toMatchObject({
       supportsImages: true,
     });
+    expect(
+      geminiTransport.createAgentGateway.mock.calls[1][0],
+    ).not.toHaveProperty("supportsImages");
+    expect(
+      claudeTransport.createAgentGateway.mock.calls[0][0],
+    ).not.toHaveProperty("supportsImages");
   });
 });
