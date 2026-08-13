@@ -1135,11 +1135,24 @@ module.exports = {
               __dirname,
               '../modules/ai-reviewer/frontend/js/extensions/document-identity.ts'
             ),
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/extensions/selection-tooltip.ts'
+            ),
           ]
         : []),
     ],
     sourceEditorVisualExtensions: [],
-    sourceEditorComponents: [],
+    sourceEditorComponents: [
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/components/ai-reviewer-selection-toolbar.tsx'
+            ),
+          ]
+        : []),
+    ],
     pdfLogEntryHeaderActionComponents: [],
     pdfLogEntryComponents: [],
     pdfLogEntriesComponents: [],

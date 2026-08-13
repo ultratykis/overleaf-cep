@@ -25,6 +25,7 @@ import {
   hostChatInputLabel,
   typeConversationMessage,
 } from "./helpers/panel-composer";
+import { runSelectionAction } from "./helpers/selection-toolbar";
 
 type ReviewStreamCall = Parameters<typeof streamAgentEvents>[0];
 
@@ -36,12 +37,6 @@ const baseTextHash =
   "aea23d46109af9b94c5f15085d69113cc2cefa85f05748897a4df172a1ee5104";
 const selectedText = "beta";
 const documentText = "alpha beta gamma";
-const selectionPreview = {
-  filename: "main.tex",
-  fromLine: 1,
-  toLine: 1,
-  wordCount: 1,
-} as const;
 const projectReviewInstruction =
   "Review this project and identify the most important issue.";
 
@@ -344,11 +339,10 @@ async function reviewedSelection(
     createDiscussionRequestId: () => "context-layout-discussion-request",
     now: () => createdAt,
     captureSelectionSession: captureSelectionSession(),
-    selectionPreview,
     streamRequest,
     ...props,
   });
-  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  runSelectionAction("review");
   await screen.findByText("Ambiguous phrase");
   return { ...rendered, streamRequest };
 }
@@ -358,7 +352,6 @@ describe("AI reviewer: context-driven panel", function () {
   it("offers only the way to add a connection when none exists", async function () {
     renderPanel({
       captureSelectionSession: sinon.stub(),
-      selectionPreview,
       ...providerProps([], []),
     });
 
@@ -471,7 +464,6 @@ describe("AI reviewer: context-driven panel", function () {
       });
     renderPanel({
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
       loadProviderConnections,
       loadProviderModels,
@@ -481,7 +473,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(
       await screen.findByRole("button", { name: "Selected model — None" }),
     ).to.exist;
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     fireEvent.click(
       await screen.findByRole("button", { name: "Open connection settings" }),
     );
@@ -535,7 +527,6 @@ describe("AI reviewer: context-driven panel", function () {
       });
     renderPanel({
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
       loadProviderConnections,
       loadProviderModels,
@@ -545,7 +536,7 @@ describe("AI reviewer: context-driven panel", function () {
     expect(
       await screen.findByRole("button", { name: "Selected model — None" }),
     ).to.exist;
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     fireEvent.click(
       await screen.findByRole("button", { name: "Open connection settings" }),
     );
@@ -886,7 +877,7 @@ describe("AI reviewer: context-driven panel", function () {
       await screen.findByRole("article", { name: "AI reviewer discussion" }),
     ).to.exist;
 
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
 
     const activeRun = await screen.findByRole("article", {
       name: "Review run 2",
@@ -953,19 +944,12 @@ describe("AI reviewer: context-driven panel", function () {
   });
 
   // Spec case 9
-  it("keeps the selection controls above the composer with and without results", async function () {
+  it("keeps the removed selection controls out of the panel after results", async function () {
     await reviewedSelection();
 
-    const transforms = screen.getByTestId("ai-reviewer-selection-transforms");
-    const composer = composerField();
-    expect(screen.getByRole("button", { name: "Rewrite selection" })).to.exist;
-    expect(screen.getByRole("button", { name: "Shorten selection" })).to.exist;
-    // No disclosure stands between a selection and what can be done with it.
-    expect(transforms.closest("details")).to.equal(null);
-    expect(
-      transforms.compareDocumentPosition(composer) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).to.not.equal(0);
+    expect(composerField()).to.exist;
+    expect(screen.queryByTestId("ai-reviewer-selection-transforms")).not.to
+      .exist;
   });
 
   // Spec case 10
@@ -1066,10 +1050,9 @@ describe("AI reviewer: context-driven panel", function () {
       });
     renderPanel({
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
     });
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     const run = await screen.findByRole("article", { name: "Review run 1" });
 
     expect(run.textContent).to.contain("read_project_file · chapters/two.tex");
@@ -1109,11 +1092,10 @@ describe("AI reviewer: context-driven panel", function () {
       });
     renderPanel({
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     await screen.findByRole("article", { name: "Review run 1" });
 
     const modeSelector = screen.getByRole("button", {
@@ -1274,13 +1256,12 @@ describe("AI reviewer: context-driven panel", function () {
       createRequestId: () => "model-label-request",
       now: () => createdAt,
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest: unifiedStream(),
       ...providerProps(),
     });
 
     await chooseModel(`Claude Sonnet (${claudeConnection.label})`);
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
 
     const run = await screen.findByRole("article", { name: "Review run 1" });
     expect(
@@ -1539,17 +1520,16 @@ describe("AI reviewer: context-driven panel", function () {
       createDiscussionRequestId: () => "context-layout-discussion-request",
       now: () => createdAt,
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
       ...providerProps(),
     });
 
     await chooseModel(`Claude Sonnet (${claudeConnection.label})`);
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     await screen.findByText("Ambiguous phrase");
     typeConversationMessage("Why is it ambiguous?");
     await screen.findByText("A precise explanation.");
-    fireEvent.click(screen.getByRole("button", { name: "Rewrite selection" }));
+    runSelectionAction("rewrite");
     await waitFor(() => {
       expect(streamRequest.callCount).to.equal(3);
     });
@@ -1686,14 +1666,13 @@ describe("AI reviewer: context-driven panel", function () {
       });
     renderPanel({
       captureSelectionSession: captureSelectionSession(),
-      selectionPreview,
       streamRequest,
       loadProviderConnections,
       loadProviderModels,
     });
 
     await chooseModel(`Default reviewer (${localConnection.label})`);
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
 
     expect(
       await screen.findByText(
@@ -1743,7 +1722,6 @@ describe("AI reviewer: context-driven panel", function () {
     for (const failure of cases) {
       const rendered = renderPanel({
         captureSelectionSession: captureSelectionSession(),
-        selectionPreview,
         streamRequest: sinon.stub().rejects(
           new AgentStreamError({
             code: failure.code,
@@ -1754,7 +1732,7 @@ describe("AI reviewer: context-driven panel", function () {
         ),
       });
 
-      fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+      runSelectionAction("review");
       const alert = await screen.findByRole("alert");
 
       expect(alert.textContent, failure.code).to.equal(failure.guidance);

@@ -23,6 +23,7 @@ const {
 const {
   useLatestCommittedEditorSelectionSessionContext,
 } = require("../../frontend/js/hooks/use-editor-selection-session-context");
+const { runSelectionAction } = require("./helpers/selection-toolbar");
 const {
   initialSelectionWorkspaceState,
   reduceSelectionWorkspaceState,
@@ -214,12 +215,6 @@ function renderPanel({
       projectId,
       createRequestId,
       captureSelectionSession,
-      selectionPreview: {
-        filename: "main.tex",
-        fromLine: 1,
-        toLine: 1,
-        wordCount: 3,
-      },
       streamRequest,
       getSelectionContext,
       navigateEvidence,
@@ -233,7 +228,13 @@ function renderPanel({
 }
 async function clickSelectionAction(buttonName, instruction) {
   void instruction;
-  fireEvent.click(screen.getByRole("button", { name: buttonName }));
+  runSelectionAction(
+    {
+      "Review selection": "review",
+      "Rewrite selection": "rewrite",
+      "Shorten selection": "shorten",
+    }[buttonName],
+  );
   await screen.findByText("Capturing review target");
 }
 describe("AI reviewer: single document selection workspace", function () {
@@ -1310,11 +1311,7 @@ describe("AI reviewer: single document selection workspace", function () {
     applicationSignal = applySelectionSuggestion.firstCall.args[0].signal;
     expect(applicationSignal.aborted).to.equal(false);
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Review selection",
-      }),
-    );
+    runSelectionAction("review");
     expect(applicationSignal.aborted).to.equal(true);
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
     expect(screen.getByText("Streaming")).to.exist;
@@ -1535,10 +1532,7 @@ describe("AI reviewer: single document selection workspace", function () {
       "Rewrite the selected phrase.",
     );
     await screen.findByText("Completed");
-    const replacementRunButton = screen.getByRole("button", {
-      name: "Rewrite selection",
-    });
-    fireEvent.click(replacementRunButton);
+    runSelectionAction("rewrite");
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
     await waitFor(() =>
       expect(screen.getAllByText("Completed")).to.have.length(2),
@@ -1882,11 +1876,7 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     await waitFor(() => expect(navigateEvidence.calledOnce).to.equal(true));
     const navigationSignal = navigateEvidence.firstCall.args[0].signal;
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Review selection",
-      }),
-    );
+    runSelectionAction("review");
     expect(navigationSignal.aborted).to.equal(true);
     await waitFor(() => expect(streamRequest.callCount).to.equal(2));
 
@@ -1908,17 +1898,12 @@ describe("AI reviewer: single document evidence navigation workspace", function 
     const workspace = await renderCompletedEvidenceWorkspace({
       navigateEvidence,
     });
-    const replacementRunButton = screen.getByRole("button", {
-      name: "Review selection",
-    });
     const staleEvidenceButton = screen.getByRole("button", {
       name: "Go to text",
     });
 
-    await act(async () => {
-      replacementRunButton.click();
-      staleEvidenceButton.click();
-    });
+    runSelectionAction("review");
+    fireEvent.click(staleEvidenceButton);
     await waitFor(() => expect(workspace.streamRequest.callCount).to.equal(2));
     await waitFor(() =>
       expect(screen.getAllByText("Completed")).to.have.length(2),

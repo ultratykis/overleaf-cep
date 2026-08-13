@@ -18,6 +18,7 @@ const {
 const {
   postAiReviewerArtifactComment,
 } = require("../../frontend/js/services/editor-artifact-comment-posting");
+const { runSelectionAction } = require("./helpers/selection-toolbar");
 
 const createdAt = "2026-07-26T00:00:00.000Z";
 const projectId = "project-comment-posting";
@@ -250,12 +251,6 @@ async function renderCompletedPanel({
       projectId,
       createRequestId: () => requestId,
       captureSelectionSession,
-      selectionPreview: {
-        filename: "main.tex",
-        fromLine: 1,
-        toLine: 1,
-        wordCount: 3,
-      },
       streamRequest,
       getSelectionContext: selectionContext,
       navigateEvidence,
@@ -265,11 +260,7 @@ async function renderCompletedPanel({
     }),
   );
 
-  fireEvent.click(
-    screen.getByRole("button", {
-      name: "Review selection",
-    }),
-  );
+  runSelectionAction("review");
   await screen.findByText("Capturing review target");
   await act(async () => {
     capture.resolve({

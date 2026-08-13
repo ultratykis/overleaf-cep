@@ -31,6 +31,7 @@ import type {
   UnresolvedSuggestion,
 } from "../../shared/contract-types";
 import { typeConversationMessage } from "./helpers/panel-composer";
+import { runSelectionAction } from "./helpers/selection-toolbar";
 
 const createdAt = "2026-07-25T00:00:00.000Z";
 const projectId = "discussion-project";
@@ -309,12 +310,6 @@ async function renderCompletedFindingRun({
       }
       now={() => createdAt}
       captureSelectionSession={captureSelectionSession}
-      selectionPreview={{
-        filename: "main.tex",
-        fromLine: 1,
-        toLine: 1,
-        wordCount: 3,
-      }}
       streamRequest={streamRequest}
       getSelectionContext={getSelectionContext}
       getSuggestionHunkIds={getSuggestionHunkIds}
@@ -322,7 +317,7 @@ async function renderCompletedFindingRun({
     />,
   );
 
-  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  runSelectionAction("review");
   await screen.findByText("Completed");
   fireEvent.click(screen.getByRole("button", { name: "Discuss finding" }));
   await screen.findByRole("article", { name: "AI reviewer discussion" });

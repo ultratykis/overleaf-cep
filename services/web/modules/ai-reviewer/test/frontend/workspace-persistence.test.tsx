@@ -39,6 +39,10 @@ import type {
   UnresolvedSuggestion,
   WorkspaceDiscussion,
 } from "../../shared/contract-types";
+import {
+  isSelectionToolbarBusy,
+  runSelectionAction,
+} from "./helpers/selection-toolbar";
 
 type ConversationStreamCall = Parameters<typeof streamAgentEvents>[0];
 
@@ -571,12 +575,6 @@ function panel(
     <AiReviewerPanelView
       projectId={projectId}
       workspacePersistence={workspacePersistence}
-      selectionPreview={{
-        filename: "main.tex",
-        fromLine: 1,
-        toLine: 1,
-        wordCount: 3,
-      }}
       {...extra}
     />
   );
@@ -796,13 +794,8 @@ describe("AI reviewer: persisted review workspace", function () {
       }),
     );
 
-    const reviewButton = await screen.findByRole("button", {
-      name: "Review selection",
-    });
-    await waitFor(() => {
-      expect(reviewButton.hasAttribute("disabled")).to.equal(false);
-    });
-    fireEvent.click(reviewButton);
+    await waitFor(() => expect(isSelectionToolbarBusy()).to.equal(false));
+    runSelectionAction("review");
     expect(await screen.findByText("Error")).to.exist;
     expect(screen.getByLabelText("Review run 1")).to.exist;
     await act(async () => {
@@ -1238,7 +1231,7 @@ describe("AI reviewer: persisted review workspace", function () {
     );
 
     await screen.findByText("Persisted unresolved finding");
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     await screen.findByText(cancelledFindingTitle);
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await screen.findByText("Cancelled");
@@ -1568,11 +1561,8 @@ describe("AI reviewer: persisted review workspace", function () {
         streamRequest,
       }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Review selection",
-      }),
-    );
+    await waitFor(() => expect(isSelectionToolbarBusy()).to.equal(false));
+    runSelectionAction("review");
     await screen.findByText("Completed");
     expect(screen.getByRole("button", { name: "Apply" })).to.exist;
 
@@ -1672,11 +1662,8 @@ describe("AI reviewer: persisted review workspace", function () {
         streamRequest,
       }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Review selection",
-      }),
-    );
+    await waitFor(() => expect(isSelectionToolbarBusy()).to.equal(false));
+    runSelectionAction("review");
     await screen.findByText("Completed");
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => {

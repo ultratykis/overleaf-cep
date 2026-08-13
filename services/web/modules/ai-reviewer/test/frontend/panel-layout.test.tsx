@@ -20,6 +20,10 @@ import type { AiProviderConnection } from "../../frontend/js/services/ai-provide
 import type { AiReviewerModeInstructionPersistence } from "../../frontend/js/services/ai-reviewer-mode-instructions";
 import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import { AI_REVIEWER_MODE_INSTRUCTION_MAX_LENGTH } from "../../shared/contracts.mjs";
+import {
+  isSelectionToolbarBusy,
+  runSelectionAction,
+} from "./helpers/selection-toolbar";
 
 type StreamCall = Parameters<typeof streamAgentEvents>[0];
 
@@ -231,7 +235,7 @@ function renderPanel(
 }
 
 function runSelectionReview() {
-  fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+  runSelectionAction("review");
 }
 
 async function openModelChip() {
@@ -318,12 +322,6 @@ function renderReviewPanel(
 ) {
   return renderPanel({
     captureSelectionSession: selectionCapture(),
-    selectionPreview: {
-      filename: "main.tex",
-      fromLine: 1,
-      toLine: 1,
-      wordCount: 1,
-    },
     ...props,
   });
 }
@@ -349,7 +347,7 @@ describe("AI reviewer: panel layout", function () {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).to.not.equal(0);
     // The conversation is the default surface, so the composer stands even
-    // before a run; only the selection transforms wait for a target.
+    // before a run; selection actions live over the editor instead.
     expect(primaryControls(container)).to.have.length(0);
     expect(screen.queryByRole("button", { name: "Send" })).not.to.exist;
     expect(screen.queryByRole("button", { name: "Rewrite selection" })).not.to
@@ -365,35 +363,10 @@ describe("AI reviewer: panel layout", function () {
     ).to.equal(true);
   });
 
-  it("renders selection-only transforms while text is selected and drops them when it is deselected", function () {
-    const { container, rerender } = renderPanel({
+  it("does not render the removed selection transforms block", function () {
+    const { container } = renderPanel({
       captureSelectionSession: sinon.stub(),
-      selectionPreview: {
-        filename: "main.tex",
-        fromLine: 1,
-        toLine: 117,
-        wordCount: 800,
-      },
     });
-
-    const transforms = screen.getByTestId("ai-reviewer-selection-transforms");
-    expect(within(transforms).getByText("main.tex L1–117 (800 words)")).to
-      .exist;
-    expect(screen.getByRole("button", { name: "Rewrite selection" })).to.exist;
-    expect(screen.getByRole("button", { name: "Shorten selection" })).to.exist;
-    // Reviewing the selection is the primary act while one exists.
-    expect(primaryControls(container)).to.have.length(1);
-    expect(primaryControls(container)[0]).to.equal(
-      screen.getByRole("button", { name: "Review selection" }),
-    );
-
-    rerender(
-      <AiReviewerPanelView
-        projectId={projectId}
-        captureSelectionSession={sinon.stub()}
-        selectionPreview={null}
-      />,
-    );
 
     expect(screen.queryByTestId("ai-reviewer-selection-transforms")).not.to
       .exist;
@@ -403,6 +376,7 @@ describe("AI reviewer: panel layout", function () {
       .exist;
     expect(screen.queryByRole("button", { name: "Shorten selection" })).not.to
       .exist;
+    expect(primaryControls(container)).to.have.length(0);
     expect(
       screen
         .getByTestId("ai-reviewer-panel")
@@ -670,10 +644,8 @@ describe("AI reviewer: panel layout", function () {
       "ai-reviewer-run-header-action",
     );
     expect(within(headerAction).getByRole("button", { name: "Stop" })).to.exist;
-    // A review already running is the one thing left to act on.
-    expect(
-      screen.getByRole("button", { name: "Review selection" }),
-    ).to.have.property("disabled", true);
+    runSelectionReview();
+    expect(streamRequest.calledOnce).to.equal(true);
 
     fireEvent.click(within(headerAction).getByRole("button", { name: "Stop" }));
     await screen.findByText("Cancelled");
@@ -869,7 +841,7 @@ describe("AI reviewer: panel layout", function () {
     });
     renderReviewPanel({ streamRequest });
 
-    fireEvent.click(screen.getByRole("button", { name: "Rewrite selection" }));
+    runSelectionAction("rewrite");
     const run = await screen.findByRole("article", { name: "Review run 1" });
 
     expect(
@@ -1190,13 +1162,7 @@ describe("AI reviewer: panel layout", function () {
     });
     renderReviewPanel({ streamRequest, workspacePersistence });
 
-    await waitFor(() => {
-      expect(
-        screen
-          .getByRole("button", { name: "Review selection" })
-          .hasAttribute("disabled"),
-      ).to.equal(false);
-    });
+    await waitFor(() => expect(isSelectionToolbarBusy()).to.equal(false));
     runSelectionReview();
     await screen.findByRole("article", { name: "Review run 1" });
     runSelectionReview();

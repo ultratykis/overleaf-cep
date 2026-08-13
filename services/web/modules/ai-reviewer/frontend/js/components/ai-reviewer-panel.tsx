@@ -68,9 +68,12 @@ import {
 } from "./ai-reviewer-markdown";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
-  useEditorSelectionPreview,
-  type EditorSelectionScopeDescriptor,
-} from "../hooks/use-editor-selection-preview";
+  AI_REVIEWER_SELECTION_ACTION_EVENT,
+  AI_REVIEWER_SELECTION_TOOLBAR_READY_EVENT,
+  aiReviewerSelectionActions,
+  dispatchAiReviewerSelectionToolbarBusy,
+  isAiReviewerSelectionAction,
+} from "../extensions/selection-tooltip";
 import { AgentStreamError, streamAgentEvents } from "../services/agent-stream";
 import {
   createEditorEvidenceNavigationTarget,
@@ -134,49 +137,9 @@ import {
   type AiProviderModelFailure,
 } from "../services/ai-provider-configuration";
 import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
+import { AiReviewerTooltipIconButton } from "./ai-reviewer-tooltip-icon-button";
 
 import "../../stylesheets/ai-reviewer.scss";
-
-function AiReviewerTooltipIconButton({
-  id,
-  label,
-  icon,
-  className,
-  disabled = false,
-  onClick,
-}: {
-  id: string;
-  label: string;
-  icon: string;
-  className?: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <OLTooltip
-      id={id}
-      description={label}
-      overlayProps={{ placement: "top", trigger: ["hover", "focus"] }}
-    >
-      <span
-        className={`ai-reviewer-tooltip-icon-button${
-          className == null ? "" : ` ${className}`
-        }`}
-      >
-        <button
-          type="button"
-          tabIndex={0}
-          className="btn"
-          aria-label={label}
-          disabled={disabled}
-          onClick={onClick}
-        >
-          <MaterialIcon type={icon} />
-        </button>
-      </span>
-    </OLTooltip>
-  );
-}
 
 function AiReviewerSuggestionCardDiff({
   original,
@@ -370,24 +333,6 @@ type PersistenceOperation = {
 };
 
 type ReviewMode = "referee-review" | "brainstorm" | null;
-
-const selectionActions: Array<{
-  action: EditorSelectionSessionAction;
-  instruction: string;
-}> = [
-  {
-    action: "review",
-    instruction: "Review the selected phrase.",
-  },
-  {
-    action: "rewrite",
-    instruction: "Rewrite the selected phrase.",
-  },
-  {
-    action: "shorten",
-    instruction: "Shorten the selected phrase.",
-  },
-];
 
 function cancellationReason(message: string) {
   return new DOMException(message, "AbortError");
@@ -703,36 +648,6 @@ function runStatusLabel(
       return t("ai_reviewer_run_status_cancelled");
     case "error":
       return t("ai_reviewer_run_status_error");
-  }
-}
-
-function selectionActionLabel(
-  action: EditorSelectionSessionAction,
-  t: TFunction<"translation">,
-) {
-  switch (action) {
-    case "review":
-      return t("ai_reviewer_review_selection");
-    case "rewrite":
-      return t("ai_reviewer_rewrite_selection");
-    case "shorten":
-      return t("ai_reviewer_shorten_selection");
-  }
-}
-
-// The row only appears while a selection is active, so the visible label can
-// drop the word "selection"; the accessible name keeps the full phrase.
-function selectionActionShortLabel(
-  action: EditorSelectionSessionAction,
-  t: TFunction<"translation">,
-) {
-  switch (action) {
-    case "review":
-      return t("ai_reviewer_action_review");
-    case "rewrite":
-      return t("ai_reviewer_action_rewrite");
-    case "shorten":
-      return t("ai_reviewer_action_shorten");
   }
 }
 
@@ -1687,7 +1602,6 @@ export function AiReviewerPanelView({
   streamRequest = streamAgentEvents,
   captureSelectionSession,
   getSelectionContext,
-  selectionPreview = null,
   navigateEvidence = navigateToEditorEvidence,
   resolveEvidenceDocument,
   openEvidenceDocument,
@@ -1710,7 +1624,6 @@ export function AiReviewerPanelView({
   streamRequest?: StreamRequest;
   captureSelectionSession?: CaptureSelectionSession;
   getSelectionContext?: () => EditorSelectionSessionContext;
-  selectionPreview?: EditorSelectionScopeDescriptor | null;
   navigateEvidence?: NavigateEvidence;
   resolveEvidenceDocument?: ResolveEditorEvidenceDocument;
   openEvidenceDocument?: OpenEditorEvidenceDocument;
@@ -2857,7 +2770,7 @@ export function AiReviewerPanelView({
 
   const runSelectionReview = useCallback(
     (action: EditorSelectionSessionAction) => {
-      const selectedAction = selectionActions.find(
+      const selectedAction = aiReviewerSelectionActions.find(
         (candidate) => candidate.action === action,
       );
       if (selectedAction == null) {
@@ -3357,6 +3270,49 @@ export function AiReviewerPanelView({
     persistenceMutationPending ||
     persistenceConflict ||
     runInProgress;
+  const selectionToolbarState = useRef({ busy, runSelectionReview });
+  selectionToolbarState.current = { busy, runSelectionReview };
+
+  useEffect(() => {
+    const handleSelectionAction = (event: Event) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const action = (
+        event as CustomEvent<{ action?: EditorSelectionSessionAction }>
+      ).detail?.action;
+      if (!isAiReviewerSelectionAction(action)) {
+        return;
+      }
+      const current = selectionToolbarState.current;
+      if (current.busy) {
+        return;
+      }
+      event.preventDefault();
+      void current.runSelectionReview(action);
+    };
+    window.addEventListener(
+      AI_REVIEWER_SELECTION_ACTION_EVENT,
+      handleSelectionAction,
+    );
+    return () => {
+      window.removeEventListener(
+        AI_REVIEWER_SELECTION_ACTION_EVENT,
+        handleSelectionAction,
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    dispatchAiReviewerSelectionToolbarBusy(busy);
+    if (!busy) {
+      window.dispatchEvent(
+        new Event(AI_REVIEWER_SELECTION_TOOLBAR_READY_EVENT),
+      );
+    }
+  }, [busy]);
+
+  useEffect(() => () => dispatchAiReviewerSelectionToolbarBusy(false), []);
   const recordSuggestionDecision = useCallback(
     (
       identity: ActiveSuggestionApplication,
@@ -6582,45 +6538,6 @@ export function AiReviewerPanelView({
                 </OLButton>
               </div>
             )}
-            {/* Selecting text is an intent to act on it, so these sit directly
-                above the composer and stay there whether or not results exist. */}
-            {selectionPreview != null && captureSelectionSession != null && (
-              <div
-                className="ai-reviewer-panel-selection"
-                data-testid="ai-reviewer-selection-transforms"
-              >
-                <p
-                  className="ai-reviewer-panel-selection-scope"
-                  data-testid="ai-reviewer-selection-scope"
-                  title={t("ai_reviewer_selection_scope_descriptor", {
-                    ...selectionPreview,
-                    count: selectionPreview.wordCount,
-                  })}
-                >
-                  {t("ai_reviewer_selection_scope_descriptor", {
-                    ...selectionPreview,
-                    count: selectionPreview.wordCount,
-                  })}
-                </p>
-                <div className="ai-reviewer-panel-actions">
-                  {selectionActions.map(({ action }) => (
-                    <OLButton
-                      key={action}
-                      type="button"
-                      variant={action === "review" ? "primary" : "secondary"}
-                      size="sm"
-                      disabled={busy}
-                      aria-label={selectionActionLabel(action, t)}
-                      onClick={() => {
-                        void runSelectionReview(action);
-                      }}
-                    >
-                      {selectionActionShortLabel(action, t)}
-                    </OLButton>
-                  ))}
-                </div>
-              </div>
-            )}
             <div className="ai-reviewer-panel-composer">
               <MessageInput
                 sendMessage={submitConversationMessage}
@@ -6738,14 +6655,11 @@ export default function AiReviewerPanel() {
       }),
     [getSelectionContext],
   );
-  const selectionPreview = useEditorSelectionPreview(getSelectionContext);
-
   return (
     <AiReviewerPanelView
       projectId={projectId}
       captureSelectionSession={captureSelectionSession}
       getSelectionContext={getSelectionContext}
-      selectionPreview={selectionPreview}
       resolveEvidenceDocument={resolveEvidenceDocument}
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}

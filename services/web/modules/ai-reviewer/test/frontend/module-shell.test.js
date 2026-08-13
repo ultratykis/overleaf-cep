@@ -22,6 +22,7 @@ const {
 const {
   streamAgentEvents,
 } = require("../../frontend/js/services/agent-stream");
+const { runSelectionAction } = require("./helpers/selection-toolbar");
 
 const createdAt = "2026-07-24T00:00:00.000Z";
 
@@ -166,18 +167,12 @@ describe("AI reviewer: module shell", function () {
         projectId: "project-0001",
         createRequestId: () => "request-0001",
         captureSelectionSession,
-        selectionPreview: {
-          filename: "main.tex",
-          fromLine: 1,
-          toLine: 1,
-          wordCount: 1,
-        },
         streamRequest,
       }),
     );
 
     expect(streamRequest.called).to.equal(false);
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
 
     await screen.findByText("Synthetic review.");
     expect(screen.getByText("Completed")).to.exist;
@@ -201,17 +196,11 @@ describe("AI reviewer: module shell", function () {
         projectId: "project-0001",
         createRequestId: () => "request-0001",
         captureSelectionSession,
-        selectionPreview: {
-          filename: "main.tex",
-          fromLine: 1,
-          toLine: 1,
-          wordCount: 1,
-        },
         streamRequest,
       }),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
     await screen.findByText("Streaming");
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     releaseLateEvent();

@@ -13,6 +13,7 @@ import type { AiProviderConnection } from "../../frontend/js/services/ai-provide
 import type { AiReviewerWorkspacePersistence } from "../../frontend/js/services/ai-reviewer-workspace-persistence";
 import { AiReviewerWorkspaceSchema } from "../../shared/contracts.mjs";
 import type { AiReviewerWorkspace } from "../../shared/contract-types";
+import { runSelectionAction } from "./helpers/selection-toolbar";
 
 const projectId = "panel-width-project";
 const widths = [233, 116];
@@ -53,10 +54,9 @@ const listLayoutSelectors = [
   ".ai-reviewer-panel-actions",
   ".ai-reviewer-panel .btn",
 ];
-const emptyLayoutSelectors = [
-  ...listLayoutSelectors,
-  ".ai-reviewer-panel-selection",
-];
+const emptyLayoutSelectors = listLayoutSelectors.filter(
+  (selector) => selector !== ".ai-reviewer-panel-actions",
+);
 const workspaceLayoutSelectors = [
   ...listLayoutSelectors.filter(
     (selector) => selector !== ".ai-reviewer-panel-actions",
@@ -68,7 +68,9 @@ const workspaceLayoutSelectors = [
   ".ai-reviewer-discussion-row",
 ];
 const failureLayoutSelectors = [
-  ...listLayoutSelectors,
+  ...listLayoutSelectors.filter(
+    (selector) => selector !== ".ai-reviewer-panel-actions",
+  ),
   ".ai-reviewer-run",
   ".ai-reviewer-panel .alert",
   ".ai-reviewer-panel-notice",
@@ -860,12 +862,6 @@ describe("AI reviewer panel width", function () {
             captureSelectionSession={async () => {
               throw new Error("The width test does not start a review.");
             }}
-            selectionPreview={{
-              filename: "main.tex",
-              fromLine: 1,
-              toLine: 32,
-              wordCount: 1200,
-            }}
           />
         </div>,
       );
@@ -927,18 +923,12 @@ describe("AI reviewer panel width", function () {
                 },
               },
             })}
-            selectionPreview={{
-              filename: "main.tex",
-              fromLine: 1,
-              toLine: 1,
-              wordCount: 1,
-            }}
             streamRequest={streamRequest}
           />
         </div>,
       );
 
-      fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+      runSelectionAction("review");
       const alert = await screen.findByRole("alert");
 
       expect(alert.textContent).to.equal(longFailureGuidance);
@@ -1063,12 +1053,6 @@ describe("AI reviewer panel width", function () {
             },
           },
         })}
-        selectionPreview={{
-          filename: "main.tex",
-          fromLine: 1,
-          toLine: 1,
-          wordCount: 1,
-        }}
         streamRequest={streamRequest}
         resetProviderCircuit={async (_project, connection) => {
           resetConnections.push(connection);
@@ -1078,7 +1062,7 @@ describe("AI reviewer panel width", function () {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Review selection" }));
+    runSelectionAction("review");
 
     expect(
       await screen.findByText(

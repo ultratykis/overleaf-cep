@@ -57,10 +57,10 @@ export function readEditorSelectionScopeDescriptor(
 }
 
 /**
- * Rewrite and shorten only make sense while text is selected, so the panel
- * needs the selection as it changes rather than at capture time. CodeMirror
- * mirrors its selection into the DOM, so the document event is enough and no
- * editor extension has to be registered from here.
+ * Selection actions only make sense while text is selected, so the floating
+ * toolbar needs the selection as it changes rather than at capture time.
+ * CodeMirror mirrors its selection into the DOM, so the document event is
+ * enough and the tooltip extension remains concerned only with placement.
  */
 export function useEditorSelectionPreview(
   getContext: () => EditorSelectionSessionContext,
