@@ -503,6 +503,7 @@ const SELECTION_TRANSFORM_INSTRUCTION = [
   "This is a selection transform, not a review.",
   "Call propose_suggestion exactly once and do not call another tool or return the replacement as free text.",
   "Provide the complete replacement for the selected text and a concise rationale.",
+  "The replacement is spliced verbatim into the exact selected range, so it must not break the surrounding markup: keep any incomplete construct at the selection edges (such as a command or brace whose other half lies outside the selection) intact.",
   "Do not invent document identifiers, revisions, hashes, ranges, original text, or evidence; the server binds the proposal to the captured selection.",
 ].join(" ");
 
