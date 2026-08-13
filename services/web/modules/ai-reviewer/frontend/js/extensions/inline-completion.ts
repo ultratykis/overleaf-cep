@@ -114,9 +114,11 @@ export function completionRequestContext(text: string, cursor: number) {
   const boundedCursor = Math.max(0, Math.min(cursor, text.length));
   const leftLines = text.slice(0, boundedCursor).split("\n");
   const rightLines = text.slice(boundedCursor).split("\n");
+  // LaTeX sources often hold a whole paragraph per line, so a line-count
+  // window alone can exceed the endpoint's character bounds (4000/1000).
   return {
-    leftContext: leftLines.slice(-11).join("\n"),
-    rightContext: rightLines.slice(0, 3).join("\n"),
+    leftContext: leftLines.slice(-11).join("\n").slice(-4_000),
+    rightContext: rightLines.slice(0, 3).join("\n").slice(0, 1_000),
     maxLength: COMPLETION_MAX_LENGTH,
   };
 }

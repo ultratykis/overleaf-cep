@@ -122,6 +122,15 @@ describe("AI reviewer: inline completion", function () {
     });
   });
 
+  it("clamps single-line paragraphs to the endpoint's character bounds", function () {
+    const text = `${"a".repeat(6_000)}\n${"b".repeat(3_000)}`;
+    const cursor = 6_000;
+
+    const context = completionRequestContext(text, cursor);
+    expect(context.leftContext).to.equal("a".repeat(4_000));
+    expect(context.rightContext).to.equal(`\n${"b".repeat(999)}`);
+  });
+
   it("gates requests when off, without local connections, or on a remote selection", function () {
     expect(
       inlineCompletionGate({
