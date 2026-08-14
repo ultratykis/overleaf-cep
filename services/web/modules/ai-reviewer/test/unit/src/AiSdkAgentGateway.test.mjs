@@ -601,4 +601,48 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
       consoleError.mockRestore();
     }
   });
+  // A model that mistypes a tool argument must not end the run: the SDK marks
+  // the call invalid and the next step can correct it. Regression for the
+  // display event strict-parsing that same invalid input (#143).
+  it("survives an invalid read_project_file argument and lets the model retry", async function () {
+    const { model, consumed } = strictStreamModel([
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId: "read-invalid-0001",
+          toolName: "read_project_file",
+          // A weak model commonly sends the range as prose instead of offsets.
+          input: JSON.stringify({ path: "main.tex", range: "lines 1-5" }),
+        },
+        finish("tool-calls"),
+      ]),
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId: "read-valid-0001",
+          toolName: "read_project_file",
+          input: JSON.stringify({ path: "main.tex", range: { from: 0, to: 4 } }),
+        },
+        finish("tool-calls"),
+      ]),
+      closingStep(),
+    ]);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const events = await collect(createGateway(model).stream(request()));
+
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      expect(events.some((event) => event.type === "failed")).toBe(false);
+      // The corrected call still announces its read to the panel.
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "tool.call",
+          call: expect.objectContaining({ name: "read_project_file" }),
+        }),
+      );
+      expect(consumed()).toBe(3);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

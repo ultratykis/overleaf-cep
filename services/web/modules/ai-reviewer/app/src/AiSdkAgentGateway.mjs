@@ -3836,10 +3836,17 @@ export class AiSdkAgentGateway {
           ) {
             continue;
           }
+          // An SDK-invalid tool call is kept non-terminal above so the model
+          // can correct it in the next step. This event only names the read
+          // for the panel, so unreadable arguments mean there is nothing to
+          // announce -- never a reason to end the run.
           const toolArguments =
             part.toolName === "read_project_file"
-              ? ReadProjectFileArgumentsSchema.parse(part.input)
-              : ZoteroSearchArgumentsSchema.parse(part.input);
+              ? ReadProjectFileArgumentsSchema.safeParse(part.input)
+              : ZoteroSearchArgumentsSchema.safeParse(part.input);
+          if (!toolArguments.success) {
+            continue;
+          }
           yield parseEvent({
             type: "tool.call",
             eventId: this.createId("event"),
@@ -3849,7 +3856,7 @@ export class AiSdkAgentGateway {
             call: {
               id: part.toolCallId,
               name: part.toolName,
-              arguments: toolArguments,
+              arguments: toolArguments.data,
             },
           });
         } else if (part.type === "tool-error") {
