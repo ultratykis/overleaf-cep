@@ -165,7 +165,7 @@ describe("AI reviewer: comment actions", function () {
       // Naming the tool keeps a weak local model from hunting through the
       // document for a thread id it can only get from read_project_comments.
       instruction:
-        "Read the review comment with threadId comment-thread-138 using read_project_comments, then propose how to address it.",
+        "Read the review comment with threadId comment-thread-138 using read_project_comments, then propose how to address it. If the comment can be resolved with a concrete edit, register that edit as a suggestion for the relevant text.",
       target: "document",
     });
   });

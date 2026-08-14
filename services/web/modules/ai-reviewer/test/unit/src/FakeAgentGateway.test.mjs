@@ -370,6 +370,29 @@ describe("AI reviewer: deterministic fake gateway", function () {
     });
   });
 
+  it("accepts the resolved review skill for a modeless request", async function () {
+    const modelessRequest = { ...selectionRequest(), skill: null };
+    const stream = [startedEvent(null), suggestionEvent({ skill: "review" })];
+    const gateway = new ScriptedFakeAgentGateway({ events: stream });
+
+    expect(await collect(gateway.stream(modelessRequest))).toEqual(stream);
+  });
+
+  it("rejects another suggestion skill for a modeless request", async function () {
+    const gateway = new ScriptedFakeAgentGateway({
+      events: [
+        startedEvent(null),
+        suggestionEvent({ skill: "other-skill" }),
+      ],
+    });
+
+    expect(
+      await captureError(
+        collect(gateway.stream({ ...selectionRequest(), skill: null })),
+      ),
+    ).toMatchObject({ code: "AI_EVENT_SKILL_MISMATCH" });
+  });
+
   it.each([
     [
       "finding path",

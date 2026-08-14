@@ -175,7 +175,7 @@
   "ai_feedback_the_suggestion_wasnt_the_best_fix_available": "The suggestion wasn’t the best fix available",
   "ai_feedback_there_was_no_code_fix_suggested": "There was no code fix suggested",
   "ai_language_suggestions": "AI language suggestions",
-  "ai_reviewer_action_address_comment": "Read the review comment with threadId __threadId__ using read_project_comments, then propose how to address it.",
+  "ai_reviewer_action_address_comment": "Read the review comment with threadId __threadId__ using read_project_comments, then propose how to address it. If the comment can be resolved with a concrete edit, register that edit as a suggestion for the relevant text.",
   "ai_reviewer_action_ask_ai": "Ask AI",
   "ai_reviewer_action_review": "Review",
   "ai_reviewer_action_rewrite": "Rewrite",

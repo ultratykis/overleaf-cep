@@ -1025,6 +1025,56 @@ describe("AI reviewer: OT safety stream boundary", function () {
     expect(run.received).to.deep.equal([]);
   });
 
+  it("accepts the resolved review skill for a modeless request", async function () {
+    const request = {
+      ...documentRequest(),
+      action: "review" as const,
+      skill: null,
+    };
+    const start = startedEvent({ skill: null });
+    const suggestion = suggestionEvent({
+      suggestionOverrides: { skill: "review" },
+    });
+    const run = await runStream({
+      request,
+      response: responseForEvents([start, suggestion, completedEvent()])
+        .response,
+    });
+
+    await run.operation;
+
+    expect(run.received).to.deep.equal([
+      start,
+      wireClone(suggestion),
+      completedEvent(),
+    ]);
+  });
+
+  it("rejects another suggestion skill for a modeless request", async function () {
+    const start = startedEvent({ skill: null });
+    const run = await runStream({
+      request: {
+        ...documentRequest(),
+        action: "review",
+        skill: null,
+      },
+      response: responseForEvents([
+        start,
+        suggestionEvent(),
+        completedEvent(),
+      ]).response,
+    });
+
+    const error = await captureError(run.operation);
+
+    expectStreamError(error, {
+      code: "AI_STREAM_EVENT_SCOPE_INVALID",
+      category: "schema",
+      retryable: false,
+    });
+    expect(run.received).to.deep.equal([start]);
+  });
+
   it("rejects every project-scoped suggestion before callback delivery", async function () {
     const start = startedEvent({
       skill: "referee-review",

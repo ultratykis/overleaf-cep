@@ -3871,21 +3871,24 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     });
   });
 
-  it("rejects a structured suggestion when the request skill is null", async function () {
+  it("defaults a structured suggestion to the review skill", async function () {
     const { model } = strictStreamModel([
       outputStep(validOutput({ suggestions: [validSuggestion()] })),
       closingStep(),
     ]);
     const gateway = createGateway(model);
 
-    expect(
-      await captureError(
-        collect(gateway.stream(documentRequest({ skill: null }))),
-      ),
-    ).toMatchObject({
-      code: "AI_SUGGESTION_SKILL_REQUIRED",
-      category: "schema",
-      retryable: false,
+    const events = await collect(
+      gateway.stream(documentRequest({ skill: null })),
+    );
+
+    expect(events.find((event) => event.type === "suggestion")).toMatchObject({
+      suggestion: {
+        skill: "review",
+        provider: "fixture-provider",
+        model: "fixture-model",
+        status: "unresolved",
+      },
     });
   });
 

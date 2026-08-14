@@ -22,6 +22,7 @@ import {
   ProjectRelativePathSchema,
   ReadProjectFileArgumentsSchema,
   Sha256Schema,
+  suggestionSkillForRequest,
   TextRangeSchema,
   UnresolvedSuggestionSchema,
   ZoteroSearchArgumentsSchema,
@@ -552,6 +553,8 @@ const REVIEW_FINDING_PROSE_INSTRUCTION =
   "Do not restate a reported finding or suggestion in prose; describe only what the user still needs to know.";
 const DISCUSSION_FINDING_PROSE_INSTRUCTION =
   "Keep the answer independently meaningful; findings are supplementary artifacts, so include the information needed to understand the answer in prose.";
+const DISCUSSION_SUGGESTION_INSTRUCTION =
+  "When proposing a concrete replacement for specific text, call propose_suggestion instead of pasting the replacement into prose. Explain the reason in prose so the answer remains independently meaningful; the suggestion is a supplementary artifact.";
 
 const REVIEW_RESULT_INSTRUCTION =
   "Call report_subject exactly once with a short subject that names what this response is about.";
@@ -794,8 +797,14 @@ function skillErrorResult(error, name, referencePath) {
  * @param {AgentRequest} request
  * @param {ReturnType<typeof boundedStoredSkills>} skills
  * @param {ReturnType<typeof boundedModeInstructions>} modeInstructions
+ * @param {boolean} suggestionAllowed
  */
-function systemInstructionForRequest(request, skills, modeInstructions) {
+function systemInstructionForRequest(
+  request,
+  skills,
+  modeInstructions,
+  suggestionAllowed,
+) {
   const skill = request.skill;
   const findingsAllowed = findingsAllowedForRequest(request);
   const modeInstruction = modeInstructionForRequest(skill, modeInstructions);
@@ -817,6 +826,9 @@ function systemInstructionForRequest(request, skills, modeInstructions) {
             ? REVIEW_FINDING_PROSE_INSTRUCTION
             : DISCUSSION_FINDING_PROSE_INSTRUCTION,
         ].join(" ")
+      : null,
+    suggestionAllowed && request.agentSessionId != null
+      ? DISCUSSION_SUGGESTION_INSTRUCTION
       : null,
     effectiveModeInstruction,
     storedSkillInstruction(skill, skills),
@@ -2797,6 +2809,11 @@ export class AiSdkAgentGateway {
     const request = parsedRequest.data;
     const scope = request.scope ?? null;
     const selectionTransform = isSelectionTransformRequest(request);
+    // Brainstorming stays conversational even if a caller supplies a scope;
+    // review artifacts would turn the visible premise into a hidden review.
+    const artifactToolsAllowed = request.skill !== "brainstorm";
+    const suggestionAllowed =
+      artifactToolsAllowed && scope != null && scope.kind !== "project";
     // Google applies strictness to the whole request through VALIDATED mode,
     // while these declarations intentionally leave full validation local.
     const strictProviderTools = this.provider !== "gemini";
@@ -2883,7 +2900,12 @@ export class AiSdkAgentGateway {
       ...(customModeInstruction == null ? [] : [customModeInstruction]),
     ];
     const instructions = [
-      systemInstructionForRequest(request, storedSkills, this.modeInstructions),
+      systemInstructionForRequest(
+        request,
+        storedSkills,
+        this.modeInstructions,
+        suggestionAllowed,
+      ),
       ...(readProjectCommentsAllowed
         ? [READ_PROJECT_COMMENTS_INSTRUCTION]
         : []),
@@ -2955,18 +2977,7 @@ export class AiSdkAgentGateway {
       storedSkills.map((storedSkill) => [storedSkill.name, storedSkill]),
     );
     const readSkillAllowed = storedSkills.length > 0;
-    // Brainstorming stays conversational even if a caller supplies a scope;
-    // review artifacts would turn the visible premise into a hidden review.
-    const artifactToolsAllowed = request.skill !== "brainstorm";
     const findingsAllowed = findingsAllowedForRequest(request);
-    // An edit is only checkable against one known document state, and the
-    // artifact contract files it under the skill the user chose, so a
-    // suggestion needs both before the model may propose one.
-    const suggestionAllowed =
-      artifactToolsAllowed &&
-      scope != null &&
-      scope.kind !== "project" &&
-      request.skill != null;
     /** @type {Map<string, AgentGatewayError>} */
     const deferredToolErrors = new Map();
     /** @type {Set<string>} */
@@ -3826,7 +3837,7 @@ export class AiSdkAgentGateway {
                   projectId: request.projectId,
                   provider: this.provider,
                   model: this.modelId,
-                  skill: request.skill,
+                  skill: suggestionSkillForRequest(request),
                   createdAt: this.now(),
                   status: /** @type {const} */ ("unresolved"),
                 };

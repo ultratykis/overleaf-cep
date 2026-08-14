@@ -35,6 +35,22 @@ function request(overrides = {}) {
   };
 }
 
+function modelessRequest() {
+  return request({
+    action: "review",
+    instruction: "Address the selected review comment.",
+    skill: null,
+    scope: {
+      kind: "document",
+      documentId: "document-0001",
+      path: "main.tex",
+      baseRevision: 7,
+      baseTextHash,
+      text: baseText,
+    },
+  });
+}
+
 function evidence(overrides = {}) {
   return {
     path: "main.tex",
@@ -126,6 +142,17 @@ describe("AI reviewer: single document", function () {
 
     expect(discarded.status).to.equal("discarded");
     expect(discarded).not.to.have.property("change");
+  });
+
+  it("accepts the resolved review skill for a modeless request", function () {
+    const resolved = suggestion({ skill: "review" });
+
+    expect(
+      prepareSingleDocumentSuggestion({
+        request: modelessRequest(),
+        suggestion: resolved,
+      }),
+    ).to.deep.equal(resolved);
   });
 });
 
@@ -236,6 +263,17 @@ describe("AI reviewer: single document malformed schema", function () {
     )
       .to.throw(SingleDocumentSuggestionError)
       .with.property("code", "AI_SUGGESTION_REQUEST_MISMATCH");
+  });
+
+  it("rejects another suggestion skill for a modeless request", function () {
+    expect(() =>
+      prepareSingleDocumentSuggestion({
+        request: modelessRequest(),
+        suggestion: suggestion({ skill: "line-edit" }),
+      }),
+    )
+      .to.throw(SingleDocumentSuggestionError)
+      .with.property("code", "AI_SUGGESTION_SKILL_MISMATCH");
   });
 
   for (const [name, evidenceOverride] of evidenceMismatchCases) {

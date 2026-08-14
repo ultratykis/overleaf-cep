@@ -9,6 +9,7 @@ import {
   DISCUSSION_CONTEXT_TURN_LIMIT,
   DiscussionSubjectSchema,
   FindingSchema,
+  suggestionSkillForRequest,
   SuggestionSchema,
   SuggestionStatusSchema,
   WorkspaceFindingSchema,
@@ -149,6 +150,13 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AgentRequestSchema.parse(selectionRequest())).toEqual(
       selectionRequest(),
     );
+  });
+
+  it.each([
+    [null, "review"],
+    ["line-edit", "line-edit"],
+  ])("resolves suggestion skill %s to %s", function (skill, expected) {
+    expect(suggestionSkillForRequest({ skill })).toBe(expected);
   });
 
   it.each([

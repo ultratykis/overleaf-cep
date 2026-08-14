@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   AgentRequestSchema,
+  suggestionSkillForRequest,
   UnresolvedSuggestionSchema,
 } from "../../../shared/contracts.mjs";
 import type {
@@ -102,7 +103,7 @@ function assertSuggestionMatchesRequest(
       "The suggestion belongs to another project.",
     );
   }
-  if (suggestion.skill !== request.skill || request.skill == null) {
+  if (suggestion.skill !== suggestionSkillForRequest(request)) {
     throw new SingleDocumentSuggestionError(
       "AI_SUGGESTION_SKILL_MISMATCH",
       "The suggestion skill does not match the request.",

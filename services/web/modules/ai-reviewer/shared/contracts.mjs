@@ -171,6 +171,11 @@ export const AgentRequestSchema = z
   })
   .strict();
 
+/** @param {{ skill: string | null }} request */
+export function suggestionSkillForRequest(request) {
+  return request.skill ?? "review";
+}
+
 export const SuggestionStatusSchema = z.enum([
   "unresolved",
   "applied",

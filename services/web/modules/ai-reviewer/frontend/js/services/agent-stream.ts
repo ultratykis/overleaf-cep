@@ -4,6 +4,7 @@ import {
   AgentErrorSchema,
   AgentEventSchema,
   AgentRequestSchema,
+  suggestionSkillForRequest,
 } from "../../../shared/contracts.mjs";
 import type {
   AgentError,
@@ -274,7 +275,7 @@ function assertEventForRequest(request: AgentRequest, event: AgentEvent) {
   if (event.type === "suggestion") {
     if (
       event.suggestion.projectId !== request.projectId ||
-      event.suggestion.skill !== request.skill
+      event.suggestion.skill !== suggestionSkillForRequest(request)
     ) {
       throw protocolError(
         "AI_STREAM_EVENT_SCOPE_INVALID",

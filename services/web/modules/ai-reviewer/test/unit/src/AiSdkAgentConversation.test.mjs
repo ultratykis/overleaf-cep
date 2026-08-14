@@ -423,13 +423,19 @@ describe("AI reviewer: one agent path for review and conversation", function () 
 
     await collect(
       createGateway(model, { searchZotero: async () => [] }).stream(
-        openRequest({ skill: "brainstorm" }),
+        documentRequest({
+          skill: "brainstorm",
+          agentSessionId: "discussion-agent-brainstorm",
+        }),
       ),
     );
 
     expect(
       model.doStreamCalls[0].tools.map((declared) => declared.name),
     ).toEqual(["read_project_file", "search_zotero", "report_subject"]);
+    expect(sentSystemInstruction(model)).not.toContain(
+      "call propose_suggestion instead of pasting the replacement into prose",
+    );
   });
 
   it("reads a project file while answering a conversation turn", async function () {
@@ -879,6 +885,42 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     });
   });
 
+  it("offers and stamps modeless discussion suggestions with the review skill", async function () {
+    const request = documentRequest({
+      skill: null,
+      agentSessionId: "discussion-agent-modeless",
+    });
+    const { model } = strictStreamModel([
+      toolStep([toolChunk("propose_suggestion", suggestionDraft())]),
+      textStep("Naming the method makes the sentence concrete."),
+    ]);
+
+    const events = await collect(createGateway(model).stream(request));
+    const { suggestion } = events.find((event) => event.type === "suggestion");
+
+    expect(request.skill).toBeNull();
+    expect(UnresolvedSuggestionSchema.parse(suggestion)).toEqual(suggestion);
+    expect(suggestion.skill).toBe("review");
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toContain("propose_suggestion");
+    expect(sentSystemInstruction(model)).toContain(
+      "call propose_suggestion instead of pasting the replacement into prose",
+    );
+  });
+
+  it("keeps the discussion suggestion instruction out of a run", async function () {
+    const { model } = strictStreamModel([textStep("Run response.")]);
+
+    await collect(
+      createGateway(model).stream(documentRequest({ skill: null })),
+    );
+
+    expect(sentSystemInstruction(model)).not.toContain(
+      "call propose_suggestion instead of pasting the replacement into prose",
+    );
+  });
+
   it("shifts a selection-relative suggestion into absolute document positions", async function () {
     const selectionRequest = documentRequest({
       scope: {
@@ -1246,11 +1288,6 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       label: "a project scope",
       request: () => projectRequest(),
       code: "AI_PROJECT_SUGGESTION_NOT_ALLOWED",
-    },
-    {
-      label: "no selected skill",
-      request: () => documentRequest({ skill: null }),
-      code: "AI_SUGGESTION_SKILL_REQUIRED",
     },
     {
       label: "no scope at all",

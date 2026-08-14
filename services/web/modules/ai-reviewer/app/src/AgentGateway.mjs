@@ -3,6 +3,7 @@
 import {
   AgentEventSchema,
   AgentRequestSchema,
+  suggestionSkillForRequest,
 } from "../../shared/contracts.mjs";
 
 /**
@@ -375,7 +376,11 @@ export function assertAgentEventForRequest(request, event, expectedSequence) {
       : event.type === "suggestion"
         ? event.suggestion.skill
         : request.skill;
-  if (eventSkill !== request.skill) {
+  const expectedSkill =
+    event.type === "suggestion"
+      ? suggestionSkillForRequest(request)
+      : request.skill;
+  if (eventSkill !== expectedSkill) {
     throw new AgentGatewayError(
       "The provider event does not match the requested skill.",
       {
