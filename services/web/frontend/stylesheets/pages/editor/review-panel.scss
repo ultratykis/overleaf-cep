@@ -599,7 +599,7 @@ del.review-panel-content-highlight {
   z-index: 201;
 
   .review-panel-entry-header .review-panel-entry-user {
-    width: 130px;
+    max-width: 130px;
   }
 
   .review-panel-inner {
@@ -627,7 +627,7 @@ del.review-panel-content-highlight {
     background: var(--review-panel-entry-bg-color);
     border: 1px solid var(--review-panel-border-color);
     border-radius: var(--border-radius-base);
-    width: 200px;
+    width: var(--review-panel-width);
     padding: var(--spacing-02);
   }
 
@@ -636,7 +636,7 @@ del.review-panel-content-highlight {
       display: flex;
       position: absolute;
       left: auto;
-      right: -200px;
+      right: calc(-1 * var(--review-panel-width));
       top: 0;
       padding: var(--spacing-04);
     }
