@@ -133,7 +133,11 @@ import {
   applySelectedEditorSelectionSuggestion,
   readEditorSuggestionLiveContext,
 } from "../services/editor-suggestion-host-application";
-import { postAiReviewerComment } from "../services/ai-reviewer-comment-posting";
+import {
+  postAiReviewerComment,
+  postAiReviewerReply,
+  type AiReviewerReplyPoster,
+} from "../services/ai-reviewer-comment-posting";
 import {
   getSuggestionHunkIds as getDefaultSuggestionHunkIds,
   mountSuggestionCardDiff,
@@ -204,7 +208,8 @@ type CopyText = (text: string) => Promise<void>;
 type GetSuggestionHunkIds = typeof getDefaultSuggestionHunkIds;
 type ApplySelectionSuggestion = typeof applySelectedEditorSelectionSuggestion;
 
-type CommentDraft = {
+type ArtifactCommentDraft = {
+  kind: "artifact";
   key: string;
   generation: number;
   request: AgentRequest;
@@ -214,6 +219,20 @@ type CommentDraft = {
   status: "editing" | "posting";
   error: string | null;
 };
+
+type ReplyCommentDraft = {
+  kind: "reply";
+  key: string;
+  discussionId: string;
+  threadId: string;
+  runId: string;
+  artifactId: string;
+  content: string;
+  status: "editing" | "posting";
+  error: string | null;
+};
+
+type CommentDraft = ArtifactCommentDraft | ReplyCommentDraft;
 
 type ActiveCommentPosting = {
   key: string;
@@ -287,6 +306,7 @@ type Discussion = {
   subject: DiscussionSubject | null;
   subjectLabel: string;
   sourceGeneration: number | null;
+  commentThreadId: string | null;
   turns: DiscussionTurn[];
   toolCalls: Array<{ position: number; call: ToolCall }>;
   suggestions: UnresolvedSuggestion[];
@@ -319,6 +339,21 @@ function discussionBelongsToRun(
     (run.requestId != null &&
       discussion.subject?.sourceRequest.requestId === run.requestId)
   );
+}
+
+function latestAssistantReply(discussion: Discussion) {
+  for (let index = discussion.turns.length - 1; index >= 0; index -= 1) {
+    const turn = discussion.turns[index];
+    if (turn.role === "assistant") {
+      return {
+        index,
+        text: turn.text,
+        key: `discussion:${discussion.id}:reply:${index}`,
+        artifactId: `reply:${index}`,
+      };
+    }
+  }
+  return null;
 }
 
 function shouldAutoDeleteTransformRun(
@@ -1252,6 +1287,9 @@ function workspaceDiscussionFromState(
     subjectKey: discussion.subjectKey,
     subject: discussion.subject,
     sourceGeneration: discussion.sourceGeneration,
+    ...(discussion.commentThreadId == null
+      ? {}
+      : { commentThreadId: discussion.commentThreadId }),
     turns: discussion.turns,
     suggestions: discussion.suggestions.map((suggestion) => {
       const status = suggestionStatus(
@@ -1558,6 +1596,7 @@ function discussionFromWorkspace(
     subject: discussion.subject,
     subjectLabel: discussionSubjectLabel(discussion.subject, t),
     sourceGeneration: discussion.sourceGeneration,
+    commentThreadId: discussion.commentThreadId ?? null,
     turns: discussion.turns,
     // Tool lines belong to the live stream; the stored workspace keeps turns.
     toolCalls: [],
@@ -1638,6 +1677,7 @@ export function AiReviewerPanelView({
   applySelectionSuggestion = applySelectedEditorSelectionSuggestion,
   copyText = copyTextToClipboard,
   postEditorComment,
+  postReply,
   workspacePersistence,
   modeInstructionPersistence,
   loadProviderConnections,
@@ -1661,6 +1701,7 @@ export function AiReviewerPanelView({
   applySelectionSuggestion?: ApplySelectionSuggestion;
   copyText?: CopyText;
   postEditorComment?: PostEditorComment;
+  postReply?: AiReviewerReplyPoster;
   workspacePersistence?: AiReviewerWorkspacePersistence;
   modeInstructionPersistence?: AiReviewerModeInstructionPersistence;
   loadProviderConnections?: typeof getAiProviderConnections;
@@ -1874,6 +1915,9 @@ export function AiReviewerPanelView({
     null,
   );
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null);
+  const [postedReplyKeys, setPostedReplyKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [persistenceMutationPending, setPersistenceMutationPending] =
     useState(false);
   const [persistenceSaveFailed, setPersistenceSaveFailed] = useState(false);
@@ -3257,6 +3301,7 @@ export function AiReviewerPanelView({
       );
       activeCommentPosting.current = null;
       setCommentDraft({
+        kind: "artifact",
         key,
         generation,
         request,
@@ -3268,6 +3313,37 @@ export function AiReviewerPanelView({
       });
     },
     [getSelectionContext, postEditorComment, projectId, t],
+  );
+
+  const openReplyDraft = useCallback(
+    (discussion: Discussion) => {
+      const reply = latestAssistantReply(discussion);
+      if (
+        postReply == null ||
+        discussion.commentThreadId == null ||
+        discussion.status === "streaming" ||
+        reply == null ||
+        postedReplyKeys.has(reply.key)
+      ) {
+        return;
+      }
+      activeCommentPosting.current?.controller.abort(
+        cancellationReason("Another comment draft was opened."),
+      );
+      activeCommentPosting.current = null;
+      setCommentDraft({
+        kind: "reply",
+        key: reply.key,
+        discussionId: discussion.id,
+        threadId: discussion.commentThreadId,
+        runId: discussion.id,
+        artifactId: reply.artifactId,
+        content: reply.text,
+        status: "editing",
+        error: null,
+      });
+    },
+    [postReply, postedReplyKeys],
   );
 
   const cancelCommentDraft = useCallback(() => {
@@ -3284,8 +3360,8 @@ export function AiReviewerPanelView({
       draft == null ||
       draft.status !== "editing" ||
       draft.content.trim() === "" ||
-      postEditorComment == null ||
-      getSelectionContext == null
+      (draft.kind === "artifact" &&
+        (postEditorComment == null || getSelectionContext == null))
     ) {
       return;
     }
@@ -3302,6 +3378,63 @@ export function AiReviewerPanelView({
       status: "posting",
       error: null,
     });
+
+    if (draft.kind === "reply") {
+      if (postReply == null) {
+        activeCommentPosting.current = null;
+        setCommentDraft({
+          ...draft,
+          status: "editing",
+          error: t("ai_reviewer_comment_post_failed"),
+        });
+        return;
+      }
+      try {
+        await postReply({
+          projectId,
+          runId: draft.runId,
+          artifactId: draft.artifactId,
+          threadId: draft.threadId,
+          content: draft.content,
+        });
+      } catch (error) {
+        if (
+          mounted.current &&
+          activeCommentPosting.current === identity &&
+          !identity.controller.signal.aborted
+        ) {
+          activeCommentPosting.current = null;
+          setCommentDraft({
+            ...draft,
+            status: "editing",
+            error: commentPostingErrorMessage(
+              {
+                status: "error",
+                code:
+                  typeof error === "object" &&
+                  error != null &&
+                  "code" in error &&
+                  error.code === "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
+                    ? "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
+                    : "AI_REVIEWER_COMMENT_POST_FAILED",
+              },
+              t,
+            ),
+          });
+        }
+        return;
+      }
+      if (
+        mounted.current &&
+        activeCommentPosting.current === identity &&
+        !identity.controller.signal.aborted
+      ) {
+        activeCommentPosting.current = null;
+        setPostedReplyKeys((current) => new Set(current).add(draft.key));
+        setCommentDraft(null);
+      }
+      return;
+    }
 
     const result = await postAiReviewerArtifactComment({
       request: draft.request,
@@ -3378,6 +3511,8 @@ export function AiReviewerPanelView({
     now,
     openEvidenceDocument,
     postEditorComment,
+    postReply,
+    projectId,
     resolveEvidenceDocument,
     t,
     updateDiscussions,
@@ -3402,7 +3537,9 @@ export function AiReviewerPanelView({
   selectionToolbarState.current = { busy, runSelectionReview };
   const commentActionState = useRef<{
     busy: boolean;
-    submitConversationMessage: ((message: string) => Promise<void>) | null;
+    submitConversationMessage:
+      | ((message: string, commentThreadId?: string | null) => Promise<void>)
+      | null;
     t: TFunction;
   }>({ busy: commentActionBusy, submitConversationMessage: null, t });
   commentActionState.current.busy = commentActionBusy;
@@ -3455,6 +3592,7 @@ export function AiReviewerPanelView({
       event.preventDefault();
       void current.submitConversationMessage(
         current.t("ai_reviewer_action_address_comment", { threadId }),
+        threadId,
       );
     };
     window.addEventListener(
@@ -3783,6 +3921,7 @@ export function AiReviewerPanelView({
         subject,
         subjectLabel: discussionSubjectLabel(subject, t),
         sourceGeneration: runState.generation,
+        commentThreadId: null,
         turns: [],
         toolCalls: [],
         suggestions: [],
@@ -3836,50 +3975,66 @@ export function AiReviewerPanelView({
    * The composer is always on screen, so a message that arrives with nothing to
    * continue starts a subject-less conversation rather than being dropped.
    */
-  const openConversation = useCallback((): Discussion | null => {
-    const active =
-      activeDiscussionIdRef.current == null
-        ? null
-        : (discussionsRef.current.find(
-            (candidate) => candidate.id === activeDiscussionIdRef.current,
-          ) ?? null);
-    if (active != null) {
-      return active;
-    }
-    if (
-      discussionsRef.current.length >= AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT
-    ) {
-      setActionNotice(t("ai_reviewer_workspace_limit_reached"));
-      return null;
-    }
-    const discussion: Discussion = {
-      id: createDiscussionId(),
-      createdOrder: nextWorkspaceOrder.current + 1,
-      subjectKey: null,
-      subject: null,
-      subjectLabel: discussionSubjectLabel(null, t),
-      sourceGeneration: null,
-      turns: [],
-      toolCalls: [],
-      suggestions: [],
-      suggestionRequests: {},
-      suggestionSessions: {},
-      suggestionStatuses: {},
-      suggestionConflictCodes: {},
-      status: "idle",
-      error: null,
-      errorCode: null,
-      updatedAt: now(),
-    };
-    nextWorkspaceOrder.current += 1;
-    updateDiscussions((current) => [...current, discussion]);
-    setActionNotice(null);
-    activateDiscussion(discussion.id);
-    return discussion;
-  }, [activateDiscussion, createDiscussionId, now, t, updateDiscussions]);
+  const openConversation = useCallback(
+    (commentThreadId: string | null = null): Discussion | null => {
+      const active =
+        activeDiscussionIdRef.current == null
+          ? null
+          : (discussionsRef.current.find(
+              (candidate) => candidate.id === activeDiscussionIdRef.current,
+            ) ?? null);
+      if (
+        active != null &&
+        (commentThreadId == null || active.commentThreadId === commentThreadId)
+      ) {
+        return active;
+      }
+      if (commentThreadId != null) {
+        const existing = discussionsRef.current.find(
+          (candidate) => candidate.commentThreadId === commentThreadId,
+        );
+        if (existing != null) {
+          activateDiscussion(existing.id);
+          return existing;
+        }
+      }
+      if (
+        discussionsRef.current.length >= AI_REVIEWER_WORKSPACE_DISCUSSION_LIMIT
+      ) {
+        setActionNotice(t("ai_reviewer_workspace_limit_reached"));
+        return null;
+      }
+      const discussion: Discussion = {
+        id: createDiscussionId(),
+        createdOrder: nextWorkspaceOrder.current + 1,
+        subjectKey: null,
+        subject: null,
+        subjectLabel: discussionSubjectLabel(null, t),
+        sourceGeneration: null,
+        commentThreadId,
+        turns: [],
+        toolCalls: [],
+        suggestions: [],
+        suggestionRequests: {},
+        suggestionSessions: {},
+        suggestionStatuses: {},
+        suggestionConflictCodes: {},
+        status: "idle",
+        error: null,
+        errorCode: null,
+        updatedAt: now(),
+      };
+      nextWorkspaceOrder.current += 1;
+      updateDiscussions((current) => [...current, discussion]);
+      setActionNotice(null);
+      activateDiscussion(discussion.id);
+      return discussion;
+    },
+    [activateDiscussion, createDiscussionId, now, t, updateDiscussions],
+  );
 
   const submitConversationMessage = useCallback(
-    async (message: string) => {
+    async (message: string, commentThreadId: string | null = null) => {
       const text = message.trim();
       if (text === "") {
         return;
@@ -3893,7 +4048,7 @@ export function AiReviewerPanelView({
       ) {
         return;
       }
-      const discussion = openConversation();
+      const discussion = openConversation(commentThreadId);
       if (discussion == null) {
         return;
       }
@@ -5015,7 +5170,11 @@ export function AiReviewerPanelView({
     return (
       <form
         className="ai-reviewer-comment-form"
-        aria-label={t("ai_reviewer_post_artifact_comment_form")}
+        aria-label={t(
+          commentDraft.kind === "reply"
+            ? "ai_reviewer_post_reply_form"
+            : "ai_reviewer_post_artifact_comment_form",
+        )}
         onSubmit={(event) => {
           event.preventDefault();
           void submitCommentDraft();
@@ -6156,6 +6315,13 @@ export function AiReviewerPanelView({
         label: toolCallLabel(entry.call),
       }),
     );
+    const reply = latestAssistantReply(discussion);
+    const replyAvailable =
+      discussion.commentThreadId != null &&
+      discussion.status !== "streaming" &&
+      reply != null &&
+      postReply != null &&
+      !postedReplyKeys.has(reply.key);
     return (
       <article
         key={`discussion:${discussion.id}`}
@@ -6232,6 +6398,21 @@ export function AiReviewerPanelView({
             toolLines={toolLines}
           />
         </div>
+        {reply != null && replyAvailable && (
+          <div className="ai-reviewer-artifact-heading-actions">
+            <AiReviewerTooltipIconButton
+              id={`${reply.key}-post-comment`}
+              label={t("ai_reviewer_post_reply_to_thread")}
+              icon="add_comment"
+              disabled={
+                persistenceConflict ||
+                (commentDraft != null && commentDraft.key !== reply.key)
+              }
+              onClick={() => openReplyDraft(discussion)}
+            />
+          </div>
+        )}
+        {reply != null && renderCommentDraft(reply.key)}
         {discussion.suggestions.length > 0 && (
           <section
             className="ai-reviewer-run-artifacts"
@@ -6947,6 +7128,7 @@ export default function AiReviewerPanel() {
       resolveEvidenceDocument={resolveEvidenceDocument}
       openEvidenceDocument={openEvidenceDocument}
       postEditorComment={postAiReviewerComment}
+      postReply={postAiReviewerReply}
       workspacePersistence={aiReviewerWorkspacePersistence}
       modeInstructionPersistence={aiReviewerModeInstructionPersistence}
       loadProviderConnections={getAiProviderConnections}

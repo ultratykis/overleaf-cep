@@ -22,8 +22,11 @@ import {
   dispatchAiReviewerCommentAction,
   dispatchAiReviewerCommentActionBusy,
 } from "../../frontend/js/services/comment-action-events";
+import { typeConversationMessage } from "./helpers/panel-composer";
 
 const threadId = "comment-thread-138" as ThreadId;
+const replyProjectId = "a".repeat(24);
+const replyThreadId = "b".repeat(24) as ThreadId;
 
 // The panel only runs once its connection catalog has loaded, so a test that
 // exercises the run path has to supply one.
@@ -58,6 +61,42 @@ function loadedCatalogProps() {
         },
       ],
       failures: [],
+    }),
+  };
+}
+
+function completedConversationProps(projectId: string) {
+  return {
+    captureSelectionSession: sinon.stub().callsFake(async (request) => ({
+      status: "ready",
+      session: {
+        request: {
+          ...request,
+          projectId,
+          skill: null,
+          scope: {
+            kind: "document",
+            documentId: "c".repeat(24),
+            path: "main.tex",
+            baseRevision: 1,
+            baseTextHash: "d".repeat(64),
+            text: "Synthetic document.",
+          },
+        },
+        binding: {},
+      },
+    })),
+    streamRequest: sinon.stub().callsFake(async (call) => {
+      call.onEvent({
+        type: "text.delta",
+        requestId: call.request.requestId,
+        delta: "Use this explicit AI proposal.",
+      });
+      call.onEvent({
+        type: "completed",
+        requestId: call.request.requestId,
+        finishReason: "stop",
+      });
     }),
   };
 }
@@ -156,6 +195,63 @@ describe("AI reviewer: comment actions", function () {
 
     expect(handled).to.equal(false);
     expect(captureSelectionSession).not.to.have.been.called;
+  });
+
+  it("offers an explicit reply action only for a thread-scoped conversation", async function () {
+    const postReply = sinon.stub().resolves({ commentId: "e".repeat(24) });
+    render(
+      <AiReviewerPanelView
+        projectId={replyProjectId}
+        createDiscussionId={() => "comment-reply-discussion"}
+        createDiscussionRequestId={() => "comment-reply-request"}
+        postReply={postReply}
+        {...completedConversationProps(replyProjectId)}
+        {...loadedCatalogProps()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(dispatchAiReviewerCommentAction(replyThreadId)).to.equal(true);
+    });
+    expect(await screen.findByText("Use this explicit AI proposal.")).to.exist;
+    const postAction = await screen.findByRole("button", {
+      name: "Post reply to thread",
+    });
+    expect(postReply).not.to.have.been.called;
+
+    fireEvent.click(postAction);
+    const body = screen.getByRole("textbox", { name: "Comment body" });
+    expect(body).to.have.property("value", "Use this explicit AI proposal.");
+    fireEvent.click(screen.getByRole("button", { name: "Post comment" }));
+
+    await waitFor(() => expect(postReply).to.have.been.calledOnce);
+    expect(postReply).to.have.been.calledWithExactly({
+      projectId: replyProjectId,
+      runId: "comment-reply-discussion",
+      artifactId: "reply:1",
+      threadId: replyThreadId,
+      content: "Use this explicit AI proposal.",
+    });
+  });
+
+  it("does not offer or auto-post a reply for a conversation without a thread", async function () {
+    const postReply = sinon.stub().resolves({ commentId: "e".repeat(24) });
+    render(
+      <AiReviewerPanelView
+        projectId={replyProjectId}
+        createDiscussionId={() => "ordinary-discussion"}
+        createDiscussionRequestId={() => "ordinary-request"}
+        postReply={postReply}
+        {...completedConversationProps(replyProjectId)}
+        {...loadedCatalogProps()}
+      />,
+    );
+
+    typeConversationMessage("Propose an answer without a comment thread.");
+    expect(await screen.findByText("Use this explicit AI proposal.")).to.exist;
+    expect(screen.queryByRole("button", { name: "Post reply to thread" })).not
+      .to.exist;
+    expect(postReply).not.to.have.been.called;
   });
 
   it("is disabled and dispatches nothing while busy", function () {

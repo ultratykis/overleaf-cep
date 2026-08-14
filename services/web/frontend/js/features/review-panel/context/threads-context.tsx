@@ -69,6 +69,7 @@ const aiReviewerCommentBridgeModules = importOverleafModules(
   import: {
     default: ComponentType<{
       addComment: ThreadsActions['addComment']
+      addMessage: ThreadsActions['addMessage']
     }>
   }
   path: string
@@ -481,7 +482,10 @@ export const ThreadsProvider: FC<React.PropsWithChildren> = ({ children }) => {
   return (
     <ThreadsActionsContext.Provider value={actions}>
       {AiReviewerCommentBridge != null && (
-        <AiReviewerCommentBridge addComment={actions.addComment} />
+        <AiReviewerCommentBridge
+          addComment={actions.addComment}
+          addMessage={actions.addMessage}
+        />
       )}
       <ThreadsContext.Provider value={data}>{children}</ThreadsContext.Provider>
     </ThreadsActionsContext.Provider>

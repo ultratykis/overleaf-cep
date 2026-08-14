@@ -323,6 +323,8 @@
   "ai_reviewer_post_artifact_comment_form": "",
   "ai_reviewer_post_comment": "",
   "ai_reviewer_post_finding_as_comment": "",
+  "ai_reviewer_post_reply_form": "",
+  "ai_reviewer_post_reply_to_thread": "",
   "ai_reviewer_post_suggestion_as_comment": "",
   "ai_reviewer_posting_comment": "",
   "ai_reviewer_preview_diff": "",

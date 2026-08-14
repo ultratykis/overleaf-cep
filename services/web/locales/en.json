@@ -354,6 +354,8 @@
   "ai_reviewer_post_artifact_comment_form": "Post AI artifact as comment",
   "ai_reviewer_post_comment": "Post comment",
   "ai_reviewer_post_finding_as_comment": "Post finding as comment",
+  "ai_reviewer_post_reply_form": "Post AI reply to comment thread",
+  "ai_reviewer_post_reply_to_thread": "Post reply to thread",
   "ai_reviewer_post_suggestion_as_comment": "Post suggestion as comment",
   "ai_reviewer_posting_comment": "Posting comment",
   "ai_reviewer_preview_diff": "Preview diff __index__",

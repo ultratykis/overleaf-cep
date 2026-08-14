@@ -11,6 +11,7 @@ const projectId = "669e48d55ee80e3a12940711";
 const otherProjectId = "669e48d55ee80e3a12940712";
 const commentId = "669e48d55ee80e3a12940721";
 const otherCommentId = "669e48d55ee80e3a12940722";
+const replyMessageId = "669e48d55ee80e3a12940724";
 const runId = "run-141";
 const artifactId = "artifact-141";
 const otherArtifactId = "artifact-142";
@@ -157,7 +158,15 @@ async function captureError(promise) {
 describe("AI reviewer comment provenance model and store", function () {
   it("stores only the keyed identifiers and confirmation state", function () {
     expect(Object.keys(AiReviewerCommentProvenanceSchema.paths).sort()).toEqual(
-      ["_id", "artifactId", "projectId", "runId", "uncertain"],
+      [
+        "_id",
+        "artifactId",
+        "projectId",
+        "replyMessageId",
+        "replyThreadId",
+        "runId",
+        "uncertain",
+      ],
     );
     expect(AiReviewerCommentProvenanceSchema.options).toEqual(
       expect.objectContaining({
@@ -324,6 +333,74 @@ describe("AI reviewer comment provenance model and store", function () {
       confirmed: true,
     });
     expect(await store.lookup(projectId, runId, otherArtifactId)).toBeNull();
+  });
+
+  it("marks one reply message without marking its human-started thread", async function () {
+    const { model, records } = inMemoryModel();
+    const getThreadState = vi.fn();
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState,
+    });
+
+    expect(
+      await store.mark(projectId, commentId, runId, artifactId, otherCommentId),
+    ).toEqual({
+      commentId,
+      created: true,
+      confirmed: false,
+      threadId: otherCommentId,
+      messageId: null,
+    });
+    expect(await store.list(projectId)).toEqual([]);
+    expect(await store.lookup(projectId, runId, artifactId)).toEqual({
+      commentId,
+      confirmed: false,
+      threadId: otherCommentId,
+      messageId: null,
+    });
+
+    expect(
+      await store.confirmReply(
+        projectId,
+        commentId,
+        runId,
+        artifactId,
+        otherCommentId,
+        replyMessageId,
+      ),
+    ).toEqual({
+      commentId,
+      confirmed: true,
+      threadId: otherCommentId,
+      messageId: replyMessageId,
+    });
+    expect(await store.list(projectId)).toEqual([replyMessageId]);
+    expect(records.get(commentId)).toEqual({
+      _id: commentId,
+      projectId,
+      runId,
+      artifactId,
+      replyThreadId: otherCommentId,
+      replyMessageId,
+      uncertain: false,
+    });
+    expect(getThreadState).not.toHaveBeenCalled();
+  });
+
+  it("rejects a keyed collision between a new thread and a reply", async function () {
+    const { model } = inMemoryModel();
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState: vi.fn(),
+    });
+
+    await store.mark(projectId, commentId, runId, artifactId);
+    expect(
+      await captureError(
+        store.mark(projectId, otherCommentId, runId, artifactId, commentId),
+      ),
+    ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
   });
 
   it("rejects identifiers outside the existing ThreadId shape before storage", async function () {

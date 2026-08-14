@@ -24,11 +24,19 @@ const aiReviewerCommentLabelModules = importOverleafModules(
   'aiReviewerCommentLabels'
 ) as {
   import: {
-    default: ComponentType<PropsWithChildren<{ commentId: ThreadId }>>
+    default: ComponentType<PropsWithChildren<{ commentId: string }>>
   }
   path: string
 }[]
 const AiAssistedCommentLabel = aiReviewerCommentLabelModules[0]?.import.default
+
+export function aiReviewerCommentProvenanceId(
+  threadId: ThreadId,
+  messageId: CommentId,
+  isReply: boolean
+) {
+  return isReply ? messageId : threadId
+}
 
 export const ReviewPanelCommentContent = memo<{
   comment: Change<CommentOperation>
@@ -133,8 +141,14 @@ export const ReviewPanelCommentContent = memo<{
               {isReply && (
                 <div className="review-panel-comment-reply-divider" />
               )}
-              {!isReply && AiAssistedCommentLabel != null ? (
-                <AiAssistedCommentLabel commentId={comment.op.t}>
+              {AiAssistedCommentLabel != null ? (
+                <AiAssistedCommentLabel
+                  commentId={aiReviewerCommentProvenanceId(
+                    comment.op.t,
+                    message.id,
+                    isReply
+                  )}
+                >
                   {renderedMessage}
                 </AiAssistedCommentLabel>
               ) : (

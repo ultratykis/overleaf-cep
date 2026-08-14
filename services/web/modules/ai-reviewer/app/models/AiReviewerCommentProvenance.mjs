@@ -10,6 +10,8 @@ export const AiReviewerCommentProvenanceSchema = new mongoose.Schema(
     projectId: { type: ObjectId, ref: "Project", required: true },
     runId: { type: String, required: true, maxlength: 200 },
     artifactId: { type: String, required: true, maxlength: 200 },
+    replyThreadId: { type: ObjectId },
+    replyMessageId: { type: ObjectId },
     uncertain: { type: Boolean, required: true, default: true },
   },
   {

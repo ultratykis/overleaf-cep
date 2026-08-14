@@ -75,9 +75,24 @@ function parseReservation(value: unknown) {
     throw new TypeError("Invalid AI reviewer comment provenance response");
   }
   assertIdentifier(value.commentId, "commentId");
+  const threadId = "threadId" in value ? value.threadId : undefined;
+  const messageId = "messageId" in value ? value.messageId : undefined;
+  if (threadId !== undefined) {
+    if (typeof threadId !== "string") {
+      throw new TypeError("Invalid AI reviewer comment provenance response");
+    }
+    assertIdentifier(threadId, "threadId");
+  }
+  if (messageId !== undefined && messageId !== null) {
+    if (typeof messageId !== "string") {
+      throw new TypeError("Invalid AI reviewer comment provenance response");
+    }
+    assertIdentifier(messageId, "messageId");
+  }
   return {
     commentId: value.commentId,
     confirmed: value.confirmed,
+    ...(threadId === undefined ? {} : { threadId, messageId }),
   };
 }
 
@@ -149,6 +164,70 @@ export async function reserveAiReviewerCommentProvenance(
     created: response.created,
     confirmed: response.confirmed,
   };
+}
+
+export async function reserveAiReviewerReplyProvenance(
+  projectId: string,
+  commentId: string,
+  runId: string,
+  artifactId: string,
+  threadId: string,
+  signal?: AbortSignal,
+) {
+  assertIdentifier(threadId, "threadId");
+  const query = new URLSearchParams({ runId, artifactId, threadId });
+  const response = await putJSON<unknown>(
+    `${commentProvenancePath(projectId, commentId)}?${query}`,
+    { signal, swallowAbortError: false },
+  );
+  if (
+    typeof response !== "object" ||
+    response == null ||
+    !("created" in response) ||
+    typeof response.created !== "boolean"
+  ) {
+    throw new TypeError("Invalid AI reviewer comment provenance response");
+  }
+  const reservation = parseReservation(response);
+  if (reservation.threadId !== threadId) {
+    throw new TypeError("Invalid AI reviewer comment provenance response");
+  }
+  return {
+    ...reservation,
+    created: response.created,
+  };
+}
+
+export async function confirmAiReviewerReplyProvenance(
+  projectId: string,
+  commentId: string,
+  runId: string,
+  artifactId: string,
+  threadId: string,
+  messageId: string,
+  signal?: AbortSignal,
+) {
+  assertIdentifier(threadId, "threadId");
+  assertIdentifier(messageId, "messageId");
+  const query = new URLSearchParams({
+    runId,
+    artifactId,
+    threadId,
+    messageId,
+  });
+  const response = await putJSON<unknown>(
+    `${commentProvenancePath(projectId, commentId)}?${query}`,
+    { signal, swallowAbortError: false },
+  );
+  const reservation = parseReservation(response);
+  if (
+    reservation.confirmed !== true ||
+    reservation.threadId !== threadId ||
+    reservation.messageId !== messageId
+  ) {
+    throw new TypeError("Invalid AI reviewer comment provenance response");
+  }
+  return reservation;
 }
 
 export async function lookupAiReviewerCommentProvenance(

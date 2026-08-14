@@ -66,12 +66,23 @@ export function createAiReviewerCommentProvenanceController({
    */
   async function markCommentProvenance(request, response) {
     try {
-      const result = await provenanceStore.mark(
-        request.params.project_id,
-        request.params.comment_id,
-        request.query?.runId,
-        request.query?.artifactId,
-      );
+      const result =
+        request.query?.messageId == null
+          ? await provenanceStore.mark(
+              request.params.project_id,
+              request.params.comment_id,
+              request.query?.runId,
+              request.query?.artifactId,
+              request.query?.threadId,
+            )
+          : await provenanceStore.confirmReply(
+              request.params.project_id,
+              request.params.comment_id,
+              request.query?.runId,
+              request.query?.artifactId,
+              request.query?.threadId,
+              request.query?.messageId,
+            );
       return response.json(result);
     } catch (error) {
       return handleError(error, response);

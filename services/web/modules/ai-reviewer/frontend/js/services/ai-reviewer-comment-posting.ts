@@ -18,6 +18,14 @@ export type PostAiReviewerCommentResult = {
   commentId: string;
 };
 
+export type PostAiReviewerReplyInput = {
+  projectId: string;
+  runId: string;
+  artifactId: string;
+  threadId: string;
+  content: string;
+};
+
 export type AiReviewerCommentPostingErrorCode =
   | "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE"
   | "AI_REVIEWER_COMMENT_POST_UNCERTAIN"
@@ -38,6 +46,10 @@ export class AiReviewerCommentPostingError extends Error {
 
 export type AiReviewerCommentPoster = (
   input: PostAiReviewerCommentInput,
+) => Promise<PostAiReviewerCommentResult>;
+
+export type AiReviewerReplyPoster = (
+  input: PostAiReviewerReplyInput,
 ) => Promise<PostAiReviewerCommentResult>;
 
 export type CreateAiReviewerCommentPosterOptions = {
@@ -63,6 +75,41 @@ export type CreateAiReviewerCommentPosterOptions = {
     commentId: string,
     validateRange: () => boolean,
   ) => Promise<string>;
+  recordProvenance: (projectId: string, commentId: string) => void;
+};
+
+type ReplyReservation = {
+  commentId: string;
+  confirmed: boolean;
+  threadId?: string;
+  messageId?: string | null;
+};
+
+export type CreateAiReviewerReplyPosterOptions = {
+  projectId: string;
+  generateCommentId: () => string;
+  lookupProvenance: (
+    projectId: string,
+    runId: string,
+    artifactId: string,
+  ) => Promise<ReplyReservation | null>;
+  reserveProvenance: (
+    projectId: string,
+    commentId: string,
+    runId: string,
+    artifactId: string,
+    threadId: string,
+  ) => Promise<ReplyReservation & { created: boolean }>;
+  confirmProvenance: (
+    projectId: string,
+    commentId: string,
+    runId: string,
+    artifactId: string,
+    threadId: string,
+    messageId: string,
+  ) => Promise<ReplyReservation>;
+  releaseProvenance: (projectId: string, commentId: string) => Promise<void>;
+  addReply: (threadId: string, content: string) => Promise<string>;
   recordProvenance: (projectId: string, commentId: string) => void;
 };
 
@@ -122,6 +169,25 @@ function validateInput(input: PostAiReviewerCommentInput) {
     throw postingError(
       "AI_REVIEWER_COMMENT_REQUEST_INVALID",
       "The AI-assisted comment request is invalid.",
+    );
+  }
+}
+
+function validateReplyInput(input: PostAiReviewerReplyInput) {
+  if (
+    !mongoIdentifierPattern.test(input.projectId) ||
+    !mongoIdentifierPattern.test(input.threadId) ||
+    typeof input.runId !== "string" ||
+    input.runId.length === 0 ||
+    input.runId.length > 200 ||
+    typeof input.artifactId !== "string" ||
+    input.artifactId.length === 0 ||
+    input.artifactId.length > 200 ||
+    input.content.trim().length === 0
+  ) {
+    throw postingError(
+      "AI_REVIEWER_COMMENT_REQUEST_INVALID",
+      "The AI-assisted reply request is invalid.",
     );
   }
 }
@@ -352,10 +418,196 @@ export function createAiReviewerCommentPoster({
   };
 }
 
+export function createAiReviewerReplyPoster({
+  projectId,
+  generateCommentId,
+  lookupProvenance,
+  reserveProvenance,
+  confirmProvenance,
+  releaseProvenance,
+  addReply,
+  recordProvenance,
+}: CreateAiReviewerReplyPosterOptions): AiReviewerReplyPoster {
+  return async (input) => {
+    validateReplyInput(input);
+    if (input.projectId !== projectId) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE",
+        "The comment host is not available for this project.",
+      );
+    }
+
+    let reservation: (ReplyReservation & { created: boolean }) | null;
+    try {
+      const existing = await lookupProvenance(
+        projectId,
+        input.runId,
+        input.artifactId,
+      );
+      reservation = existing == null ? null : { ...existing, created: false };
+    } catch {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted provenance could not be read.",
+      );
+    }
+    if (reservation != null) {
+      if (
+        !mongoIdentifierPattern.test(reservation.commentId) ||
+        reservation.threadId !== input.threadId
+      ) {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+          "AI-assisted provenance belongs to a different comment target.",
+        );
+      }
+      if (reservation.confirmed) {
+        if (
+          reservation.messageId == null ||
+          !mongoIdentifierPattern.test(reservation.messageId)
+        ) {
+          throw postingError(
+            "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+            "AI-assisted provenance returned an invalid reply identifier.",
+          );
+        }
+        recordProvenance(projectId, reservation.messageId);
+        return { commentId: reservation.messageId };
+      }
+      // A reply has no client-chosen host identifier. Retrying an uncertain
+      // claim would create a second message, so keep the claim and do not send.
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        "The reply response could not be confirmed.",
+      );
+    }
+
+    let commentId: string;
+    try {
+      commentId = generateCommentId();
+    } catch {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_FAILED",
+        "The provenance identifier could not be created.",
+      );
+    }
+    if (!mongoIdentifierPattern.test(commentId)) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_FAILED",
+        "The provenance identifier is invalid.",
+      );
+    }
+    try {
+      reservation = await reserveProvenance(
+        projectId,
+        commentId,
+        input.runId,
+        input.artifactId,
+        input.threadId,
+      );
+    } catch {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted provenance could not be reserved.",
+      );
+    }
+    if (
+      reservation.commentId !== commentId ||
+      reservation.threadId !== input.threadId
+    ) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted provenance returned the wrong reply target.",
+      );
+    }
+    if (reservation.confirmed) {
+      if (
+        reservation.messageId == null ||
+        !mongoIdentifierPattern.test(reservation.messageId)
+      ) {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+          "AI-assisted provenance returned an invalid reply identifier.",
+        );
+      }
+      recordProvenance(projectId, reservation.messageId);
+      return { commentId: reservation.messageId };
+    }
+    if (!reservation.created) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        "The reply response could not be confirmed.",
+      );
+    }
+
+    const rollbackReservation = async () => {
+      try {
+        await releaseProvenance(projectId, commentId);
+      } catch {
+        // A failed rollback must not hide the definite host rejection.
+      }
+    };
+
+    let messageId: string;
+    try {
+      messageId = await addReply(input.threadId, input.content);
+    } catch (error) {
+      if (isClearHostRejection(error)) {
+        await rollbackReservation();
+        throw postingError(
+          "AI_REVIEWER_COMMENT_POST_FAILED",
+          "The reply request was rejected.",
+        );
+      }
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        "The reply response could not be confirmed.",
+      );
+    }
+    if (!mongoIdentifierPattern.test(messageId)) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+        "The reply response could not be confirmed.",
+      );
+    }
+    try {
+      const confirmed = await confirmProvenance(
+        projectId,
+        commentId,
+        input.runId,
+        input.artifactId,
+        input.threadId,
+        messageId,
+      );
+      if (
+        !confirmed.confirmed ||
+        confirmed.threadId !== input.threadId ||
+        confirmed.messageId !== messageId
+      ) {
+        throw new TypeError("Invalid reply provenance confirmation");
+      }
+    } catch {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted reply provenance could not be confirmed.",
+      );
+    }
+    recordProvenance(projectId, messageId);
+    return { commentId: messageId };
+  };
+}
+
 let registeredPoster:
   | {
       token: symbol;
       post: AiReviewerCommentPoster;
+    }
+  | undefined;
+
+let registeredReplyPoster:
+  | {
+      token: symbol;
+      post: AiReviewerReplyPoster;
     }
   | undefined;
 
@@ -383,6 +635,30 @@ export async function postAiReviewerComment(
   return poster(input);
 }
 
+export function registerAiReviewerReplyPoster(post: AiReviewerReplyPoster) {
+  const token = Symbol("ai-reviewer-reply-poster");
+  registeredReplyPoster = { token, post };
+  return () => {
+    if (registeredReplyPoster?.token === token) {
+      registeredReplyPoster = undefined;
+    }
+  };
+}
+
+export async function postAiReviewerReply(
+  input: PostAiReviewerReplyInput,
+): Promise<PostAiReviewerCommentResult> {
+  const poster = registeredReplyPoster?.post;
+  if (poster == null) {
+    throw postingError(
+      "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE",
+      "The comment host is not available.",
+    );
+  }
+  return poster(input);
+}
+
 export function resetAiReviewerCommentPosterForTests() {
   registeredPoster = undefined;
+  registeredReplyPoster = undefined;
 }

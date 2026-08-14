@@ -76,6 +76,19 @@ export function createAiReviewerCommentProvenanceStore({
       }
 
       const commentId = objectId(record._id);
+      if (record.replyThreadId != null) {
+        const threadId = objectId(record.replyThreadId);
+        const messageId =
+          record.replyMessageId == null
+            ? null
+            : objectId(record.replyMessageId);
+        return {
+          commentId,
+          confirmed: record.uncertain !== true && messageId != null,
+          threadId,
+          messageId,
+        };
+      }
       if (record.uncertain !== true) {
         return { commentId, confirmed: true };
       }
@@ -109,6 +122,11 @@ export function createAiReviewerCommentProvenanceStore({
       const resolvedRecords = await Promise.all(
         records.map(async (record) => {
           const commentId = objectId(record._id);
+          if (record.replyThreadId != null) {
+            return record.uncertain !== true && record.replyMessageId != null
+              ? objectId(record.replyMessageId)
+              : null;
+          }
           if (record.uncertain !== true) {
             return commentId;
           }
@@ -150,12 +168,21 @@ export function createAiReviewerCommentProvenanceStore({
      * @param {unknown} commentIdInput
      * @param {unknown} runIdInput
      * @param {unknown} artifactIdInput
+     * @param {unknown} [replyThreadIdInput]
      */
-    async mark(projectIdInput, commentIdInput, runIdInput, artifactIdInput) {
+    async mark(
+      projectIdInput,
+      commentIdInput,
+      runIdInput,
+      artifactIdInput,
+      replyThreadIdInput,
+    ) {
       const projectId = objectId(projectIdInput);
       const commentId = objectId(commentIdInput);
       const runId = boundedIdentifier(runIdInput);
       const artifactId = boundedIdentifier(artifactIdInput);
+      const replyThreadId =
+        replyThreadIdInput == null ? null : objectId(replyThreadIdInput);
       let result;
       try {
         result = await model
@@ -167,6 +194,7 @@ export function createAiReviewerCommentProvenanceStore({
                 projectId,
                 runId,
                 artifactId,
+                ...(replyThreadId == null ? {} : { replyThreadId }),
                 uncertain: true,
               },
             },
@@ -189,10 +217,80 @@ export function createAiReviewerCommentProvenanceStore({
       if (record == null) {
         throw new Error("The AI-assisted comment reservation was not found.");
       }
+      const storedReplyThreadId =
+        record.replyThreadId == null ? null : objectId(record.replyThreadId);
+      if (storedReplyThreadId !== replyThreadId) {
+        throw new AiReviewerCommentProvenanceValidationError();
+      }
       return {
         commentId: objectId(record._id),
         created: result?.upsertedCount === 1 || result?.upsertedId != null,
-        confirmed: record.uncertain !== true,
+        confirmed:
+          record.uncertain !== true &&
+          (replyThreadId == null || record.replyMessageId != null),
+        ...(replyThreadId == null
+          ? {}
+          : {
+              threadId: storedReplyThreadId,
+              messageId:
+                record.replyMessageId == null
+                  ? null
+                  : objectId(record.replyMessageId),
+            }),
+      };
+    },
+
+    /**
+     * @param {unknown} projectIdInput
+     * @param {unknown} commentIdInput
+     * @param {unknown} runIdInput
+     * @param {unknown} artifactIdInput
+     * @param {unknown} replyThreadIdInput
+     * @param {unknown} replyMessageIdInput
+     */
+    async confirmReply(
+      projectIdInput,
+      commentIdInput,
+      runIdInput,
+      artifactIdInput,
+      replyThreadIdInput,
+      replyMessageIdInput,
+    ) {
+      const projectId = objectId(projectIdInput);
+      const commentId = objectId(commentIdInput);
+      const runId = boundedIdentifier(runIdInput);
+      const artifactId = boundedIdentifier(artifactIdInput);
+      const replyThreadId = objectId(replyThreadIdInput);
+      const replyMessageId = objectId(replyMessageIdInput);
+      await model
+        .updateOne(
+          {
+            _id: commentId,
+            projectId,
+            runId,
+            artifactId,
+            replyThreadId,
+          },
+          { $set: { replyMessageId, uncertain: false } },
+        )
+        .exec();
+      const record = await model
+        .findOne({ _id: commentId, projectId, runId, artifactId })
+        .lean()
+        .exec();
+      if (
+        record == null ||
+        objectId(record.replyThreadId) !== replyThreadId ||
+        objectId(record.replyMessageId) !== replyMessageId ||
+        record.uncertain === true
+      ) {
+        throw new Error("The AI-assisted reply provenance was not confirmed.");
+      }
+      return {
+        commentId,
+        confirmed: true,
+        threadId: replyThreadId,
+        messageId: replyMessageId,
       };
     },
 

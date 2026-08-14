@@ -7,23 +7,29 @@ import React from "react";
 import sinon from "sinon";
 
 import { ProjectProvider } from "@/shared/context/project-context";
+import { aiReviewerCommentProvenanceId } from "@/features/review-panel/components/review-panel-comment-content";
 import { postCommentMessageAfterRangeValidation } from "@/features/review-panel/context/threads-context";
 import { FetchError } from "@/infrastructure/fetch-json";
 import AiAssistedCommentLabel from "../../frontend/js/components/ai-assisted-comment-label";
 import {
   loadAiReviewerCommentProvenance,
   lookupAiReviewerCommentProvenance,
+  confirmAiReviewerReplyProvenance,
   recordAiReviewerCommentProvenance,
   releaseAiReviewerCommentProvenance,
   reserveAiReviewerCommentProvenance,
+  reserveAiReviewerReplyProvenance,
   resetAiReviewerCommentProvenanceForTests,
   snapshotAiReviewerCommentProvenance,
 } from "../../frontend/js/services/ai-reviewer-comment-provenance";
 import {
   AiReviewerCommentPostingError,
   createAiReviewerCommentPoster,
+  createAiReviewerReplyPoster,
   postAiReviewerComment,
+  postAiReviewerReply,
   registerAiReviewerCommentPoster,
+  registerAiReviewerReplyPoster,
   resetAiReviewerCommentPosterForTests,
   type PostAiReviewerCommentInput,
 } from "../../frontend/js/services/ai-reviewer-comment-posting";
@@ -36,6 +42,8 @@ const projectId = "a".repeat(24);
 const otherProjectId = "b".repeat(24);
 const documentId = "c".repeat(24);
 const commentId = "d".repeat(24);
+const threadId = "e".repeat(24);
+const replyMessageId = "f".repeat(24);
 const runId = "run-comment-posting";
 const artifactId = "artifact-comment-posting";
 const csrfToken = "synthetic-comment-csrf";
@@ -54,6 +62,14 @@ const input: PostAiReviewerCommentInput = {
   to: 12,
   text: "target",
   content: "Editable AI-assisted comment.",
+};
+
+const replyInput = {
+  projectId,
+  runId: "discussion-comment-reply",
+  artifactId: "reply:1",
+  threadId,
+  content: "Editable AI-assisted reply.",
 };
 
 function liveContext(text = "alpha target omega") {
@@ -181,9 +197,7 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       projectId,
       getContext: () => staleContext,
       generateCommentId: () => commentId,
-      lookupProvenance: sinon
-        .stub()
-        .resolves({ commentId, confirmed: false }),
+      lookupProvenance: sinon.stub().resolves({ commentId, confirmed: false }),
       reserveProvenance: sinon
         .stub()
         .resolves({ commentId, created: false, confirmed: false }),
@@ -349,6 +363,140 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect(addComment).to.have.been.calledTwice;
   });
 
+  it("posts one keyed reply to the intended existing thread exactly once", async function () {
+    const lookupProvenance = sinon
+      .stub()
+      .onFirstCall()
+      .resolves(null)
+      .onSecondCall()
+      .resolves({
+        commentId,
+        confirmed: true,
+        threadId,
+        messageId: replyMessageId,
+      });
+    const addReply = sinon.stub().resolves(replyMessageId);
+    const recordProvenance = sinon.stub();
+    const post = createAiReviewerReplyPoster({
+      projectId,
+      generateCommentId: () => commentId,
+      lookupProvenance,
+      reserveProvenance: sinon.stub().resolves({
+        commentId,
+        created: true,
+        confirmed: false,
+        threadId,
+        messageId: null,
+      }),
+      confirmProvenance: sinon.stub().resolves({
+        commentId,
+        confirmed: true,
+        threadId,
+        messageId: replyMessageId,
+      }),
+      releaseProvenance: sinon.stub().resolves(),
+      addReply,
+      recordProvenance,
+    });
+
+    expect(await post(replyInput)).to.deep.equal({ commentId: replyMessageId });
+    expect(await post(replyInput)).to.deep.equal({ commentId: replyMessageId });
+    expect(addReply).to.have.been.calledOnceWithExactly(
+      threadId,
+      replyInput.content,
+    );
+    expect(recordProvenance).to.have.been.calledTwice;
+    expect(recordProvenance.firstCall.args).to.deep.equal([
+      projectId,
+      replyMessageId,
+    ]);
+    expect(recordProvenance.secondCall.args).to.deep.equal([
+      projectId,
+      replyMessageId,
+    ]);
+  });
+
+  it("keeps an ambiguous reply claim and does not post again on retry", async function () {
+    const addReply = sinon
+      .stub()
+      .rejects(new TypeError("response unavailable"));
+    const releaseProvenance = sinon.stub().resolves();
+    const lookupProvenance = sinon
+      .stub()
+      .onFirstCall()
+      .resolves(null)
+      .onSecondCall()
+      .resolves({
+        commentId,
+        confirmed: false,
+        threadId,
+        messageId: null,
+      });
+    const post = createAiReviewerReplyPoster({
+      projectId,
+      generateCommentId: () => commentId,
+      lookupProvenance,
+      reserveProvenance: sinon.stub().resolves({
+        commentId,
+        created: true,
+        confirmed: false,
+        threadId,
+        messageId: null,
+      }),
+      confirmProvenance: sinon.stub(),
+      releaseProvenance,
+      addReply,
+      recordProvenance: sinon.stub(),
+    });
+
+    const first = await rejectedError(post(replyInput));
+    const retry = await rejectedError(post(replyInput));
+    expect((first as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    );
+    expect((retry as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    );
+    expect(addReply).to.have.been.calledOnce;
+    expect(releaseProvenance).not.to.have.been.called;
+  });
+
+  it("releases a reply claim only after a definite host rejection", async function () {
+    for (const [error, expectedRollbacks] of [
+      [
+        new FetchError(
+          "rejected",
+          "/synthetic-reply",
+          {},
+          new Response(null, { status: 400 }),
+        ),
+        1,
+      ],
+      [new TypeError("response unavailable"), 0],
+    ] as const) {
+      const releaseProvenance = sinon.stub().resolves();
+      const post = createAiReviewerReplyPoster({
+        projectId,
+        generateCommentId: () => commentId,
+        lookupProvenance: sinon.stub().resolves(null),
+        reserveProvenance: sinon.stub().resolves({
+          commentId,
+          created: true,
+          confirmed: false,
+          threadId,
+          messageId: null,
+        }),
+        confirmProvenance: sinon.stub(),
+        releaseProvenance,
+        addReply: sinon.stub().rejects(error),
+        recordProvenance: sinon.stub(),
+      });
+
+      await rejectedError(post(replyInput));
+      expect(releaseProvenance.callCount).to.equal(expectedRollbacks);
+    }
+  });
+
   it("refuses a changed range after reservation and releases the keyed claim", async function () {
     for (const created of [true, false]) {
       let context = liveContext();
@@ -406,6 +554,19 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect((unregistered as AiReviewerCommentPostingError).code).to.equal(
       "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE",
     );
+
+    const replyUnavailable = await rejectedError(
+      postAiReviewerReply(replyInput),
+    );
+    expect((replyUnavailable as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_HOST_UNAVAILABLE",
+    );
+    const postReply = sinon.stub().resolves({ commentId: replyMessageId });
+    const unregisterReply = registerAiReviewerReplyPoster(postReply);
+    expect(await postAiReviewerReply(replyInput)).to.deep.equal({
+      commentId: replyMessageId,
+    });
+    unregisterReply();
   });
 
   it("maps a host range rejection before message creation and rolls back provenance", async function () {
@@ -568,6 +729,8 @@ describe("AI reviewer: ordinary comment host bridge", function () {
   it("uses bodyless project-scoped provenance requests and keeps identifiers only", async function () {
     const keyedPath = `/project/${projectId}/ai-reviewer/comment-provenance?runId=${runId}&artifactId=${artifactId}`;
     const keyedCommentPath = `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}?runId=${runId}&artifactId=${artifactId}`;
+    const replyReservePath = `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}?runId=${replyInput.runId}&artifactId=reply%3A1&threadId=${threadId}`;
+    const replyConfirmPath = `${replyReservePath}&messageId=${replyMessageId}`;
     fetchMock.get(`/project/${projectId}/ai-reviewer/comment-provenance`, {
       commentIds: [commentId],
     });
@@ -578,6 +741,19 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       commentId,
       created: true,
       confirmed: false,
+    });
+    fetchMock.put(replyReservePath, {
+      commentId,
+      created: true,
+      confirmed: false,
+      threadId,
+      messageId: null,
+    });
+    fetchMock.put(replyConfirmPath, {
+      commentId,
+      confirmed: true,
+      threadId,
+      messageId: replyMessageId,
     });
     fetchMock.delete(
       `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}`,
@@ -598,6 +774,36 @@ describe("AI reviewer: ordinary comment host bridge", function () {
         artifactId,
       ),
     ).to.deep.equal({ commentId, created: true, confirmed: false });
+    expect(
+      await reserveAiReviewerReplyProvenance(
+        projectId,
+        commentId,
+        replyInput.runId,
+        replyInput.artifactId,
+        threadId,
+      ),
+    ).to.deep.equal({
+      commentId,
+      created: true,
+      confirmed: false,
+      threadId,
+      messageId: null,
+    });
+    expect(
+      await confirmAiReviewerReplyProvenance(
+        projectId,
+        commentId,
+        replyInput.runId,
+        replyInput.artifactId,
+        threadId,
+        replyMessageId,
+      ),
+    ).to.deep.equal({
+      commentId,
+      confirmed: true,
+      threadId,
+      messageId: replyMessageId,
+    });
     await releaseAiReviewerCommentProvenance(projectId, commentId);
 
     const collectionCalls = fetchMock.callHistory.calls(
@@ -624,6 +830,48 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect(snapshotAiReviewerCommentProvenance(otherProjectId)).to.deep.equal(
       [],
     );
+  });
+
+  it("labels only the AI-assisted reply in a human-started thread", function () {
+    expect(
+      aiReviewerCommentProvenanceId(
+        threadId as never,
+        replyMessageId as never,
+        false,
+      ),
+    ).to.equal(threadId);
+    expect(
+      aiReviewerCommentProvenanceId(
+        threadId as never,
+        replyMessageId as never,
+        true,
+      ),
+    ).to.equal(replyMessageId);
+    recordAiReviewerCommentProvenance(projectId, replyMessageId);
+    render(
+      <ProjectProvider>
+        <AiAssistedCommentLabel commentId={threadId}>
+          <span>Human first message</span>
+        </AiAssistedCommentLabel>
+        <AiAssistedCommentLabel commentId={replyMessageId}>
+          <span>AI-assisted reply</span>
+        </AiAssistedCommentLabel>
+        <AiAssistedCommentLabel commentId={commentId}>
+          <span>Other human reply</span>
+        </AiAssistedCommentLabel>
+      </ProjectProvider>,
+    );
+
+    expect(screen.getAllByText("AI-assisted")).to.have.length(1);
+    expect(
+      screen.getByText("AI-assisted reply").closest(".review-panel-comment"),
+    ).not.to.equal(null);
+    expect(
+      screen.getByText("Human first message").closest(".review-panel-comment"),
+    ).to.equal(null);
+    expect(
+      screen.getByText("Other human reply").closest(".review-panel-comment"),
+    ).to.equal(null);
   });
 
   it("keeps the label when the comment body is edited", function () {
