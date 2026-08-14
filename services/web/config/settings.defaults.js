@@ -1128,6 +1128,16 @@ module.exports = {
           ]
         : []),
     ],
+    aiReviewerCommentActions: [
+      ...(aiReviewerEnabled
+        ? [
+            Path.resolve(
+              __dirname,
+              '../modules/ai-reviewer/frontend/js/components/ai-reviewer-comment-actions.tsx'
+            ),
+          ]
+        : []),
+    ],
     sourceEditorExtensions: [
       ...(aiReviewerEnabled
         ? [

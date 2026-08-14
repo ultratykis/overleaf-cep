@@ -79,6 +79,11 @@ import {
   dispatchAiReviewerSelectionToolbarBusy,
   isAiReviewerSelectionAction,
 } from "../services/selection-toolbar-events";
+import {
+  AI_REVIEWER_COMMENT_ACTION_EVENT,
+  AI_REVIEWER_COMMENT_ACTION_READY_EVENT,
+  dispatchAiReviewerCommentActionBusy,
+} from "../services/comment-action-events";
 import { AgentStreamError, streamAgentEvents } from "../services/agent-stream";
 import {
   createEditorEvidenceNavigationTarget,
@@ -3303,8 +3308,16 @@ export function AiReviewerPanelView({
     persistenceMutationPending ||
     persistenceConflict ||
     runInProgress;
+  const commentActionBusy = busy || answerStreaming;
   const selectionToolbarState = useRef({ busy, runSelectionReview });
   selectionToolbarState.current = { busy, runSelectionReview };
+  const commentActionState = useRef<{
+    busy: boolean;
+    submitConversationMessage: ((message: string) => Promise<void>) | null;
+    t: TFunction;
+  }>({ busy: commentActionBusy, submitConversationMessage: null, t });
+  commentActionState.current.busy = commentActionBusy;
+  commentActionState.current.t = t;
 
   useEffect(() => {
     const handleSelectionAction = (event: Event) => {
@@ -3337,6 +3350,37 @@ export function AiReviewerPanelView({
   }, []);
 
   useEffect(() => {
+    const handleCommentAction = (event: Event) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const threadId = (event as CustomEvent<{ threadId?: unknown }>).detail
+        ?.threadId;
+      if (typeof threadId !== "string" || threadId.trim() === "") {
+        return;
+      }
+      const current = commentActionState.current;
+      if (current.busy || current.submitConversationMessage == null) {
+        return;
+      }
+      event.preventDefault();
+      void current.submitConversationMessage(
+        current.t("ai_reviewer_action_address_comment", { threadId }),
+      );
+    };
+    window.addEventListener(
+      AI_REVIEWER_COMMENT_ACTION_EVENT,
+      handleCommentAction,
+    );
+    return () => {
+      window.removeEventListener(
+        AI_REVIEWER_COMMENT_ACTION_EVENT,
+        handleCommentAction,
+      );
+    };
+  }, []);
+
+  useEffect(() => {
     dispatchAiReviewerSelectionToolbarBusy(busy);
     if (!busy) {
       window.dispatchEvent(
@@ -3345,7 +3389,20 @@ export function AiReviewerPanelView({
     }
   }, [busy]);
 
-  useEffect(() => () => dispatchAiReviewerSelectionToolbarBusy(false), []);
+  useEffect(() => {
+    dispatchAiReviewerCommentActionBusy(commentActionBusy);
+    if (!commentActionBusy) {
+      window.dispatchEvent(new Event(AI_REVIEWER_COMMENT_ACTION_READY_EVENT));
+    }
+  }, [commentActionBusy]);
+
+  useEffect(
+    () => () => {
+      dispatchAiReviewerSelectionToolbarBusy(false);
+      dispatchAiReviewerCommentActionBusy(false);
+    },
+    [],
+  );
   const recordSuggestionDecision = useCallback(
     (
       identity: ActiveSuggestionApplication,
@@ -4097,6 +4154,8 @@ export function AiReviewerPanelView({
       updateDiscussions,
     ],
   );
+  commentActionState.current.submitConversationMessage =
+    submitConversationMessage;
 
   /**
    * One control stops whatever is running, because the panel only ever runs one

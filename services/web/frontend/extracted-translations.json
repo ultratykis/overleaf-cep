@@ -144,6 +144,8 @@
   "ai_feedback_the_suggestion_wasnt_the_best_fix_available": "",
   "ai_feedback_there_was_no_code_fix_suggested": "",
   "ai_language_suggestions": "",
+  "ai_reviewer_action_address_comment": "",
+  "ai_reviewer_action_ask_ai": "",
   "ai_reviewer_action_review": "",
   "ai_reviewer_action_rewrite": "",
   "ai_reviewer_action_shorten": "",

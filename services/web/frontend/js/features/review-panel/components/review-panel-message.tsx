@@ -1,7 +1,8 @@
-import { FC, useCallback, useState } from 'react'
+import { ComponentType, FC, useCallback, useState } from 'react'
 import {
   CommentId,
   ReviewPanelCommentThreadMessage,
+  ThreadId,
 } from '../../../../../types/review-panel/review-panel'
 import { useTranslation } from 'react-i18next'
 import { FormatTimeBasedOnYear } from '@/shared/components/format-time-based-on-year'
@@ -16,9 +17,20 @@ import ReviewPanelEntryUser from './review-panel-entry-user'
 import { usePermissionsContext } from '@/features/ide-react/context/permissions-context'
 import { PreventSelectingEntry } from './review-panel-prevent-selecting'
 import { isSplitTestEnabled } from '@/utils/splitTestUtils'
+import importOverleafModules from '../../../../macros/import-overleaf-module.macro'
+
+const aiReviewerCommentActionModules = importOverleafModules(
+  'aiReviewerCommentActions'
+) as {
+  import: { default: ComponentType<{ commentId: ThreadId }> }
+  path: string
+}[]
+const AiReviewerCommentAction =
+  aiReviewerCommentActionModules[0]?.import.default
 
 export const ReviewPanelMessage: FC<{
   message: ReviewPanelCommentThreadMessage
+  threadId: ThreadId
   hasReplies: boolean
   isReply: boolean
   onResolve?: () => Promise<void>
@@ -28,6 +40,7 @@ export const ReviewPanelMessage: FC<{
   isThreadResolved: boolean
 }> = ({
   message,
+  threadId,
   isReply,
   hasReplies,
   onResolve,
@@ -78,6 +91,15 @@ export const ReviewPanelMessage: FC<{
         </div>
 
         <div className="review-panel-entry-actions">
+          {!editing &&
+            !isReply &&
+            !isThreadResolved &&
+            AiReviewerCommentAction != null && (
+              <PreventSelectingEntry>
+                <AiReviewerCommentAction commentId={threadId} />
+              </PreventSelectingEntry>
+            )}
+
           {!editing && !isReply && !isThreadResolved && canResolve && (
             <PreventSelectingEntry>
               <OLTooltip

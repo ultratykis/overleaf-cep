@@ -113,6 +113,7 @@ export const ReviewPanelCommentContent = memo<{
           const renderedMessage = (
             <ReviewPanelMessage
               message={message}
+              threadId={comment.op.t}
               isReply={isReply}
               hasReplies={!isReply && thread.messages.length > 1}
               onResolve={onResolve}

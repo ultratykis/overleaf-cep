@@ -40,6 +40,9 @@ describe("AI reviewer: comment host module registration", function () {
       expect(settings.overleafModuleImports.aiReviewerCommentLabels).toEqual(
         [],
       );
+      expect(settings.overleafModuleImports.aiReviewerCommentActions).toEqual(
+        [],
+      );
     },
   );
 
@@ -61,6 +64,14 @@ describe("AI reviewer: comment host module registration", function () {
           (componentPath) =>
             componentPath.endsWith(
               "/modules/ai-reviewer/frontend/js/components/ai-assisted-comment-label.tsx",
+            ),
+        ),
+      ).toHaveLength(1);
+      expect(
+        settings.overleafModuleImports.aiReviewerCommentActions.filter(
+          (componentPath) =>
+            componentPath.endsWith(
+              "/modules/ai-reviewer/frontend/js/components/ai-reviewer-comment-actions.tsx",
             ),
         ),
       ).toHaveLength(1);
