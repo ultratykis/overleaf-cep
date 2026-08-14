@@ -5,8 +5,10 @@ import { createHash } from "node:crypto";
 import { expressify } from "@overleaf/promise-utils";
 import Settings from "@overleaf/settings";
 
+import ChatApiHandler from "../../../../app/src/Features/Chat/ChatApiHandler.mjs";
 import HistoryManager from "../../../../app/src/Features/History/HistoryManager.mjs";
 import ProjectEntityHandler from "../../../../app/src/Features/Project/ProjectEntityHandler.mjs";
+import UserGetter from "../../../../app/src/Features/User/UserGetter.mjs";
 import ZoteroApiClient from "../../../zotero/app/src/ZoteroApiClient.mjs";
 import { createAiReviewerProviderCircuitBreakerStore } from "../models/AiReviewerProviderCircuitBreaker.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
@@ -47,6 +49,7 @@ import {
   parseOpenAiCompatibleModelId,
 } from "./OllamaEndpointPolicy.mjs";
 import { PROJECT_SNAPSHOT_DOCUMENT_LIMIT } from "./ProjectSnapshot.mjs";
+import { createProjectCommentsReader } from "./ProjectCommentsReader.mjs";
 import { createProjectFigureReader } from "./ProjectFigureReader.mjs";
 import {
   authenticatedUserId,
@@ -546,6 +549,9 @@ export function createConfiguredAiReviewerController({
         skills,
         modeInstructions,
         readProjectFile: scope.readProjectFile,
+        ...(scope.readProjectComments == null
+          ? {}
+          : { readProjectComments: scope.readProjectComments }),
         ...(scope.readProjectFigure == null
           ? {}
           : { readProjectFigure: scope.readProjectFigure }),
@@ -621,6 +627,11 @@ const providerService = createAiReviewerProviderService({
 const configStore = createAiReviewerProviderConfigStore();
 const requestScopeReader = createRequestScopeReader({
   loadProjectDocuments,
+  loadProjectComments: createProjectCommentsReader({
+    getThreads: ChatApiHandler.promises.getThreads,
+    loadProjectDocuments,
+    getUsers: UserGetter.promises.getUsers,
+  }),
   loadProjectFigure: createProjectFigureReader({
     getAllFiles: ProjectEntityHandler.promises.getAllFiles,
     requestBlobWithProjectId: HistoryManager.promises.requestBlobWithProjectId,

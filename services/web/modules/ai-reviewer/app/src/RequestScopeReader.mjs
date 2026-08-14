@@ -3,7 +3,10 @@
 import { AgentRequestSchema } from "../../shared/contracts.mjs";
 import { AgentGatewayAbortError, AgentGatewayError } from "./AgentGateway.mjs";
 import { estimateAgentPromptTokens } from "./AiReviewerPrompt.mjs";
-import { modelInputTokenBudget } from "./ModelContextBudget.mjs";
+import {
+  estimateModelInputTokens,
+  modelInputTokenBudget,
+} from "./ModelContextBudget.mjs";
 import { createProjectSnapshot } from "./ProjectSnapshot.mjs";
 import { PROJECT_FIGURE_MODEL_INPUT_TOKENS } from "./ProjectFigureReader.mjs";
 
@@ -79,6 +82,11 @@ function requestIdentity(input) {
  *     input: { path: string },
  *     options: { signal?: AbortSignal },
  *   ) => unknown | Promise<unknown>,
+ *   loadProjectComments?: (
+ *     projectId: string,
+ *     input: { docPath?: string, threadId?: string },
+ *     options: { signal?: AbortSignal },
+ *   ) => unknown | Promise<unknown>,
  *   isZoteroLinked?: (userId: string) => boolean | Promise<boolean>,
  *   searchZoteroItems?: (
  *     userId: string,
@@ -90,6 +98,7 @@ function requestIdentity(input) {
 export function createRequestScopeReader({
   loadProjectDocuments,
   loadProjectFigure,
+  loadProjectComments,
   isZoteroLinked,
   searchZoteroItems,
 } = {}) {
@@ -173,6 +182,27 @@ export function createRequestScopeReader({
                 return result;
               }
             : undefined;
+        const readProjectComments =
+          typeof loadProjectComments === "function"
+            ? async (input, { request: active, signal }) => {
+                const activeRequest = AgentRequestSchema.safeParse(active);
+                if (
+                  !activeRequest.success ||
+                  activeRequest.data.projectId !== request.projectId
+                ) {
+                  throw rejected();
+                }
+                const result = await loadProjectComments(
+                  request.projectId,
+                  input,
+                  { signal },
+                );
+                snapshot.chargeModelInputTokens(
+                  estimateModelInputTokens(JSON.stringify(result)),
+                );
+                return result;
+              }
+            : undefined;
 
         return Object.freeze({
           userId,
@@ -181,6 +211,7 @@ export function createRequestScopeReader({
           projectContext: snapshot.context,
           readProjectFile: snapshot.readProjectFile,
           ...(readProjectFigure === undefined ? {} : { readProjectFigure }),
+          ...(readProjectComments === undefined ? {} : { readProjectComments }),
           searchZotero,
           validateEvidence: snapshot.validateEvidence,
         });
@@ -267,6 +298,24 @@ export function createRequestScopeReader({
               return result;
             }
           : undefined;
+      const readProjectComments =
+        typeof loadProjectComments === "function"
+          ? async (input, { request: active, signal }) => {
+              if (requestIdentity(active) !== identity) {
+                throw rejected();
+              }
+              const result = await loadProjectComments(
+                request.projectId,
+                { ...input, docPath: input.docPath ?? scope.path },
+                { signal },
+              );
+              const snapshot = await projectSnapshot(signal);
+              snapshot.chargeModelInputTokens(
+                estimateModelInputTokens(JSON.stringify(result)),
+              );
+              return result;
+            }
+          : undefined;
 
       return Object.freeze({
         userId,
@@ -276,6 +325,7 @@ export function createRequestScopeReader({
         path: scope.path,
         readProjectFile,
         ...(readProjectFigure === undefined ? {} : { readProjectFigure }),
+        ...(readProjectComments === undefined ? {} : { readProjectComments }),
         searchZotero,
       });
     },

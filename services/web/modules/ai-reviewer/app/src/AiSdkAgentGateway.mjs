@@ -53,6 +53,7 @@ import {
 
 export const AI_REVIEWER_TOOL_NAMES = Object.freeze({
   readProjectFile: "read_project_file",
+  readProjectComments: "read_project_comments",
   readProjectFigure: "read_project_figure",
   readSkill: "read_skill",
   searchZotero: "search_zotero",
@@ -61,6 +62,12 @@ export const AI_REVIEWER_TOOL_NAMES = Object.freeze({
   proposeSuggestion: "propose_suggestion",
 });
 
+const ReadProjectCommentsArgumentsSchema = z
+  .object({
+    docPath: ProjectRelativePathSchema.optional(),
+    threadId: z.string().min(1).optional(),
+  })
+  .strict();
 const ReadProjectFigureArgumentsSchema = z
   .object({ path: ProjectRelativePathSchema })
   .strict();
@@ -522,6 +529,8 @@ export const SYSTEM_INSTRUCTION = [
 
 const READ_PROJECT_FIGURE_INSTRUCTION =
   "Use read_project_figure only when a project figure is needed to answer the request.";
+const READ_PROJECT_COMMENTS_INSTRUCTION =
+  "Use read_project_comments when the request is about the comments already on the manuscript; it returns each unresolved thread with its quoted text and location. Read the surrounding text with read_project_file before proposing how to address a comment, and call it again with a docPath or threadId when a comment refers to another part of the project.";
 
 const FINDING_INSTRUCTION = [
   "When report_finding is available, put every issue worth tracking in that tool instead of only describing it in prose.",
@@ -2614,6 +2623,10 @@ export class AiSdkAgentGateway {
    *     input: z.infer<typeof ReadProjectFileArgumentsSchema>,
    *     context: { request: AgentRequest, signal?: AbortSignal },
    *   ) => unknown | Promise<unknown>,
+   *   readProjectComments?: (
+   *     input: z.infer<typeof ReadProjectCommentsArgumentsSchema>,
+   *     context: { request: AgentRequest, signal?: AbortSignal },
+   *   ) => unknown | Promise<unknown>,
    *   readProjectFigure?: (
    *     input: z.infer<typeof ReadProjectFigureArgumentsSchema>,
    *     context: { request: AgentRequest, signal?: AbortSignal },
@@ -2642,6 +2655,7 @@ export class AiSdkAgentGateway {
     modeInstructions = {},
     supportsImages = false,
     readProjectFile,
+    readProjectComments,
     readProjectFigure,
     projectContext,
     searchZotero,
@@ -2698,6 +2712,12 @@ export class AiSdkAgentGateway {
       throw new TypeError("supportsImages must be a boolean.");
     }
     if (
+      readProjectComments !== undefined &&
+      typeof readProjectComments !== "function"
+    ) {
+      throw new TypeError("readProjectComments must be a function.");
+    }
+    if (
       readProjectFigure !== undefined &&
       typeof readProjectFigure !== "function"
     ) {
@@ -2723,6 +2743,7 @@ export class AiSdkAgentGateway {
     this.modeInstructions = boundedInstructions;
     this.supportsImages = supportsImages;
     this.readProjectFile = readProjectFile;
+    this.readProjectComments = readProjectComments ?? null;
     this.readProjectFigure = readProjectFigure ?? null;
     this.projectContext = projectContext;
     this.searchZotero = searchZotero ?? null;
@@ -2760,6 +2781,10 @@ export class AiSdkAgentGateway {
       ReadProjectFileArgumentsSchema,
       this.provider,
     );
+    const readProjectCommentsProviderSchema = providerToolSchema(
+      ReadProjectCommentsArgumentsSchema,
+      this.provider,
+    );
     const readProjectFigureProviderSchema = providerToolSchema(
       ReadProjectFigureArgumentsSchema,
       this.provider,
@@ -2791,6 +2816,8 @@ export class AiSdkAgentGateway {
     );
     const providerToolInputSchemas = Object.freeze({
       [AI_REVIEWER_TOOL_NAMES.readProjectFile]: readProjectFileProviderSchema,
+      [AI_REVIEWER_TOOL_NAMES.readProjectComments]:
+        readProjectCommentsProviderSchema,
       [AI_REVIEWER_TOOL_NAMES.readProjectFigure]:
         readProjectFigureProviderSchema,
       [AI_REVIEWER_TOOL_NAMES.readSkill]: readSkillProviderSchema,
@@ -2817,6 +2844,8 @@ export class AiSdkAgentGateway {
       !selectionTransform &&
       this.supportsImages &&
       this.readProjectFigure != null;
+    const readProjectCommentsAllowed =
+      !selectionTransform && this.readProjectComments != null;
     const figureMessageMode = !readProjectFigureAllowed
       ? null
       : this.provider === "gemini"
@@ -2832,6 +2861,9 @@ export class AiSdkAgentGateway {
     ];
     const instructions = [
       systemInstructionForRequest(request, storedSkills, this.modeInstructions),
+      ...(readProjectCommentsAllowed
+        ? [READ_PROJECT_COMMENTS_INSTRUCTION]
+        : []),
       ...(readProjectFigureAllowed ? [READ_PROJECT_FIGURE_INSTRUCTION] : []),
     ].join("\n\n");
     const messages = formatAgentMessages(
@@ -3113,6 +3145,22 @@ export class AiSdkAgentGateway {
           );
         }
       } else if (
+        toolCall.toolName === "read_project_comments" &&
+        readProjectCommentsAllowed
+      ) {
+        if (
+          !ReadProjectCommentsArgumentsSchema.safeParse(toolCall.input).success
+        ) {
+          error = gatewayError(
+            "The AI provider returned invalid comment-read arguments.",
+            {
+              code: "AI_TOOL_INPUT_INVALID",
+              category: "schema",
+              retryable: false,
+            },
+          );
+        }
+      } else if (
         toolCall.toolName === "read_project_figure" &&
         readProjectFigureAllowed
       ) {
@@ -3238,6 +3286,7 @@ export class AiSdkAgentGateway {
         ? ["propose_suggestion"]
         : [
             "read_project_file",
+            ...(readProjectCommentsAllowed ? ["read_project_comments"] : []),
             ...(readProjectFigureAllowed ? ["read_project_figure"] : []),
             ...(readSkillAllowed ? ["read_skill"] : []),
             ...(zoteroSearchAllowed ? ["search_zotero"] : []),
@@ -3411,6 +3460,60 @@ export class AiSdkAgentGateway {
               }
             },
             toModelOutput: ({ output }) => projectFigureModelOutput(output),
+          }),
+          [AI_REVIEWER_TOOL_NAMES.readProjectComments]: tool({
+            description:
+              "Read the unresolved review comments left on this project, with their anchors.",
+            inputSchema:
+              providerToolInputSchemas[
+                AI_REVIEWER_TOOL_NAMES.readProjectComments
+              ],
+            strict: strictProviderTools,
+            execute: async (toolInput, { toolCallId }) => {
+              try {
+                if (terminalToolPolicyError != null) {
+                  throw terminalToolPolicyError;
+                }
+                const readProjectComments = this.readProjectComments;
+                if (
+                  !readProjectCommentsAllowed ||
+                  readProjectComments == null
+                ) {
+                  throw gatewayError(
+                    "Project comment reading is not available.",
+                    {
+                      code: "AI_TOOL_NOT_ALLOWED",
+                      category: "schema",
+                      retryable: false,
+                    },
+                  );
+                }
+                readToolCallCount += 1;
+                if (readToolCallCount > readToolCallLimit) {
+                  throw gatewayError(
+                    "The AI provider exceeded the read-tool call limit.",
+                    {
+                      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
+                      category: "schema",
+                      retryable: false,
+                    },
+                  );
+                }
+                const parsed =
+                  ReadProjectCommentsArgumentsSchema.parse(toolInput);
+                return consumeModelInput(
+                  await readProjectComments(parsed, { request, signal }),
+                );
+              } catch (error) {
+                if (error instanceof AgentGatewayError) {
+                  const localError = localGatewayError(error);
+                  recoverableSdkToolErrorIds.add(toolCallId);
+                  throw localError;
+                }
+                terminalToolExecutionFailed = true;
+                throw error;
+              }
+            },
           }),
           [AI_REVIEWER_TOOL_NAMES.readSkill]: tool({
             description:
