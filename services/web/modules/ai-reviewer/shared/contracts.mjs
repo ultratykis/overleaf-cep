@@ -14,6 +14,11 @@ export const AI_REVIEWER_WORKSPACE_TURN_LIMIT = 100;
 
 export const AiReviewerReasoningModelCompatibilitySchema = z.boolean();
 
+// Connections stored before image support was recorded carry no field. Keep
+// it absent through load/save so no migration is needed; run-time readers
+// treat a missing value as enabled.
+export const AiReviewerSupportsImagesSchema = z.boolean().optional();
+
 export const Sha256Schema = z
   .string()
   .regex(/^[a-f0-9]{64}$/, "Expected a lowercase SHA-256 digest");
@@ -383,6 +388,7 @@ export const WorkspaceDiscussionSchema = z
     subjectKey: WorkspaceSubjectKeySchema.nullable(),
     subject: DiscussionSubjectSchema.nullable(),
     sourceGeneration: WorkspaceOrderSchema.nullable(),
+    commentThreadId: IdentifierSchema.optional(),
     turns: z.array(DiscussionTurnSchema).max(AI_REVIEWER_WORKSPACE_TURN_LIMIT),
     suggestions: z.array(WorkspaceDiscussionSuggestionSchema),
     updatedAt: z.string().datetime({ offset: true }),

@@ -471,12 +471,14 @@ export function createAiReviewerProviderService(dependencies = {}) {
     ) => new OllamaOpenAiTransport(options));
   const geminiTransportFactory =
     dependencies.geminiTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options) =>
-      new GeminiAiSdkTransport(options));
+    ((
+      /** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
+    ) => new GeminiAiSdkTransport(options));
   const claudeTransportFactory =
     dependencies.claudeTransportFactory ??
-    ((/** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options) =>
-      new ClaudeAiSdkTransport(options));
+    ((
+      /** @type {{ credential: string, modelTag: string, reasoningModelCompatibility?: boolean, fetchImpl?: typeof fetch }} */ options,
+    ) => new ClaudeAiSdkTransport(options));
   const azureTransportFactory =
     dependencies.azureTransportFactory ??
     ((
@@ -496,6 +498,8 @@ export function createAiReviewerProviderService(dependencies = {}) {
   const modelCache = new Map();
   const contextLengthCache = new Map();
   const advertisedContextLengthCache = new Map();
+  const ollamaModelCache = new Map();
+  const imageCapabilityCache = new Map();
 
   /**
    * @param {ReturnType<typeof parseAiReviewerConnection>} connection
@@ -779,12 +783,16 @@ export function createAiReviewerProviderService(dependencies = {}) {
         ),
       );
       for (const candidate of normalizedModels) {
-        if (candidate.detectedContextLength == null) continue;
         const contextKey = contextLengthCacheKey(
           config,
           candidate.id,
           cacheKey,
         );
+        ollamaModelCache.set(contextKey, {
+          expiresAt: now + modelCacheTtlMilliseconds,
+          isOllama: nativeBaseUrl !== null,
+        });
+        if (candidate.detectedContextLength == null) continue;
         advertisedContextLengthCache.set(contextKey, {
           expiresAt: now + modelCacheTtlMilliseconds,
           contextLength: candidate.detectedContextLength,
@@ -822,6 +830,92 @@ export function createAiReviewerProviderService(dependencies = {}) {
 
   return {
     listModels,
+
+    /**
+     * Ollama alone exposes a reliable per-model vision declaration. A valid
+     * native `/api/show` capability array decides the result; every other
+     * provider response and every failed probe stays open.
+     *
+     * @param {unknown} input
+     * @param {unknown} model
+     * @param {{ signal?: AbortSignal, cacheKey?: string }} [options]
+     */
+    async supportsImages(input, model, { signal, cacheKey = "" } = {}) {
+      throwIfAborted(signal);
+      const connection = parseAiReviewerConnection(input);
+      const parsedModel = parseOpenAiCompatibleModelId(model);
+      if (connection.provider !== "openai-compatible") {
+        return true;
+      }
+      const key = contextLengthCacheKey(connection, parsedModel, cacheKey);
+      const ollamaModel = ollamaModelCache.get(key);
+      if (ollamaModel?.expiresAt <= modelNow()) {
+        ollamaModelCache.delete(key);
+        return true;
+      }
+      if (ollamaModel?.isOllama !== true) {
+        return true;
+      }
+      const cached = imageCapabilityCache.get(key);
+      if (cached?.expiresAt > modelNow()) {
+        return cached.supportsImages;
+      }
+      imageCapabilityCache.delete(key);
+
+      const origin = new URL(connection.baseUrl).origin;
+      const endpoint = `${origin}/api/show${
+        connection.apiVersion == null
+          ? ""
+          : `?api-version=${connection.apiVersion}`
+      }`;
+      const headers = new Headers({
+        Accept: "application/json",
+        "content-type": "application/json",
+      });
+      if (typeof connection.credential === "string") {
+        headers.set("authorization", `Bearer ${connection.credential}`);
+      }
+      let supportsImages = true;
+      try {
+        const timeoutSignal = contextLengthDetectionSignalFactory();
+        const probeSignal =
+          signal == null
+            ? timeoutSignal
+            : timeoutSignal == null
+              ? signal
+              : AbortSignal.any([signal, timeoutSignal]);
+        const response = await createGuardedOpenAiCompatibleFetch({
+          baseUrl: connection.baseUrl,
+          allowedRequestUrl: endpoint,
+          fetchImpl: modelFetchImpl,
+        })(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ model: parsedModel }),
+          ...(probeSignal == null ? {} : { signal: probeSignal }),
+        });
+        if (!response.ok) {
+          cancelResponseBody(response);
+        } else {
+          const body = /** @type {any} */ (
+            await readBoundedModelResponse(response, probeSignal)
+          );
+          if (Array.isArray(body?.capabilities)) {
+            supportsImages = body.capabilities.includes("vision");
+          }
+        }
+      } catch {
+        // Unsupported native routes, network failures, and probe-local
+        // timeouts provide no evidence that a model cannot accept images.
+        throwIfAborted(signal);
+      }
+      throwIfAborted(signal);
+      imageCapabilityCache.set(key, {
+        expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,
+        supportsImages,
+      });
+      return supportsImages;
+    },
 
     /**
      * Return a displayable value without starting metadata discovery. A prior
@@ -906,10 +1000,7 @@ export function createAiReviewerProviderService(dependencies = {}) {
       if (
         resolution.contextLength != null ||
         (signal?.aborted !== true &&
-          isCacheableDiscoveryFailure(
-            detectionFailure,
-            providerFetchAttempted,
-          ))
+          isCacheableDiscoveryFailure(detectionFailure, providerFetchAttempted))
       ) {
         contextLengthCache.set(key, {
           expiresAt: modelNow() + contextLengthCacheTtlMilliseconds,

@@ -287,6 +287,7 @@ function streamFixture({ store, listModels, modeInstructionStore }) {
       contextLength,
       contextLengthSource: "detected",
     })),
+    supportsImages: vi.fn(async () => true),
     createAgentGateway: vi.fn(() => ({
       async *stream() {
         yield* streamEvents();
@@ -614,6 +615,16 @@ describe("AI reviewer provider connections", function () {
     const existing = await store.create(otherUserId, geminiConnection);
     expect(existing).not.toHaveProperty("supportsImages");
     expect(await store.get(otherUserId, existing.id)).not.toHaveProperty(
+      "supportsImages",
+    );
+    const updated = await store.update(
+      otherUserId,
+      existing.id,
+      geminiConnection,
+      existing.revision,
+    );
+    expect(updated).not.toHaveProperty("supportsImages");
+    expect(records.get(otherUserId).connections[0]).not.toHaveProperty(
       "supportsImages",
     );
   });
@@ -1775,6 +1786,14 @@ describe("AI reviewer run destination", function () {
         cacheKey: `${userId}\u0000${gemini.id}`,
       }),
     );
+    expect(providerService.supportsImages).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: gemini.id, provider: "gemini" }),
+      sharedModel,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        cacheKey: `${userId}\u0000${gemini.id}`,
+      }),
+    );
     expect(requestScopeReader.read).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ contextLength: 12_345 }),
@@ -1784,6 +1803,7 @@ describe("AI reviewer run destination", function () {
         model: sharedModel,
         contextLength: 12_345,
         contextLengthSource: "override",
+        supportsImages: true,
       }),
       expect.anything(),
     );

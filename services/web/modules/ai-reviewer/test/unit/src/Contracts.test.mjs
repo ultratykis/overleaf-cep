@@ -527,6 +527,30 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
   });
 
+  it("preserves the existing comment thread bound to an Ask AI discussion", function () {
+    const stored = {
+      runs: [],
+      discussions: [
+        {
+          id: "comment-discussion-0001",
+          createdOrder: 1,
+          subjectKey: null,
+          subject: null,
+          sourceGeneration: null,
+          commentThreadId: "669e48d55ee80e3a12940721",
+          turns: [
+            { role: "user", text: "How should I answer this comment?" },
+            { role: "assistant", text: "Use this proposed answer." },
+          ],
+          suggestions: [],
+          updatedAt: createdAt,
+        },
+      ],
+    };
+
+    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+  });
+
   it("keeps open discussion bindings null and binds Agent suggestions to their turn", function () {
     const openDiscussion = {
       id: "open-discussion-invalid",

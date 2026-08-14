@@ -614,6 +614,7 @@ describe("AI reviewer provider configuration", function () {
       apiVersion: azureApiVersion,
       model: azureDeployment,
       contextLength,
+      supportsImages: true,
       credential,
     });
     expect(
@@ -835,14 +836,14 @@ describe("AI reviewer provider configuration", function () {
 
   it("accepts a strict run configuration and rejects anything outside it", function () {
     const parsed = parseAiReviewerProviderConfig(configuration);
-    expect(parsed).toEqual(configuration);
+    expect(parsed).toEqual({ ...configuration, supportsImages: true });
     expect(Object.isFrozen(parsed)).toBe(true);
     expect(
       parseAiReviewerProviderConfig({
         ...configuration,
         provider: "ollama",
       }),
-    ).toEqual(configuration);
+    ).toEqual({ ...configuration, supportsImages: true });
 
     for (const invalid of [
       null,
@@ -2034,6 +2035,7 @@ describe("AI reviewer provider configuration", function () {
     expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
       contextLengthSource: undefined,
+      supportsImages: true,
       skills,
       readProjectFile,
       projectContext: undefined,
@@ -4110,6 +4112,7 @@ describe("AI reviewer provider configuration", function () {
     expect(transport.createAgentGateway).toHaveBeenCalledExactlyOnceWith({
       contextLength,
       contextLengthSource: "override",
+      supportsImages: true,
       skills: [],
       modeInstructions: {},
       readProjectFile,

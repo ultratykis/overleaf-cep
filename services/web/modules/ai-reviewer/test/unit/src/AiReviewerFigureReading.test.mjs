@@ -1,5 +1,8 @@
 import { Readable } from "node:stream";
 
+// Installed in the web container for image rendering.
+// eslint-disable-next-line import/no-extraneous-dependencies
+import { createCanvas } from "@napi-rs/canvas";
 import { simulateReadableStream } from "ai";
 // eslint-disable-next-line import/no-unresolved
 import { MockLanguageModelV3 } from "ai/test";
@@ -19,6 +22,8 @@ import {
 import { createOllamaProviderService } from "../../../app/src/OllamaProviderService.mjs";
 import {
   createProjectFigureReader,
+  PROJECT_FIGURE_DOWNSCALE_MAX_INPUT_BYTES,
+  PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS,
   PROJECT_FIGURE_MAX_BYTES,
 } from "../../../app/src/ProjectFigureReader.mjs";
 import { createRequestScopeReader } from "../../../app/src/RequestScopeReader.mjs";
@@ -131,6 +136,13 @@ describe("AI reviewer: on-demand project figures", function () {
         model: "gemini-3-pro-preview",
         contextLength: 8_192,
         supportsImages: true,
+      }),
+    ).toMatchObject({ supportsImages: true });
+    expect(
+      parseAiReviewerProviderConfig({
+        provider: "gemini",
+        model: "gemini-3-pro-preview",
+        contextLength: 8_192,
       }),
     ).toMatchObject({ supportsImages: true });
     expect(
@@ -458,7 +470,7 @@ describe("AI reviewer: on-demand project figures", function () {
       getAllFiles,
       requestBlobWithProjectId: vi.fn(async () => ({
         stream: Readable.from([]),
-        contentLength: PROJECT_FIGURE_MAX_BYTES + 1,
+        contentLength: PROJECT_FIGURE_DOWNSCALE_MAX_INPUT_BYTES + 1,
       })),
     });
     expect(
@@ -471,7 +483,7 @@ describe("AI reviewer: on-demand project figures", function () {
       getAllFiles,
       requestBlobWithProjectId: vi.fn(async () => ({
         stream: Readable.from([
-          Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+          Buffer.alloc(PROJECT_FIGURE_DOWNSCALE_MAX_INPUT_BYTES),
           Buffer.from([0]),
         ]),
         contentLength: 1,
@@ -482,6 +494,149 @@ describe("AI reviewer: on-demand project figures", function () {
         underreportedReader(request.projectId, { path: figure.path }),
       ),
     ).toMatchObject({ code: "AI_PROJECT_FIGURE_TOO_LARGE" });
+  });
+
+  it("returns figures at the 5 MB limit byte-identically", async function () {
+    const input = Buffer.alloc(PROJECT_FIGURE_MAX_BYTES, 0x5a);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+      downscaleFigure: vi.fn(() => {
+        throw new Error("The unchanged path must not convert.");
+      }),
+    });
+
+    const result = await reader(request.projectId, { path: figure.path });
+    expect(result.bytes).toBe(input.length);
+    expect(Buffer.from(result.data, "base64").equals(input)).toBe(true);
+  });
+
+  it("downscales a figure above 5 MB with the installed canvas", async function () {
+    const canvas = createCanvas(10, 10);
+    const input = Buffer.concat([
+      canvas.toBuffer("image/png"),
+      Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+    ]);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+    });
+
+    const result = await reader(request.projectId, { path: figure.path });
+    expect(result.bytes).toBeLessThanOrEqual(PROJECT_FIGURE_MAX_BYTES);
+    expect(Buffer.from(result.data, "base64").equals(input)).toBe(false);
+  });
+
+  it("refuses a figure that remains above 5 MB after downscaling", async function () {
+    const canvas = createCanvas(10, 10);
+    const input = Buffer.concat([
+      canvas.toBuffer("image/png"),
+      Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+    ]);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+      downscaleFigure: vi.fn(async () => input),
+    });
+
+    expect(
+      await captureError(reader(request.projectId, { path: figure.path })),
+    ).toMatchObject({
+      code: "AI_PROJECT_FIGURE_TOO_LARGE",
+      category: "configuration",
+      retryable: false,
+    });
+  });
+
+  it("bounds a stalled downscale with a typed timeout error", async function () {
+    const canvas = createCanvas(10, 10);
+    const input = Buffer.concat([
+      canvas.toBuffer("image/png"),
+      Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+    ]);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+      downscaleFigure: vi.fn(async () => await new Promise(() => {})),
+      downscaleTimeoutMilliseconds: 10,
+    });
+
+    expect(
+      await captureError(reader(request.projectId, { path: figure.path })),
+    ).toMatchObject({
+      code: "AI_PROJECT_FIGURE_CONVERSION_TIMEOUT",
+      category: "configuration",
+      retryable: false,
+    });
+  });
+
+  it("returns a typed conversion error for invalid oversized image data", async function () {
+    const input = Buffer.alloc(PROJECT_FIGURE_MAX_BYTES + 1);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+    });
+
+    expect(
+      await captureError(reader(request.projectId, { path: figure.path })),
+    ).toMatchObject({
+      code: "AI_PROJECT_FIGURE_CONVERSION_FAILED",
+      category: "configuration",
+      retryable: false,
+    });
+  });
+
+  it("refuses oversized conversion work above the pixel ceiling", async function () {
+    const canvas = createCanvas(10, 10);
+    const header = canvas.toBuffer("image/png");
+    header.writeUInt32BE(10_000, 16);
+    header.writeUInt32BE(5_000, 20);
+    const input = Buffer.concat([
+      header,
+      Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+    ]);
+    const downscaleFigure = vi.fn();
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        "/figures/result.PNG": { hash: "figure-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+      downscaleFigure,
+    });
+
+    expect(10_000 * 5_000).toBeGreaterThan(PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS);
+    expect(
+      await captureError(reader(request.projectId, { path: figure.path })),
+    ).toMatchObject({ code: "AI_PROJECT_FIGURE_CONVERSION_FAILED" });
+    expect(downscaleFigure).not.toHaveBeenCalled();
   });
 
   it("charges 1600 tokens to the shared snapshot budget and rejects overflow", async function () {
@@ -652,5 +807,176 @@ describe("AI reviewer: on-demand project figures", function () {
     expect(
       claudeTransport.createAgentGateway.mock.calls[0][0],
     ).not.toHaveProperty("supportsImages");
+  });
+
+  it.each([
+    [["completion", "tools"], false],
+    [["completion", "tools", "vision"], true],
+  ])(
+    "uses and caches Ollama /api/show capabilities %j",
+    async function (capabilities, expected) {
+      const transport = { createAgentGateway: vi.fn(() => ({})) };
+      const modelFetchImpl = vi.fn(async (input) => {
+        const url = String(input);
+        const body = url.endsWith("/v1/models")
+          ? {
+              object: "list",
+              data: [
+                {
+                  id: "fixture-model",
+                  object: "model",
+                  owned_by: "library",
+                },
+              ],
+            }
+          : url.endsWith("/api/tags")
+            ? {
+                models: [
+                  {
+                    name: "fixture-model",
+                    capabilities: ["completion", "tools"],
+                  },
+                ],
+              }
+            : { capabilities };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const service = createOllamaProviderService({
+        transportFactory: vi.fn(() => transport),
+        modelFetchImpl,
+        contextLengthDetectionSignalFactory: () => undefined,
+      });
+      const connection = {
+        provider: "openai-compatible",
+        baseUrl: "http://127.0.0.1:11434/v1",
+      };
+
+      await service.listModels(connection);
+      const supported = await service.supportsImages(
+        connection,
+        "fixture-model",
+      );
+      expect(await service.supportsImages(connection, "fixture-model")).toBe(
+        expected,
+      );
+      service.createAgentGateway(
+        {
+          ...connection,
+          model: "fixture-model",
+          contextLength: 8_192,
+          supportsImages: supported,
+        },
+        { readProjectFile: vi.fn(), readProjectFigure: vi.fn() },
+      );
+
+      expect(
+        modelFetchImpl.mock.calls.filter(([url]) =>
+          String(url).endsWith("/api/show"),
+        ),
+      ).toHaveLength(1);
+      if (expected) {
+        expect(transport.createAgentGateway.mock.calls[0][0]).toMatchObject({
+          supportsImages: true,
+        });
+      } else {
+        expect(
+          transport.createAgentGateway.mock.calls[0][0],
+        ).not.toHaveProperty("supportsImages");
+      }
+    },
+  );
+
+  it("fails open when the Ollama /api/show probe is unavailable", async function () {
+    const transport = { createAgentGateway: vi.fn(() => ({})) };
+    const modelFetchImpl = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/show")) {
+        throw new TypeError("unavailable");
+      }
+      return new Response(
+        JSON.stringify(
+          url.endsWith("/v1/models")
+            ? {
+                object: "list",
+                data: [
+                  {
+                    id: "fixture-model",
+                    object: "model",
+                    owned_by: "library",
+                  },
+                ],
+              }
+            : {
+                models: [
+                  {
+                    name: "fixture-model",
+                    capabilities: ["completion", "tools"],
+                  },
+                ],
+              },
+        ),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    const service = createOllamaProviderService({
+      transportFactory: vi.fn(() => transport),
+      modelFetchImpl,
+      contextLengthDetectionSignalFactory: () => undefined,
+    });
+    const connection = {
+      provider: "openai-compatible",
+      baseUrl: "http://127.0.0.1:11434/v1",
+    };
+    await service.listModels(connection);
+    const supported = await service.supportsImages(connection, "fixture-model");
+    service.createAgentGateway(
+      {
+        ...connection,
+        model: "fixture-model",
+        contextLength: 8_192,
+        supportsImages: supported,
+      },
+      { readProjectFile: vi.fn(), readProjectFigure: vi.fn() },
+    );
+
+    expect(supported).toBe(true);
+    expect(transport.createAgentGateway.mock.calls[0][0]).toMatchObject({
+      supportsImages: true,
+    });
+  });
+
+  it("always enables a non-Ollama provider before transport gating", async function () {
+    const geminiTransport = { createAgentGateway: vi.fn(() => ({})) };
+    const modelFetchImpl = vi.fn();
+    const service = createOllamaProviderService({
+      geminiTransportFactory: vi.fn(() => geminiTransport),
+      modelFetchImpl,
+    });
+    const connection = {
+      provider: "gemini",
+      credential: "fixture-credential",
+    };
+    const supported = await service.supportsImages(
+      connection,
+      "gemini-3-pro-preview",
+    );
+    service.createAgentGateway(
+      {
+        ...connection,
+        model: "gemini-3-pro-preview",
+        contextLength: 8_192,
+        supportsImages: supported,
+      },
+      { readProjectFile: vi.fn(), readProjectFigure: vi.fn() },
+    );
+
+    expect(supported).toBe(true);
+    expect(modelFetchImpl).not.toHaveBeenCalled();
+    expect(geminiTransport.createAgentGateway.mock.calls[0][0]).toMatchObject({
+      supportsImages: true,
+    });
   });
 });

@@ -353,6 +353,13 @@ async function resolveRunConfiguration(
     // invented context length.
     throw modelContextLengthRequired();
   }
+  const supportsImages =
+    typeof providerService.supportsImages === "function"
+      ? await providerService.supportsImages(connection, model, {
+          signal: context.signal,
+          cacheKey: aiReviewerModelCacheKey(userId, connection.id ?? null),
+        })
+      : true;
   return Object.freeze({
     provider: connection.provider,
     ...(connection.provider === "openai-compatible"
@@ -375,7 +382,7 @@ async function resolveRunConfiguration(
     ...(connection.reasoningModelCompatibility === true
       ? { reasoningModelCompatibility: true }
       : {}),
-    ...(connection.supportsImages === true ? { supportsImages: true } : {}),
+    supportsImages,
     model,
     ...resolution,
   });

@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import {
   AiReviewerReasoningModelCompatibilitySchema,
+  AiReviewerSupportsImagesSchema,
 } from "../../shared/contracts.mjs";
 
 import {
@@ -23,7 +24,6 @@ const ContextLengthSchema = z
   .int()
   .positive()
   .max(Number.MAX_SAFE_INTEGER);
-const SupportsImagesSchema = z.boolean();
 const ContextLengthOverridesSchema = z
   .array(
     z
@@ -433,8 +433,8 @@ export function parseAiReviewerConnection(input) {
     destination,
   );
   const supportsImages = Object.hasOwn(value, "supportsImages")
-    ? SupportsImagesSchema.parse(value.supportsImages)
-    : false;
+    ? AiReviewerSupportsImagesSchema.parse(value.supportsImages)
+    : undefined;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -494,8 +494,8 @@ export function parseAiReviewerConnectionUpdate(input) {
     destination,
   );
   const supportsImages = Object.hasOwn(value, "supportsImages")
-    ? SupportsImagesSchema.parse(value.supportsImages)
-    : false;
+    ? AiReviewerSupportsImagesSchema.parse(value.supportsImages)
+    : undefined;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -585,8 +585,8 @@ export function parseAiReviewerProviderConfig(input) {
     ? ContextLengthSourceSchema.parse(value.contextLengthSource)
     : undefined;
   const supportsImages = Object.hasOwn(value, "supportsImages")
-    ? SupportsImagesSchema.parse(value.supportsImages)
-    : false;
+    ? AiReviewerSupportsImagesSchema.parse(value.supportsImages)
+    : undefined;
   const reasoningModelCompatibility = Object.hasOwn(
     value,
     "reasoningModelCompatibility",
@@ -632,7 +632,7 @@ export function parseAiReviewerProviderConfig(input) {
     model: config.model,
     contextLength,
     ...(contextLengthSource === undefined ? {} : { contextLengthSource }),
-    ...(supportsImages ? { supportsImages: true } : {}),
+    supportsImages: supportsImages ?? true,
     ...(reasoningModelCompatibility ? { reasoningModelCompatibility } : {}),
     ...(credential === undefined ? {} : { credential }),
     ...(credentialUpdatedAt === undefined ? {} : { credentialUpdatedAt }),
@@ -674,8 +674,7 @@ export function publicAiReviewerProviderConnection(input) {
                 ? {}
                 : { apiVersion: connection.apiVersion }),
               deployments: connection.deployments,
-              contextLengthOverrides:
-                connection.contextLengthOverrides ?? [],
+              contextLengthOverrides: connection.contextLengthOverrides ?? [],
             }
           : {}),
       ...(connection.provider === "azure"
