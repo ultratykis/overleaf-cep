@@ -13,6 +13,7 @@ import { PermissionsContext } from "@/features/ide-react/context/permissions-con
 import { ReviewPanelMessage } from "@/features/review-panel/components/review-panel-message";
 import { UserContext } from "@/shared/context/user-context";
 import type { CommentId, ThreadId } from "@ol-types/review-panel/review-panel";
+import type { AiProviderConnection } from "../../frontend/js/services/ai-provider-configuration";
 import type { UserId } from "@ol-types/user";
 import AiReviewerCommentActions from "../../frontend/js/components/ai-reviewer-comment-actions";
 import { AiReviewerPanelView } from "../../frontend/js/components/ai-reviewer-panel";
@@ -23,6 +24,43 @@ import {
 } from "../../frontend/js/services/comment-action-events";
 
 const threadId = "comment-thread-138" as ThreadId;
+
+// The panel only runs once its connection catalog has loaded, so a test that
+// exercises the run path has to supply one.
+const localConnection: AiProviderConnection = {
+  id: "connection-local",
+  revision: 1,
+  label: "127.0.0.1:11434",
+  classification: "local",
+  config: {
+    provider: "openai-compatible",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    contextLengthOverride: null,
+    credentialSet: false,
+    credentialUpdatedAt: null,
+  },
+};
+
+function loadedCatalogProps() {
+  return {
+    loadProviderConnections: sinon
+      .stub()
+      .resolves({ connections: [localConnection] }),
+    loadProviderModels: sinon.stub().resolves({
+      models: [
+        {
+          id: "reviewer-default-v1",
+          displayName: "Default reviewer",
+          connectionId: localConnection.id,
+          connectionLabel: localConnection.label,
+          contextLength: null,
+          contextLengthSource: "pending" as const,
+        },
+      ],
+      failures: [],
+    }),
+  };
+}
 
 describe("AI reviewer: comment actions", function () {
   afterEach(function () {
@@ -67,15 +105,19 @@ describe("AI reviewer: comment actions", function () {
         createDiscussionId={() => "comment-action-discussion"}
         createDiscussionRequestId={() => "comment-action-request"}
         captureSelectionSession={captureSelectionSession}
+        {...loadedCatalogProps()}
       />,
     );
 
+    // The catalog resolves asynchronously, and the panel holds comment actions
+    // until it has, so retry the dispatch the way the button's pending path does.
     let handled = false;
-    act(() => {
-      handled = dispatchAiReviewerCommentAction(threadId);
+    await waitFor(() => {
+      act(() => {
+        handled = dispatchAiReviewerCommentAction(threadId);
+      });
+      expect(handled).to.equal(true);
     });
-
-    expect(handled).to.equal(true);
     await waitFor(() => {
       expect(captureSelectionSession).to.have.been.calledOnce;
     });
@@ -87,6 +129,33 @@ describe("AI reviewer: comment actions", function () {
         "Read the review comment with threadId comment-thread-138 using read_project_comments, then propose how to address it.",
       target: "document",
     });
+  });
+
+  // The button lives in the review panel, so it is reachable before this panel
+  // has ever been opened. Running then would fail with no model selected (#144).
+  it("holds the action until the connection catalog has loaded", async function () {
+    const captureSelectionSession = sinon.stub().resolves({
+      status: "conflict",
+      code: "AI_SELECTION_REQUIRED",
+    });
+    render(
+      <AiReviewerPanelView
+        projectId="comment-action-project"
+        createDiscussionId={() => "comment-action-pending-discussion"}
+        createDiscussionRequestId={() => "comment-action-pending-request"}
+        captureSelectionSession={captureSelectionSession}
+        loadProviderConnections={sinon.stub().returns(new Promise(() => {}))}
+        loadProviderModels={sinon.stub().returns(new Promise(() => {}))}
+      />,
+    );
+
+    let handled = false;
+    act(() => {
+      handled = dispatchAiReviewerCommentAction(threadId);
+    });
+
+    expect(handled).to.equal(false);
+    expect(captureSelectionSession).not.to.have.been.called;
   });
 
   it("is disabled and dispatches nothing while busy", function () {

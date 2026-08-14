@@ -3308,7 +3308,12 @@ export function AiReviewerPanelView({
     persistenceMutationPending ||
     persistenceConflict ||
     runInProgress;
-  const commentActionBusy = busy || answerStreaming;
+  // The comment button lives in the review panel, so it is reachable before
+  // this panel has ever been opened and its connection catalog fetched. Until
+  // that lands there is no model to run with, so hold the action rather than
+  // starting a run that can only fail. A loaded catalog with nothing selected
+  // is a real choice the author has to make, and still reports itself.
+  const commentActionBusy = busy || answerStreaming || !connectionsLoaded;
   const selectionToolbarState = useRef({ busy, runSelectionReview });
   selectionToolbarState.current = { busy, runSelectionReview };
   const commentActionState = useRef<{
