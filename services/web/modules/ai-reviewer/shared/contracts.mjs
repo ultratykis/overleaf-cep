@@ -328,6 +328,11 @@ const WorkspaceDiscussionSuggestionSchema =
     sourceRequest: AgentRequestSchema.optional(),
   });
 
+export const WorkspaceDiscussionFindingSchema =
+  WorkspaceFindingSchema.safeExtend({
+    sourceRequest: AgentRequestSchema.optional(),
+  });
+
 const WorkspaceOrderSchema = z.number().int().nonnegative();
 export const WorkspaceRevisionSchema = z.number().int().nonnegative();
 // A custom perspective shares the instruction reserve with fixed tool and
@@ -390,6 +395,9 @@ export const WorkspaceDiscussionSchema = z
     sourceGeneration: WorkspaceOrderSchema.nullable(),
     commentThreadId: IdentifierSchema.optional(),
     turns: z.array(DiscussionTurnSchema).max(AI_REVIEWER_WORKSPACE_TURN_LIMIT),
+    // Older discussion snapshots predate owned findings. Readers hydrate a
+    // missing field as an empty list and every subsequent save writes it.
+    findings: z.array(WorkspaceDiscussionFindingSchema).max(100).optional(),
     suggestions: z.array(WorkspaceDiscussionSuggestionSchema),
     updatedAt: z.string().datetime({ offset: true }),
   })
@@ -579,6 +587,31 @@ export const AiReviewerWorkspaceSchema = z
             code: "custom",
             message: "Workspace discussion must belong to its source run",
             path: ["discussions", discussionIndex, "subject"],
+          });
+        }
+      }
+      for (const [findingIndex, finding] of (
+        discussion.findings ?? []
+      ).entries()) {
+        const sourceRequest = finding.sourceRequest ?? subjectRequest;
+        if (
+          sourceRequest == null ||
+          finding.artifact.requestId !== sourceRequest.requestId ||
+          finding.artifact.projectId !== sourceRequest.projectId ||
+          (finding.sourceRequest != null &&
+            (sourceRequest.agentSessionId !== discussion.id ||
+              sourceRequest.scope?.kind !== "document"))
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "Discussion finding must belong to its source request",
+            path: [
+              "discussions",
+              discussionIndex,
+              "findings",
+              findingIndex,
+              "artifact",
+            ],
           });
         }
       }

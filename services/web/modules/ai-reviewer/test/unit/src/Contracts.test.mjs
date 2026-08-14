@@ -462,7 +462,10 @@ describe("AI reviewer: runtime contracts", function () {
     const stored = workspace();
     stored.runs[0].subject = "Persisted claim support";
 
-    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+    const parsed = AiReviewerWorkspaceSchema.parse(stored);
+
+    expect(parsed).toEqual(stored);
+    expect(parsed.discussions[0].findings ?? []).toEqual([]);
   });
 
   it("keeps pre-completion workspaces byte-identical without defaults", function () {
@@ -618,6 +621,93 @@ describe("AI reviewer: runtime contracts", function () {
             suggestions: [
               {
                 artifact,
+                sourceRequest: {
+                  ...sourceRequest,
+                  agentSessionId: "another-discussion",
+                },
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("binds discussion findings to their document-scoped Agent turn", function () {
+    const discussion = {
+      id: "finding-discussion-0001",
+      createdOrder: 1,
+      subjectKey: null,
+      subject: null,
+      sourceGeneration: null,
+      turns: [{ role: "user", text: "Review this document." }],
+      findings: [],
+      suggestions: [],
+      updatedAt: createdAt,
+    };
+    const sourceRequest = conversationRequest({
+      requestId: "finding-turn-0001",
+      projectId: "project-0001",
+      agentSessionId: discussion.id,
+      scope: {
+        kind: "document",
+        documentId: "document-0001",
+        path: "chapters/introduction.tex",
+        baseRevision: 12,
+        baseTextHash: hash,
+        text: "Synthetic text.",
+      },
+    });
+    const entry = {
+      sourceRequest,
+      artifact: finding({ requestId: sourceRequest.requestId }),
+      status: "unresolved",
+    };
+    const stored = {
+      runs: [],
+      discussions: [{ ...discussion, findings: [entry] }],
+    };
+
+    expect(AiReviewerWorkspaceSchema.safeParse(stored).success).toBe(true);
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        ...stored,
+        discussions: [
+          {
+            ...discussion,
+            findings: Array.from({ length: 101 }, (_, index) => ({
+              ...entry,
+              artifact: { ...entry.artifact, id: `finding-${index}` },
+            })),
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        ...stored,
+        discussions: [
+          {
+            ...discussion,
+            findings: [
+              {
+                ...entry,
+                artifact: finding({ requestId: "another-request" }),
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      AiReviewerWorkspaceSchema.safeParse({
+        ...stored,
+        discussions: [
+          {
+            ...discussion,
+            findings: [
+              {
+                ...entry,
                 sourceRequest: {
                   ...sourceRequest,
                   agentSessionId: "another-discussion",

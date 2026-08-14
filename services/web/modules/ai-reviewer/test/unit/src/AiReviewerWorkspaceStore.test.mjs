@@ -226,9 +226,23 @@ function workspaceDiscussion(
       { role: "user", text: "Explain this result." },
       { role: "assistant", text: "A stored explanation." },
     ],
+    findingStatus,
     suggestionStatus,
   },
 ) {
+  const discussionRequest = {
+    ...run.request,
+    requestId: `request-${id}`,
+    agentSessionId: id,
+    scope: {
+      kind: "document",
+      documentId: run.request.scope.documentId,
+      path: run.request.scope.path,
+      baseRevision: run.request.scope.baseRevision,
+      baseTextHash: run.request.scope.baseTextHash,
+      text: run.request.scope.text,
+    },
+  };
   return {
     id,
     createdOrder,
@@ -239,6 +253,16 @@ function workspaceDiscussion(
     },
     sourceGeneration: run.generation,
     turns,
+    findings:
+      findingStatus == null
+        ? []
+        : [
+            {
+              sourceRequest: discussionRequest,
+              artifact: findingArtifact(discussionRequest, `finding-${id}`),
+              status: findingStatus,
+            },
+          ],
     suggestions:
       suggestionStatus == null
         ? []
@@ -602,7 +626,16 @@ describe("AI reviewer workspace persistence", function () {
     });
     const discussion = workspaceDiscussion(discussionRun, {
       createdOrder: 5,
+      findingStatus: "discarded",
       suggestionStatus: "applied",
+    });
+    discussion.findings.push({
+      ...discussion.findings[0],
+      artifact: {
+        ...discussion.findings[0].artifact,
+        id: "finding-discussion-unresolved",
+      },
+      status: "unresolved",
     });
     const input = {
       runs: [unresolvedRun, proseAfterClearRun, postedRun, discussionRun],
@@ -648,6 +681,7 @@ describe("AI reviewer workspace persistence", function () {
     expect(loaded.workspace.discussions).toEqual([
       {
         ...discussion,
+        findings: [discussion.findings[1]],
         suggestions: [],
       },
     ]);

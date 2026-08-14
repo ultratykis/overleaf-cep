@@ -165,6 +165,9 @@ function parseWorkspace(input, projectId) {
       }
     }
     if (
+      (discussion.findings ?? []).some(
+        (finding) => scopeIdentifier(finding.artifact.projectId) !== projectId,
+      ) ||
       discussion.suggestions.some(
         (suggestion) =>
           scopeIdentifier(suggestion.artifact.projectId) !== projectId,
@@ -249,15 +252,22 @@ function dropEmptyRunsOrphanedByDeletedDiscussion(
 export function clearResolvedWorkspace(workspace) {
   let changed = false;
   const discussions = workspace.discussions.map((discussion) => {
+    const findings = (discussion.findings ?? []).filter(
+      (finding) => finding.status === "unresolved",
+    );
     const suggestions = discussion.suggestions.filter(
       (suggestion) => suggestion.artifact.status === "unresolved",
     );
-    if (suggestions.length === discussion.suggestions.length) {
+    if (
+      findings.length === (discussion.findings ?? []).length &&
+      suggestions.length === discussion.suggestions.length
+    ) {
       return discussion;
     }
     changed = true;
     return {
       ...discussion,
+      findings,
       suggestions,
     };
   });

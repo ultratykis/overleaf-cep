@@ -410,6 +410,151 @@ describe("AI reviewer: conversation workspace", function () {
     expect(await screen.findByText("Delayed reply")).to.exist;
   });
 
+  it("persists, displays, and rehydrates a finding owned by an open discussion", async function () {
+    let revision = 0;
+    let savedWorkspace = AiReviewerWorkspaceSchema.parse({
+      runs: [],
+      discussions: [],
+    });
+    const persistence: AiReviewerWorkspacePersistence = {
+      load: async () => ({ revision, workspace: savedWorkspace }),
+      save: async (_projectId, workspace) => {
+        savedWorkspace = AiReviewerWorkspaceSchema.parse(workspace);
+        revision += 1;
+        return { revision, workspace: savedWorkspace };
+      },
+      deleteDiscussion: async () => ({
+        revision,
+        workspace: savedWorkspace,
+      }),
+      deleteAll: async () => ({ revision, workspace: savedWorkspace }),
+    };
+    let streamedRequest: AgentRequest | null = null;
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        streamedRequest = call.request;
+        const finding = sourceFinding(call.request);
+        call.onEvent(
+          agentEvent(call.request.requestId, 0, {
+            type: "text.delta",
+            delta: "The phrase is ambiguous and needs a precise explanation.",
+          }),
+        );
+        call.onEvent(
+          agentEvent(call.request.requestId, 1, {
+            type: "finding",
+            finding,
+          }),
+        );
+        call.onEvent(
+          agentEvent(call.request.requestId, 2, {
+            type: "completed",
+            finishReason: "stop",
+          }),
+        );
+      });
+    const { context, view } = editorContext(baseText, 0, 0);
+    const first = render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        workspacePersistence={persistence}
+        captureSelectionSession={captureEditorSession()}
+        createDiscussionId={() => "owned-finding-discussion"}
+        createDiscussionRequestId={() => "owned-finding-request"}
+        now={() => createdAt}
+        streamRequest={streamRequest}
+        getSelectionContext={sinon.stub().returns(context)}
+        postEditorComment={sinon.stub().resolves()}
+      />,
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("textbox", { name: "Ask about your manuscript…" }),
+      ).not.to.have.property("disabled", true);
+    });
+
+    await sendConversationMessage("Review this phrase.");
+
+    expect(await screen.findByText("Ambiguous discussion phrase")).to.exist;
+    expect(screen.getByRole("button", { name: "Go to text" })).to.exist;
+    expect(screen.getByRole("button", { name: "Post finding as comment" })).to
+      .exist;
+    expect(screen.getByRole("button", { name: "Discard finding" })).to.exist;
+    expect(
+      screen.getByRole("button", { name: "Go to unresolved findings (1)" }),
+    ).to.exist;
+    await waitFor(() => {
+      expect(savedWorkspace.discussions[0]?.findings).to.have.length(1);
+    });
+    expect(savedWorkspace.discussions[0]?.findings?.[0]).to.deep.equal({
+      sourceRequest: streamedRequest,
+      artifact: sourceFinding(streamedRequest!),
+      status: "unresolved",
+    });
+
+    first.unmount();
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        workspacePersistence={persistence}
+        getSelectionContext={sinon.stub().returns(context)}
+        postEditorComment={sinon.stub().resolves()}
+      />,
+    );
+    const summary = await screen.findByRole("article", {
+      name: "Discussion summary",
+    });
+    fireEvent.click(
+      within(summary).getByRole("button", { name: "No subject" }),
+    );
+    expect(await screen.findByText("Ambiguous discussion phrase")).to.exist;
+    fireEvent.click(screen.getByRole("button", { name: "Discard finding" }));
+    await waitFor(() => {
+      expect(savedWorkspace.discussions[0]?.findings?.[0]?.status).to.equal(
+        "discarded",
+      );
+    });
+    view.destroy();
+  });
+
+  it("fails a discussion response that repeats a finding identity", async function () {
+    const streamRequest = sinon
+      .stub()
+      .callsFake(async (call: ReviewStreamCall) => {
+        const finding = sourceFinding(call.request);
+        call.onEvent(
+          agentEvent(call.request.requestId, 0, {
+            type: "finding",
+            finding,
+          }),
+        );
+        call.onEvent(
+          agentEvent(call.request.requestId, 1, {
+            type: "finding",
+            finding,
+          }),
+        );
+      });
+
+    render(
+      <AiReviewerPanelView
+        projectId={projectId}
+        captureSelectionSession={captureEditorSession()}
+        createDiscussionId={() => "duplicate-finding-discussion"}
+        createDiscussionRequestId={() => "duplicate-finding-request"}
+        now={() => createdAt}
+        streamRequest={streamRequest}
+      />,
+    );
+
+    await sendConversationMessage("Report one finding.");
+
+    expect((await screen.findByRole("alert")).textContent).to.equal(
+      "The AI reviewer returned a duplicate finding identity.",
+    );
+  });
+
   it("captures a document scope while retaining a live selection as quoted context", async function () {
     const selectedText = "The author's currently selected manuscript text.";
     const doc = `Before ${selectedText} After`;

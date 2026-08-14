@@ -1456,6 +1456,28 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     );
   });
 
+  it("keeps document-bound discussion findings supplementary to a standalone answer", async function () {
+    const { model } = strictStreamModel([textStep("Explain the issue fully.")]);
+    const gateway = createGateway(model, { searchZotero: async () => [] });
+
+    const events = await collect(
+      gateway.stream(
+        documentRequest({ agentSessionId: "discussion-agent-0001" }),
+      ),
+    );
+
+    expect(
+      model.doStreamCalls[0].tools.map((declared) => declared.name),
+    ).toContain("report_finding");
+    expect(sentSystemInstruction(model)).toContain(
+      "Keep the answer independently meaningful",
+    );
+    expect(sentSystemInstruction(model)).not.toContain(
+      "Do not restate a reported finding",
+    );
+    expect(events.at(-1)).not.toHaveProperty("findingToolNotCalled");
+  });
+
   it("does not tell a scope-free custom referee discussion to call a withheld finding tool", async function () {
     const { model } = strictStreamModel([textStep("Chapter three.")]);
     const customPerspective =

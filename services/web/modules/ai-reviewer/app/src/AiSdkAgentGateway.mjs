@@ -547,8 +547,11 @@ const FINDING_INSTRUCTION = [
   "Preserve deterministic project citationAudit issues and their evidence.",
   'For those issues, use artifactKind "citation-finding" and preserve the text-only proposal as proposedText.',
   'For every other finding, use artifactKind "finding" and omit proposedText.',
-  "Do not restate a reported finding or suggestion in prose; describe only what the user still needs to know.",
 ].join(" ");
+const REVIEW_FINDING_PROSE_INSTRUCTION =
+  "Do not restate a reported finding or suggestion in prose; describe only what the user still needs to know.";
+const DISCUSSION_FINDING_PROSE_INSTRUCTION =
+  "Keep the answer independently meaningful; findings are supplementary artifacts, so include the information needed to understand the answer in prose.";
 
 const REVIEW_RESULT_INSTRUCTION =
   "Call report_subject exactly once with a short subject that names what this response is about.";
@@ -796,8 +799,8 @@ function systemInstructionForRequest(request, skills, modeInstructions) {
   const skill = request.skill;
   const findingsAllowed = findingsAllowedForRequest(request);
   const modeInstruction = modeInstructionForRequest(skill, modeInstructions);
-  // Discussions do not own findings. Keep the referee guidance, but remove the
-  // command for a tool that the same ownership boundary deliberately withholds.
+  // Scope-free requests still withhold findings, so remove referee guidance
+  // that would otherwise command a tool the request cannot use.
   const effectiveModeInstruction =
     !findingsAllowed && skill === "referee-review"
       ? modeInstruction?.replace(`\n\n${REFEREE_FINDING_INSTRUCTION}`, "")
@@ -807,7 +810,14 @@ function systemInstructionForRequest(request, skills, modeInstructions) {
     isSelectionTransformRequest(request)
       ? SELECTION_TRANSFORM_INSTRUCTION
       : REVIEW_RESULT_INSTRUCTION,
-    findingsAllowed ? FINDING_INSTRUCTION : null,
+    findingsAllowed
+      ? [
+          FINDING_INSTRUCTION,
+          request.agentSessionId == null
+            ? REVIEW_FINDING_PROSE_INSTRUCTION
+            : DISCUSSION_FINDING_PROSE_INSTRUCTION,
+        ].join(" ")
+      : null,
     effectiveModeInstruction,
     storedSkillInstruction(skill, skills),
     SHARED_LANGUAGE_INSTRUCTION,
@@ -826,9 +836,8 @@ function isSelectionTransformRequest(request) {
 
 /** @param {AgentRequest} request */
 function findingsAllowedForRequest(request) {
-  // Typed discussion requests deliberately omit scope, including discussions
-  // pinned to a prior artifact. Every review target, including project-wide
-  // review, has an explicit scope, so this is the existing ownership boundary.
+  // Artifact reporting requires an explicit captured scope. This applies to
+  // both reviews and document-bound discussion turns.
   return (
     request.scope != null &&
     request.skill !== "brainstorm" &&
@@ -4056,7 +4065,9 @@ export class AiSdkAgentGateway {
         sequence,
         createdAt: this.now(),
         finishReason,
-        ...(findingsAllowed && !toolCallCounts.has("report_finding")
+        ...(findingsAllowed &&
+        request.agentSessionId == null &&
+        !toolCallCounts.has("report_finding")
           ? { findingToolNotCalled: true }
           : {}),
         usage:

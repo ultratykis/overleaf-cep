@@ -309,6 +309,9 @@ type Discussion = {
   commentThreadId: string | null;
   turns: DiscussionTurn[];
   toolCalls: Array<{ position: number; call: ToolCall }>;
+  findings: Finding[];
+  findingRequests: Readonly<Record<string, AgentRequest>>;
+  findingStatuses: Readonly<Record<string, FindingArtifactStatus | undefined>>;
   suggestions: UnresolvedSuggestion[];
   suggestionRequests: Readonly<Record<string, AgentRequest>>;
   suggestionSessions: Readonly<Record<string, EditorSelectionSession>>;
@@ -377,7 +380,19 @@ type ActiveDiscussionRequest = {
   requestId: string;
   controller: AbortController;
   terminal: "completed" | "error" | null;
+  findingIds: Set<string>;
   suggestionIds: Set<string>;
+};
+
+type FindingContext = {
+  keyPrefix: string;
+  generation: number;
+  discussionId: string | null;
+  request: AgentRequest | null;
+  session: EditorSelectionSession | null;
+  findings: Finding[];
+  findingStatuses: Readonly<Record<string, FindingArtifactStatus | undefined>>;
+  runState: SelectionWorkspaceState | null;
 };
 
 type PersistenceOperation = {
@@ -1291,6 +1306,14 @@ function workspaceDiscussionFromState(
       ? {}
       : { commentThreadId: discussion.commentThreadId }),
     turns: discussion.turns,
+    findings: discussion.findings.map((finding) => {
+      const sourceRequest = discussion.findingRequests[finding.id];
+      return {
+        ...(sourceRequest == null ? {} : { sourceRequest }),
+        artifact: finding,
+        status: findingStatus(discussion.findingStatuses, finding.id),
+      };
+    }),
     suggestions: discussion.suggestions.map((suggestion) => {
       const status = suggestionStatus(
         discussion.suggestionStatuses,
@@ -1372,6 +1395,49 @@ function mergeWorkspaceDecisionChanges(
   const afterRuns = new Map(
     after.runs.map((run) => [run.request.requestId, run]),
   );
+  const mergeFindings = (
+    persistedFindings: WorkspaceRun["findings"],
+    beforeFindings: WorkspaceRun["findings"],
+    afterFindings: WorkspaceRun["findings"],
+  ) => {
+    const beforeById = new Map(
+      beforeFindings.map((entry) => [entry.artifact.id, entry]),
+    );
+    const afterById = new Map(
+      afterFindings.map((entry) => [entry.artifact.id, entry]),
+    );
+    const persistedIds = new Set(
+      persistedFindings.map((entry) => entry.artifact.id),
+    );
+    for (const [id, current] of afterById) {
+      const previous = beforeById.get(id);
+      if (
+        previous != null &&
+        !persistedIds.has(id) &&
+        previous.status !== current.status
+      ) {
+        conflicted = true;
+      }
+    }
+    return persistedFindings.map((entry) => {
+      const previous = beforeById.get(entry.artifact.id);
+      const current = afterById.get(entry.artifact.id);
+      if (
+        previous == null ||
+        current == null ||
+        previous.status === current.status
+      ) {
+        return entry;
+      }
+      if (entry.status !== previous.status) {
+        if (entry.status !== current.status) {
+          conflicted = true;
+        }
+        return entry;
+      }
+      return { ...entry, status: current.status };
+    });
+  };
   const mergeSuggestions = (
     persistedSuggestions: WorkspaceRun["suggestions"],
     beforeSuggestions: WorkspaceRun["suggestions"],
@@ -1440,48 +1506,13 @@ function mergeWorkspaceDecisionChanges(
     if (beforeRun == null || afterRun == null) {
       return run;
     }
-    const beforeFindings = new Map(
-      beforeRun.findings.map((entry) => [entry.artifact.id, entry]),
-    );
-    const afterFindings = new Map(
-      afterRun.findings.map((entry) => [entry.artifact.id, entry]),
-    );
-    const persistedFindingIds = new Set(
-      run.findings.map((entry) => entry.artifact.id),
-    );
-    for (const [id, current] of afterFindings) {
-      const previous = beforeFindings.get(id);
-      if (
-        previous != null &&
-        !persistedFindingIds.has(id) &&
-        previous.status !== current.status
-      ) {
-        conflicted = true;
-      }
-    }
     return {
       ...run,
-      findings: run.findings.map((entry) => {
-        const previous = beforeFindings.get(entry.artifact.id);
-        const current = afterFindings.get(entry.artifact.id);
-        if (
-          previous == null ||
-          current == null ||
-          previous.status === current.status
-        ) {
-          return entry;
-        }
-        if (entry.status !== previous.status) {
-          if (entry.status !== current.status) {
-            conflicted = true;
-          }
-          return entry;
-        }
-        return {
-          ...entry,
-          status: current.status,
-        };
-      }),
+      findings: mergeFindings(
+        run.findings,
+        beforeRun.findings,
+        afterRun.findings,
+      ),
       suggestions: mergeSuggestions(
         run.suggestions,
         beforeRun.suggestions,
@@ -1532,16 +1563,25 @@ function mergeWorkspaceDecisionChanges(
     if (beforeDiscussion == null || afterDiscussion == null) {
       return discussion;
     }
+    const findings = mergeFindings(
+      discussion.findings ?? [],
+      beforeDiscussion.findings ?? [],
+      afterDiscussion.findings ?? [],
+    );
     const suggestions = mergeSuggestions(
       discussion.suggestions,
       beforeDiscussion.suggestions,
       afterDiscussion.suggestions,
     );
-    return suggestions.some(
-      (entry, index) => entry !== discussion.suggestions[index],
-    )
+    return findings.some(
+      (entry, index) => entry !== discussion.findings?.[index],
+    ) ||
+      suggestions.some(
+        (entry, index) => entry !== discussion.suggestions[index],
+      )
       ? {
           ...discussion,
+          findings,
           suggestions,
           updatedAt: afterDiscussion.updatedAt,
         }
@@ -1555,14 +1595,25 @@ function mergeWorkspaceDecisionChanges(
     if (
       beforeDiscussion == null ||
       persistedDiscussionIds.has(discussionId) ||
-      beforeDiscussion.suggestions.length === 0
+      ((beforeDiscussion.findings?.length ?? 0) === 0 &&
+        beforeDiscussion.suggestions.length === 0)
     ) {
       continue;
     }
     const beforeSuggestions = new Map(
       beforeDiscussion.suggestions.map((entry) => [entry.artifact.id, entry]),
     );
+    const beforeFindings = new Map(
+      (beforeDiscussion.findings ?? []).map((entry) => [
+        entry.artifact.id,
+        entry,
+      ]),
+    );
     if (
+      (afterDiscussion.findings ?? []).some((entry) => {
+        const previous = beforeFindings.get(entry.artifact.id);
+        return previous != null && previous.status !== entry.status;
+      }) ||
       afterDiscussion.suggestions.some((entry) => {
         const previous = beforeSuggestions.get(entry.artifact.id);
         return (
@@ -1600,6 +1651,26 @@ function discussionFromWorkspace(
     turns: discussion.turns,
     // Tool lines belong to the live stream; the stored workspace keeps turns.
     toolCalls: [],
+    findings: (discussion.findings ?? []).map((entry) => entry.artifact),
+    findingRequests: Object.fromEntries(
+      (discussion.findings ?? [])
+        .map(
+          (entry) =>
+            [
+              entry.artifact.id,
+              entry.sourceRequest ?? discussion.subject?.sourceRequest,
+            ] as const,
+        )
+        .filter(
+          (entry): entry is readonly [string, AgentRequest] => entry[1] != null,
+        ),
+    ),
+    findingStatuses: Object.fromEntries(
+      (discussion.findings ?? []).map((entry) => [
+        entry.artifact.id,
+        entry.status,
+      ]),
+    ),
     suggestions: discussion.suggestions.map((entry) => ({
       ...entry.artifact,
       status: "unresolved",
@@ -3036,25 +3107,59 @@ export function AiReviewerPanelView({
     [getSelectionContext],
   );
 
+  const runFindingContext = (
+    runState: SelectionWorkspaceState,
+  ): FindingContext => ({
+    keyPrefix: `run:${runState.generation}`,
+    generation: runState.generation,
+    discussionId: null,
+    request: runState.request,
+    session: runState.session,
+    findings: runState.findings,
+    findingStatuses: runState.findingStatuses,
+    runState,
+  });
+
+  const discussionFindingContext = (
+    discussion: Discussion,
+    finding: Finding,
+  ): FindingContext => ({
+    keyPrefix: `discussion:${discussion.id}`,
+    generation: discussion.sourceGeneration ?? discussion.createdOrder,
+    discussionId: discussion.id,
+    request: discussion.findingRequests[finding.id] ?? null,
+    session: null,
+    findings: discussion.findings,
+    findingStatuses: discussion.findingStatuses,
+    runState: null,
+  });
+
+  const findingArtifactKey = (context: FindingContext, finding: Finding) =>
+    `${context.keyPrefix}:${
+      finding.artifactKind === "citation-finding" ? "citation" : "finding"
+    }:${finding.id}`;
+
   const prepareFindingEvidenceNavigation = useCallback(
     (
-      runState: SelectionWorkspaceState,
+      context: FindingContext,
       finding: Finding,
       evidenceIndex: number,
     ): {
       session: EditorSelectionSession | null;
       target: EditorEvidenceNavigationTarget;
     } | null => {
-      const request = runState.request;
-      const requestId = runState.requestId;
+      const request = context.request;
+      const requestId = request?.requestId ?? null;
       if (
-        runState.status !== "completed" ||
+        (context.runState != null &&
+          (context.runState.status !== "completed" ||
+            context.runState.requestId !== requestId)) ||
         request == null ||
         requestId == null ||
         getSelectionContext == null ||
-        request.requestId !== requestId ||
-        !runState.findings.includes(finding) ||
-        findingStatus(runState.findingStatuses, finding.id) !== "unresolved"
+        finding.requestId !== requestId ||
+        !context.findings.includes(finding) ||
+        findingStatus(context.findingStatuses, finding.id) !== "unresolved"
       ) {
         return null;
       }
@@ -3076,7 +3181,7 @@ export function AiReviewerPanelView({
             };
       }
 
-      const session = runState.session ?? rebindEvidenceSession(request);
+      const session = context.session ?? rebindEvidenceSession(request);
       if (session == null || session.request.requestId !== requestId) {
         return null;
       }
@@ -3101,17 +3206,13 @@ export function AiReviewerPanelView({
   );
 
   const openFindingEvidence = useCallback(
-    (
-      runState: SelectionWorkspaceState,
-      finding: Finding,
-      evidenceIndex: number,
-    ) => {
+    (context: FindingContext, finding: Finding, evidenceIndex: number) => {
       const prepared = prepareFindingEvidenceNavigation(
-        runState,
+        context,
         finding,
         evidenceIndex,
       );
-      const requestId = runState.requestId;
+      const requestId = context.request?.requestId ?? null;
       if (
         prepared == null ||
         requestId == null ||
@@ -3123,7 +3224,7 @@ export function AiReviewerPanelView({
 
       const previous = activeEvidenceNavigation.current;
       if (
-        previous?.generation === runState.generation &&
+        previous?.generation === context.generation &&
         previous.requestId === requestId &&
         previous.session === session &&
         previous.finding === finding &&
@@ -3136,7 +3237,7 @@ export function AiReviewerPanelView({
         cancellationReason("Another evidence reference was selected."),
       );
       const identity: ActiveEvidenceNavigation = {
-        generation: runState.generation,
+        generation: context.generation,
         requestId,
         session,
         finding,
@@ -3194,14 +3295,15 @@ export function AiReviewerPanelView({
   );
 
   const discardFinding = useCallback(
-    (runState: SelectionWorkspaceState, finding: Finding) => {
+    (context: FindingContext, finding: Finding) => {
+      const requestId = context.request?.requestId ?? null;
       if (
         persistenceConflictRef.current ||
-        runState.status !== "completed" ||
-        runState.requestId == null ||
-        finding.requestId !== runState.requestId ||
-        !runState.findings.includes(finding) ||
-        findingStatus(runState.findingStatuses, finding.id) !== "unresolved"
+        (context.runState != null && context.runState.status !== "completed") ||
+        requestId == null ||
+        finding.requestId !== requestId ||
+        !context.findings.includes(finding) ||
+        findingStatus(context.findingStatuses, finding.id) !== "unresolved"
       ) {
         return;
       }
@@ -3214,30 +3316,53 @@ export function AiReviewerPanelView({
       if (activeCitationCopy.current?.finding === finding) {
         clearCitationCopy();
       }
-      dispatch({
-        type: "discard-finding",
-        generation: runState.generation,
-        requestId: runState.requestId,
-        findingId: finding.id,
-      });
+      if (context.discussionId == null) {
+        dispatch({
+          type: "discard-finding",
+          generation: context.generation,
+          requestId,
+          findingId: finding.id,
+        });
+      } else {
+        updateDiscussions((current) =>
+          current.map((discussion) =>
+            discussion.id === context.discussionId
+              ? {
+                  ...discussion,
+                  findingStatuses: {
+                    ...discussion.findingStatuses,
+                    [finding.id]: "discarded",
+                  },
+                  updatedAt: now(),
+                }
+              : discussion,
+          ),
+        );
+      }
     },
-    [clearCitationCopy, disposeActiveEvidenceNavigation],
+    [
+      clearCitationCopy,
+      disposeActiveEvidenceNavigation,
+      now,
+      updateDiscussions,
+    ],
   );
 
   const copyCitationProposedText = useCallback(
-    (runState: SelectionWorkspaceState, finding: CitationFinding) => {
+    (context: FindingContext, finding: CitationFinding) => {
+      const requestId = context.request?.requestId ?? null;
       if (
-        runState.status !== "completed" ||
-        runState.requestId == null ||
-        finding.requestId !== runState.requestId ||
-        !runState.findings.includes(finding) ||
-        findingStatus(runState.findingStatuses, finding.id) !== "unresolved"
+        (context.runState != null && context.runState.status !== "completed") ||
+        requestId == null ||
+        finding.requestId !== requestId ||
+        !context.findings.includes(finding) ||
+        findingStatus(context.findingStatuses, finding.id) !== "unresolved"
       ) {
         return;
       }
       const identity: CitationCopyNotice = {
-        generation: runState.generation,
-        requestId: runState.requestId,
+        generation: context.generation,
+        requestId,
         finding,
         status: "copying",
       };
@@ -3478,10 +3603,19 @@ export function AiReviewerPanelView({
             discussion.id === draft.discussionId
               ? {
                   ...discussion,
-                  suggestionStatuses: {
-                    ...discussion.suggestionStatuses,
-                    [draft.artifact.id]: "posted",
-                  },
+                  ...("artifactKind" in draft.artifact
+                    ? {
+                        findingStatuses: {
+                          ...discussion.findingStatuses,
+                          [draft.artifact.id]: "posted" as const,
+                        },
+                      }
+                    : {
+                        suggestionStatuses: {
+                          ...discussion.suggestionStatuses,
+                          [draft.artifact.id]: "posted" as const,
+                        },
+                      }),
                   updatedAt: now(),
                 }
               : discussion,
@@ -3924,6 +4058,9 @@ export function AiReviewerPanelView({
         commentThreadId: null,
         turns: [],
         toolCalls: [],
+        findings: [],
+        findingRequests: {},
+        findingStatuses: {},
         suggestions: [],
         suggestionRequests: {},
         suggestionSessions: {},
@@ -4014,6 +4151,9 @@ export function AiReviewerPanelView({
         commentThreadId,
         turns: [],
         toolCalls: [],
+        findings: [],
+        findingRequests: {},
+        findingStatuses: {},
         suggestions: [],
         suggestionRequests: {},
         suggestionSessions: {},
@@ -4094,6 +4234,7 @@ export function AiReviewerPanelView({
         requestId,
         controller: new AbortController(),
         terminal: null,
+        findingIds: new Set(),
         suggestionIds: new Set(),
       };
       activeDiscussionRequest.current = active;
@@ -4265,6 +4406,34 @@ export function AiReviewerPanelView({
                       ...candidate.toolCalls,
                       { position: candidate.turns.length, call: event.call },
                     ],
+                    updatedAt: now(),
+                  }
+                : candidate,
+            ),
+          );
+        } else if (event.type === "finding") {
+          if (active.findingIds.has(event.finding.id)) {
+            failDiscussionRequest(
+              active,
+              t("ai_reviewer_error_duplicate_finding"),
+            );
+            return;
+          }
+          active.findingIds.add(event.finding.id);
+          updateDiscussions((current) =>
+            current.map((candidate) =>
+              candidate.id === discussionId
+                ? {
+                    ...candidate,
+                    findings: [...candidate.findings, event.finding],
+                    findingRequests: {
+                      ...candidate.findingRequests,
+                      [event.finding.id]: request,
+                    },
+                    findingStatuses: {
+                      ...candidate.findingStatuses,
+                      [event.finding.id]: "unresolved",
+                    },
                     updatedAt: now(),
                   }
                 : candidate,
@@ -4735,6 +4904,9 @@ export function AiReviewerPanelView({
       persistedAfterDeletion: AiReviewerWorkspace | null = null,
       beforeDeletion: AiReviewerWorkspace | null = null,
     ) => {
+      const deletedDiscussion = discussionsRef.current.find(
+        (discussion) => discussion.id === discussionId,
+      );
       let remainingDiscussions = discussionsRef.current.filter(
         (discussion) => discussion.id !== discussionId,
       );
@@ -4831,13 +5003,35 @@ export function AiReviewerPanelView({
           cancellationReason("The discussion was deleted."),
         );
       }
+      const evidenceNavigation = activeEvidenceNavigation.current;
+      if (
+        evidenceNavigation != null &&
+        deletedDiscussion?.findings.includes(evidenceNavigation.finding)
+      ) {
+        disposeActiveEvidenceNavigation(
+          cancellationReason("The discussion was deleted."),
+        );
+      }
+      const citationCopy = activeCitationCopy.current;
+      if (
+        citationCopy != null &&
+        deletedDiscussion?.findings.includes(citationCopy.finding)
+      ) {
+        clearCitationCopy();
+      }
       updateDiscussions(() => remainingDiscussions);
       if (activeDiscussionIdRef.current === discussionId) {
         setActiveDiscussionId(null);
       }
       return mergeConflicted;
     },
-    [disposeActiveSuggestion, t, updateDiscussions],
+    [
+      clearCitationCopy,
+      disposeActiveEvidenceNavigation,
+      disposeActiveSuggestion,
+      t,
+      updateDiscussions,
+    ],
   );
 
   const deleteDiscussion = useCallback(
@@ -5305,14 +5499,11 @@ export function AiReviewerPanelView({
     );
   };
 
-  const renderEvidence = (
-    runState: SelectionWorkspaceState,
-    artifact: Finding,
-  ) => (
+  const renderEvidence = (context: FindingContext, artifact: Finding) => (
     <ul className="ai-reviewer-panel-locations">
       {artifact.evidence.map((reference, index) => {
         const navigationTarget =
-          prepareFindingEvidenceNavigation(runState, artifact, index)?.target ??
+          prepareFindingEvidenceNavigation(context, artifact, index)?.target ??
           null;
         const location = evidenceLocation(reference);
         return (
@@ -5325,7 +5516,7 @@ export function AiReviewerPanelView({
                 type="button"
                 variant="link"
                 size="sm"
-                onClick={() => openFindingEvidence(runState, artifact, index)}
+                onClick={() => openFindingEvidence(context, artifact, index)}
               >
                 {artifact.evidence.length > 1
                   ? t("ai_reviewer_go_to_location", { index: index + 1 })
@@ -5343,18 +5534,16 @@ export function AiReviewerPanelView({
     runState.status === "completed" &&
     runState.request != null;
 
-  const renderFinding = (
-    runState: SelectionWorkspaceState,
-    finding: OrdinaryFinding,
-  ) => {
-    const status = findingStatus(runState.findingStatuses, finding.id);
-    const commentDraftKey = `run:${runState.generation}:finding:${finding.id}`;
+  const renderFinding = (context: FindingContext, finding: OrdinaryFinding) => {
+    const runState = context.runState;
+    const status = findingStatus(context.findingStatuses, finding.id);
+    const commentDraftKey = findingArtifactKey(context, finding);
     const discussAvailable =
-      canDiscussRun(runState) && runState.request != null;
+      runState != null && canDiscussRun(runState) && context.request != null;
     const postAvailable =
       status === "unresolved" &&
-      runState.status === "completed" &&
-      runState.request != null &&
+      (runState == null || runState.status === "completed") &&
+      context.request != null &&
       postEditorComment != null &&
       getSelectionContext != null;
     const discardAvailable = status === "unresolved";
@@ -5370,10 +5559,9 @@ export function AiReviewerPanelView({
           checkNewLines
           translate="no"
         />
-        {renderEvidence(runState, finding)}
+        {renderEvidence(context, finding)}
         {renderCommentDraft(commentDraftKey)}
-        {evidenceNavigationNotice?.identity.generation ===
-          runState.generation &&
+        {evidenceNavigationNotice?.identity.generation === context.generation &&
           evidenceNavigationNotice.identity.finding === finding && (
             <p aria-live="polite">
               {evidenceNavigationMessage(evidenceNavigationNotice, t)}
@@ -5391,10 +5579,10 @@ export function AiReviewerPanelView({
               className="ai-reviewer-artifact-action-collapsible"
               onClick={() =>
                 openDiscussion(
-                  runState,
+                  runState!,
                   {
                     kind: "finding",
-                    sourceRequest: runState.request!,
+                    sourceRequest: context.request!,
                     artifact: finding,
                   },
                   `finding:${finding.id}`,
@@ -5415,9 +5603,10 @@ export function AiReviewerPanelView({
               onClick={() =>
                 openCommentDraft({
                   key: commentDraftKey,
-                  generation: runState.generation,
-                  request: runState.request!,
+                  generation: context.generation,
+                  request: context.request!,
                   artifact: finding,
+                  discussionId: context.discussionId,
                 })
               }
             />
@@ -5431,7 +5620,7 @@ export function AiReviewerPanelView({
               disabled={
                 persistenceConflict || commentDraft?.key === commentDraftKey
               }
-              onClick={() => discardFinding(runState, finding)}
+              onClick={() => discardFinding(context, finding)}
             />
           )}
           <AiReviewerOverflowMenu
@@ -5444,10 +5633,10 @@ export function AiReviewerPanelView({
                 as="button"
                 onClick={() =>
                   openDiscussion(
-                    runState,
+                    runState!,
                     {
                       kind: "finding",
-                      sourceRequest: runState.request!,
+                      sourceRequest: context.request!,
                       artifact: finding,
                     },
                     `finding:${finding.id}`,
@@ -5467,9 +5656,10 @@ export function AiReviewerPanelView({
                 onClick={() =>
                   openCommentDraft({
                     key: commentDraftKey,
-                    generation: runState.generation,
-                    request: runState.request!,
+                    generation: context.generation,
+                    request: context.request!,
                     artifact: finding,
+                    discussionId: context.discussionId,
                   })
                 }
               >
@@ -5482,7 +5672,7 @@ export function AiReviewerPanelView({
                 disabled={
                   persistenceConflict || commentDraft?.key === commentDraftKey
                 }
-                onClick={() => discardFinding(runState, finding)}
+                onClick={() => discardFinding(context, finding)}
               >
                 {t("ai_reviewer_discard_finding")}
               </OLDropdownMenuItem>
@@ -5494,18 +5684,19 @@ export function AiReviewerPanelView({
   };
 
   const renderCitationFinding = (
-    runState: SelectionWorkspaceState,
+    context: FindingContext,
     finding: CitationFinding,
   ) => {
-    const status = findingStatus(runState.findingStatuses, finding.id);
-    const commentDraftKey = `run:${runState.generation}:citation:${finding.id}`;
+    const runState = context.runState;
+    const status = findingStatus(context.findingStatuses, finding.id);
+    const commentDraftKey = findingArtifactKey(context, finding);
     const copyNotice =
-      citationCopyNotice?.generation === runState.generation &&
+      citationCopyNotice?.generation === context.generation &&
       citationCopyNotice.finding === finding
         ? citationCopyNotice
         : null;
     const discussAvailable =
-      canDiscussRun(runState) && runState.request != null;
+      runState != null && canDiscussRun(runState) && context.request != null;
     const unresolved = status === "unresolved";
     return renderArtifact(
       commentDraftKey,
@@ -5524,7 +5715,7 @@ export function AiReviewerPanelView({
             proposedText: finding.proposedText,
           })}
         </p>
-        {renderEvidence(runState, finding)}
+        {renderEvidence(context, finding)}
         {copyNotice != null && (
           <p aria-live="polite">
             {copyNotice.status === "copying"
@@ -5536,8 +5727,7 @@ export function AiReviewerPanelView({
                   : t("ai_reviewer_proposed_text_copy_failed")}
           </p>
         )}
-        {evidenceNavigationNotice?.identity.generation ===
-          runState.generation &&
+        {evidenceNavigationNotice?.identity.generation === context.generation &&
           evidenceNavigationNotice.identity.finding === finding && (
             <p aria-live="polite">
               {evidenceNavigationMessage(evidenceNavigationNotice, t)}
@@ -5555,10 +5745,10 @@ export function AiReviewerPanelView({
               className="ai-reviewer-artifact-action-collapsible"
               onClick={() =>
                 openDiscussion(
-                  runState,
+                  runState!,
                   {
                     kind: "citation-finding",
-                    sourceRequest: runState.request!,
+                    sourceRequest: context.request!,
                     artifact: finding,
                   },
                   `citation-finding:${finding.id}`,
@@ -5573,7 +5763,7 @@ export function AiReviewerPanelView({
               icon="content_copy"
               className="ai-reviewer-artifact-action-collapsible"
               disabled={persistenceConflict || copyNotice?.status === "copying"}
-              onClick={() => copyCitationProposedText(runState, finding)}
+              onClick={() => copyCitationProposedText(context, finding)}
             />
           )}
           {unresolved && (
@@ -5583,7 +5773,7 @@ export function AiReviewerPanelView({
               icon="delete"
               className="ai-reviewer-artifact-action-collapsible"
               disabled={persistenceConflict}
-              onClick={() => discardFinding(runState, finding)}
+              onClick={() => discardFinding(context, finding)}
             />
           )}
           <AiReviewerOverflowMenu
@@ -5596,10 +5786,10 @@ export function AiReviewerPanelView({
                 as="button"
                 onClick={() =>
                   openDiscussion(
-                    runState,
+                    runState!,
                     {
                       kind: "citation-finding",
-                      sourceRequest: runState.request!,
+                      sourceRequest: context.request!,
                       artifact: finding,
                     },
                     `citation-finding:${finding.id}`,
@@ -5615,7 +5805,7 @@ export function AiReviewerPanelView({
                 disabled={
                   persistenceConflict || copyNotice?.status === "copying"
                 }
-                onClick={() => copyCitationProposedText(runState, finding)}
+                onClick={() => copyCitationProposedText(context, finding)}
               >
                 {t("ai_reviewer_copy_proposed_text")}
               </OLDropdownMenuItem>
@@ -5624,7 +5814,7 @@ export function AiReviewerPanelView({
               <OLDropdownMenuItem
                 as="button"
                 disabled={persistenceConflict}
-                onClick={() => discardFinding(runState, finding)}
+                onClick={() => discardFinding(context, finding)}
               >
                 {t("ai_reviewer_discard_citation_finding")}
               </OLDropdownMenuItem>
@@ -6046,8 +6236,8 @@ export function AiReviewerPanelView({
           </h4>
           {runState.findings.map((finding) =>
             finding.artifactKind === "citation-finding"
-              ? renderCitationFinding(runState, finding)
-              : renderFinding(runState, finding),
+              ? renderCitationFinding(runFindingContext(runState), finding)
+              : renderFinding(runFindingContext(runState), finding),
           )}
         </section>
       )}
@@ -6413,6 +6603,22 @@ export function AiReviewerPanelView({
           </div>
         )}
         {reply != null && renderCommentDraft(reply.key)}
+        {discussion.findings.length > 0 && (
+          <section
+            className="ai-reviewer-run-artifacts"
+            aria-label={t("ai_reviewer_review_findings")}
+          >
+            <h4 className="ai-reviewer-run-section-title">
+              {t("ai_reviewer_findings")}
+            </h4>
+            {discussion.findings.map((finding) => {
+              const context = discussionFindingContext(discussion, finding);
+              return finding.artifactKind === "citation-finding"
+                ? renderCitationFinding(context, finding)
+                : renderFinding(context, finding);
+            })}
+          </section>
+        )}
         {discussion.suggestions.length > 0 && (
           <section
             className="ai-reviewer-run-artifacts"
@@ -6505,24 +6711,32 @@ export function AiReviewerPanelView({
     return () => cancelAnimationFrame(animationFrame);
   }, [activeDiscussionId]);
 
-  const findingEntries = workspace.runs.flatMap((runState) =>
-    runState.findings.map((finding) => ({ runState, finding })),
+  const findingEntries = timeline.flatMap((entry) =>
+    entry.kind === "run"
+      ? entry.run.findings.map((finding) => ({
+          context: runFindingContext(entry.run),
+          finding,
+        }))
+      : entry.discussion.findings.map((finding) => ({
+          context: discussionFindingContext(entry.discussion, finding),
+          finding,
+        })),
   );
   const unresolvedFindingCount = findingEntries.filter(
-    ({ runState, finding }) =>
-      findingStatus(runState.findingStatuses, finding.id) === "unresolved",
+    ({ context, finding }) =>
+      findingStatus(context.findingStatuses, finding.id) === "unresolved",
   ).length;
-  const firstUnresolvedFindingKey = findingEntries
-    .map(({ runState, finding }) => {
-      const status = findingStatus(runState.findingStatuses, finding.id);
-      if (status !== "unresolved") {
-        return null;
-      }
-      const kind =
-        finding.artifactKind === "citation-finding" ? "citation" : "finding";
-      return `run:${runState.generation}:${kind}:${finding.id}`;
-    })
-    .find((key): key is string => key != null);
+  const firstUnresolvedFinding = findingEntries.find(
+    ({ context, finding }) =>
+      findingStatus(context.findingStatuses, finding.id) === "unresolved",
+  );
+  const firstUnresolvedFindingKey =
+    firstUnresolvedFinding == null
+      ? undefined
+      : findingArtifactKey(
+          firstUnresolvedFinding.context,
+          firstUnresolvedFinding.finding,
+        );
 
   useEffect(() => {
     const generation = pendingStartedRunScroll.current;
@@ -6538,7 +6752,7 @@ export function AiReviewerPanelView({
   }, [activeDiscussionId, workspace.runs]);
 
   useEffect(() => {
-    if (!unresolvedFindingJumpPending || activeDiscussionId != null) {
+    if (!unresolvedFindingJumpPending) {
       return;
     }
     const target = firstUnresolvedFindingRef.current;
@@ -6554,9 +6768,12 @@ export function AiReviewerPanelView({
   ]);
 
   const jumpToFirstUnresolvedFinding = () => {
-    // A discussion replaces the list in the single scroller, so return to the
-    // list before the effect moves focus to the first item needing attention.
-    setActiveDiscussionId(null);
+    const discussionId = firstUnresolvedFinding?.context.discussionId ?? null;
+    if (discussionId == null) {
+      setActiveDiscussionId(null);
+    } else {
+      activateDiscussion(discussionId);
+    }
     setUnresolvedFindingJumpPending(true);
   };
 
