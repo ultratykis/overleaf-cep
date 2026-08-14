@@ -186,6 +186,8 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
           toolCallCounts: {},
           reportFindingRejections: { count: 0, byCode: {} },
           pendingValidatedArtifactCount: 0,
+          contentCharsRead: 0,
+          readToolCalls: 0,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );
@@ -198,7 +200,7 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     }
   });
 
-  it("emits a structured subject from the same review run", async function () {
+  it("rejects a subject without an answer as an empty result", async function () {
     const subjectStep = streamResult([
       {
         type: "tool-call",
@@ -213,34 +215,104 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     const info = vi.spyOn(logger, "info").mockImplementation(() => {});
 
     try {
-      const events = await collect(gateway.stream(request()));
-
-      expect(events.map((event) => event.type)).toEqual([
-        "started",
-        "subject",
-        "completed",
-      ]);
-      expect(events[1]).toMatchObject({
-        subject: "Claim support in chapter 3",
-        sequence: 1,
+      expect(
+        await captureError(collect(gateway.stream(request()))),
+      ).toMatchObject({
+        code: "AI_REVIEW_EMPTY_RESULT",
+        category: "provider",
+        retryable: true,
+        message: "The model ended without answering.",
       });
       expect(consumed()).toBe(2);
-      expect(info).toHaveBeenCalledExactlyOnceWith(
-        {
-          requestId: "request-sdk-0001",
-          provider: "fixture-provider",
-          model: "fixture-model",
-          scopeKind: "project",
-          findingToolOffered: true,
-          toolCallCounts: { report_subject: 1 },
-          reportFindingRejections: { count: 0, byCode: {} },
-          pendingValidatedArtifactCount: 0,
-        },
-        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
-      );
+      expect(info).not.toHaveBeenCalled();
     } finally {
       info.mockRestore();
     }
+  });
+
+  it("completes when a finding is reported without streamed text", async function () {
+    const { model } = strictStreamModel([
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId: "report-finding-without-text",
+          toolName: "report_finding",
+          input: JSON.stringify(structuredOutput().findings[0]),
+        },
+        finish("tool-calls"),
+      ]),
+      closingStep(),
+    ]);
+
+    const events = await collect(
+      createGateway(model, { validateEvidence: vi.fn() }).stream(request()),
+    );
+
+    expect(events.map((event) => event.type)).toEqual([
+      "started",
+      "finding",
+      "completed",
+    ]);
+  });
+
+  it("rejects a run that reads nothing and produces nothing", async function () {
+    const { model } = strictStreamModel([closingStep()]);
+
+    expect(
+      await captureError(collect(createGateway(model).stream(request()))),
+    ).toMatchObject({
+      code: "AI_REVIEW_NO_CONTENT_READ",
+      category: "configuration",
+      retryable: false,
+      message:
+        "The model never read any manuscript text. Choose a connection with a larger context or narrow the review scope.",
+    });
+  });
+
+  it("treats whitespace-only streamed text as empty", async function () {
+    const { model } = strictStreamModel([
+      streamResult([
+        { type: "text-start", id: "whitespace-only" },
+        { type: "text-delta", id: "whitespace-only", delta: " \n\t" },
+        { type: "text-end", id: "whitespace-only" },
+        finish("stop"),
+      ]),
+    ]);
+
+    expect(
+      await captureError(collect(createGateway(model).stream(request()))),
+    ).toMatchObject({ code: "AI_REVIEW_NO_CONTENT_READ" });
+  });
+
+  it("diagnoses an empty result after the model exhausts the read allowance", async function () {
+    const readCalls = Array.from({ length: 7 }, (_, index) => ({
+      type: "tool-call",
+      toolCallId: `read-project-${index}`,
+      toolName: "read_project_file",
+      input: JSON.stringify({ path: "main.tex" }),
+    }));
+    const { model } = strictStreamModel([
+      streamResult([...readCalls, finish("tool-calls")]),
+      closingStep(),
+    ]);
+    const readProjectFile = vi.fn(async () => ({
+      path: "main.tex",
+      text: "Manuscript text.",
+    }));
+
+    const error = await captureError(
+      collect(createGateway(model, { readProjectFile }).stream(request())),
+    );
+
+    expect(error).toMatchObject({
+      code: "AI_REVIEW_EMPTY_RESULT",
+      category: "provider",
+      retryable: true,
+    });
+    expect(error.message).toContain(
+      "The model spent its allowance re-reading the project.",
+    );
+    expect(readProjectFile).toHaveBeenCalledTimes(3);
   });
 
   it("keeps findings when an extra subject is rejected", async function () {
@@ -621,13 +693,27 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
           type: "tool-call",
           toolCallId: "read-valid-0001",
           toolName: "read_project_file",
-          input: JSON.stringify({ path: "main.tex", range: { from: 0, to: 4 } }),
+          input: JSON.stringify({
+            path: "main.tex",
+            range: { from: 0, to: 4 },
+          }),
         },
         finish("tool-calls"),
       ]),
-      closingStep(),
+      streamResult([
+        { type: "text-start", id: "text-after-valid-read" },
+        {
+          type: "text-delta",
+          id: "text-after-valid-read",
+          delta: "Review complete.",
+        },
+        { type: "text-end", id: "text-after-valid-read" },
+        finish("stop"),
+      ]),
     ]);
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     try {
       const events = await collect(createGateway(model).stream(request()));
 

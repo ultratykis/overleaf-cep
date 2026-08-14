@@ -365,9 +365,21 @@ describe("AI reviewer: project comments", function () {
                     toolName: "read_project_comments",
                     input: JSON.stringify({}),
                   },
-                  { ...finish(), finishReason: { unified: "tool-calls", raw: "tool-calls" } },
+                  {
+                    ...finish(),
+                    finishReason: { unified: "tool-calls", raw: "tool-calls" },
+                  },
                 ]
-              : [finish()];
+              : [
+                  { type: "text-start", id: "comments-answer" },
+                  {
+                    type: "text-delta",
+                    id: "comments-answer",
+                    delta: "Comments reviewed.",
+                  },
+                  { type: "text-end", id: "comments-answer" },
+                  finish(),
+                ];
           return {
             stream: simulateReadableStream({
               chunks,
@@ -385,7 +397,14 @@ describe("AI reviewer: project comments", function () {
           modelId: "comments-model",
           contextLength: 8_192,
           readProjectFile: vi.fn(),
-          readProjectComments: vi.fn(async () => ({ threads: [] })),
+          readProjectComments: vi.fn(async () => ({
+            threads: [
+              {
+                quotedText: "Quoted",
+                messages: [{ content: "Message" }],
+              },
+            ],
+          })),
           now: () => "2026-08-14T00:00:00.000Z",
           createId: () => "event-comments-0001",
         }).stream(projectRequest),
@@ -396,6 +415,8 @@ describe("AI reviewer: project comments", function () {
           toolCallCounts: expect.objectContaining({
             read_project_comments: 1,
           }),
+          contentCharsRead: 13,
+          readToolCalls: 1,
         }),
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );

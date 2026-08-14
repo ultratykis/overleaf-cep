@@ -130,6 +130,20 @@ const PUBLIC_MODEL_CONTEXT_TOO_SMALL_ERROR = Object.freeze({
   retryable: false,
 });
 
+const PUBLIC_REVIEW_NO_CONTENT_READ_ERROR = Object.freeze({
+  code: "AI_REVIEW_NO_CONTENT_READ",
+  category: "configuration",
+  message: "The model did not read any manuscript text.",
+  retryable: false,
+});
+
+const PUBLIC_REVIEW_EMPTY_RESULT_ERROR = Object.freeze({
+  code: "AI_REVIEW_EMPTY_RESULT",
+  category: "provider",
+  message: "The model ended without answering.",
+  retryable: true,
+});
+
 const PUBLIC_MODEL_CONTEXT_UNKNOWN_ERROR = Object.freeze({
   code: "AI_MODEL_CONTEXT_UNKNOWN",
   category: "configuration",
@@ -458,6 +472,12 @@ function classifyError(error, { disconnectSignal, timeoutSignal }) {
               contextLengthSource: error.contextLengthSource,
             }),
       };
+    }
+    if (error.code === PUBLIC_REVIEW_NO_CONTENT_READ_ERROR.code) {
+      return { ...PUBLIC_REVIEW_NO_CONTENT_READ_ERROR };
+    }
+    if (error.code === PUBLIC_REVIEW_EMPTY_RESULT_ERROR.code) {
+      return { ...PUBLIC_REVIEW_EMPTY_RESULT_ERROR };
     }
     if (error.code === PUBLIC_MODEL_CONTEXT_UNKNOWN_ERROR.code) {
       return { ...PUBLIC_MODEL_CONTEXT_UNKNOWN_ERROR };

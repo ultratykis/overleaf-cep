@@ -1018,6 +1018,8 @@ describe("AI reviewer: one agent path for review and conversation", function () 
             byCode: { AI_EVIDENCE_EXCERPT_NOT_FOUND: 1 },
           },
           pendingValidatedArtifactCount: 0,
+          contentCharsRead: firstSentence.length,
+          readToolCalls: 1,
         }),
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );

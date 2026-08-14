@@ -96,10 +96,16 @@ const connectionNotFoundFailureGuidance =
   "The selected connection could not be found. Choose a model again, then retry the review.";
 const modelNotSelectedFailureGuidance =
   "Choose a model before starting the review.";
+const noContentReadFailureGuidance =
+  "The model did not read any manuscript text. Narrow the review scope or choose a connection with a larger context.";
+const emptyResultFailureGuidance =
+  "The model ended without answering. Try again or choose a different model.";
 const codeFailureGuidance: Partial<Record<string, string>> = {
   AI_PROVIDER_CONNECTION_NOT_FOUND: connectionNotFoundFailureGuidance,
   AI_PROVIDER_MODEL_NOT_SELECTED: modelNotSelectedFailureGuidance,
   AI_PROJECT_CONTENT_NOT_AVAILABLE: projectContentFailureGuidance,
+  AI_REVIEW_NO_CONTENT_READ: noContentReadFailureGuidance,
+  AI_REVIEW_EMPTY_RESULT: emptyResultFailureGuidance,
   AI_STREAM_NETWORK_ERROR: streamFailureGuidance,
   AI_HTTP_ERROR: streamFailureGuidance,
   AI_STREAM_BODY_MISSING: streamFailureGuidance,
@@ -145,6 +151,11 @@ const emittedFailureGuidanceCases = [
     retryable: false,
   },
   {
+    code: "AI_REVIEW_NO_CONTENT_READ",
+    category: "configuration",
+    retryable: false,
+  },
+  {
     code: "AI_PROVIDER_NETWORK_ERROR",
     category: "network",
     retryable: true,
@@ -154,6 +165,7 @@ const emittedFailureGuidanceCases = [
   { code: "AI_STREAM_BODY_MISSING", category: "network", retryable: true },
   { code: "AI_STREAM_INCOMPLETE", category: "network", retryable: true },
   { code: "AI_PROVIDER_ERROR", category: "provider", retryable: true },
+  { code: "AI_REVIEW_EMPTY_RESULT", category: "provider", retryable: true },
   {
     code: "AI_PROVIDER_RATE_LIMITED",
     category: "rate-limit",
@@ -1053,9 +1065,7 @@ describe("AI reviewer: panel layout", function () {
     // The run reaches its terminal state asynchronously, so wait for the
     // status rather than sampling it while the capture is still in flight.
     expect(await within(run).findByText("Error")).to.exist;
-    expect(
-      within(run).getByText(modelContextUnknownGuidance),
-    ).to.exist;
+    expect(within(run).getByText(modelContextUnknownGuidance)).to.exist;
   });
 
   it("renders a provider error delivered after the started event", async function () {

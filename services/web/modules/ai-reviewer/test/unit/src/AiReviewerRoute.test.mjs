@@ -905,6 +905,17 @@ describe("AI reviewer: module shell authenticated route", function () {
       },
     },
     {
+      label: "review read no content",
+      category: "configuration",
+      internalCode: "AI_REVIEW_NO_CONTENT_READ",
+      publicError: {
+        code: "AI_REVIEW_NO_CONTENT_READ",
+        category: "configuration",
+        message: "The model did not read any manuscript text.",
+        retryable: false,
+      },
+    },
+    {
       label: "network failure",
       category: "network",
       internalCode: "AI_PROVIDER_NETWORK_FAILED",
@@ -925,6 +936,17 @@ describe("AI reviewer: module shell authenticated route", function () {
         category: "provider",
         message:
           "The AI provider could not complete the request. Try again; if it keeps failing, switch models or check the AI Reviewer settings.",
+        retryable: true,
+      },
+    },
+    {
+      label: "empty review result",
+      category: "provider",
+      internalCode: "AI_REVIEW_EMPTY_RESULT",
+      publicError: {
+        code: "AI_REVIEW_EMPTY_RESULT",
+        category: "provider",
+        message: "The model ended without answering.",
         retryable: true,
       },
     },

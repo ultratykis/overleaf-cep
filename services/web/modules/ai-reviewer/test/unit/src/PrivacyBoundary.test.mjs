@@ -81,6 +81,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
           [rejectionSentinel, 3],
         ]),
         pendingValidatedArtifactCount: 2,
+        contentCharsRead: 1_234,
+        readToolCalls: 3,
         manuscript: manuscriptSentinel,
       });
 
@@ -100,6 +102,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
             byCode: { AI_EVIDENCE_EXCERPT_NOT_FOUND: 2, unknown: 3 },
           },
           pendingValidatedArtifactCount: 2,
+          contentCharsRead: 1_234,
+          readToolCalls: 3,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );
@@ -126,6 +130,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
         ]),
         reportFindingRejectionCounts: new Map(),
         pendingValidatedArtifactCount: 0,
+        contentCharsRead: 0,
+        readToolCalls: 0,
       });
 
       expect(info).toHaveBeenCalledExactlyOnceWith(
@@ -138,6 +144,8 @@ describe("AI reviewer: module shell privacy boundary", function () {
           toolCallCounts: { report_finding: 1, unknown: 2 },
           reportFindingRejections: { count: 0, byCode: {} },
           pendingValidatedArtifactCount: 0,
+          contentCharsRead: 0,
+          readToolCalls: 0,
         },
         AI_REVIEWER_COMPLETION_LOG_MESSAGE,
       );

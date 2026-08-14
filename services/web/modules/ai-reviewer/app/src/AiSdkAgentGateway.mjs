@@ -2915,9 +2915,12 @@ export class AiSdkAgentGateway {
     };
     let sequence = 0;
     let readToolCallCount = 0;
+    let readToolCalls = 0;
+    let contentCharsRead = 0;
     let zoteroSearchCallCount = 0;
     let reportedArtifactCount = 0;
     let reportedSubjectCount = 0;
+    let hasAssistantText = false;
     /** @type {Map<string, string>} */
     const observedToolCalls = new Map();
     // Reporting stays bound to the requested passage below, while reading uses
@@ -3358,6 +3361,15 @@ export class AiSdkAgentGateway {
                 const value = consumeModelInput(
                   await this.readProjectFile(parsed, { request, signal }),
                 );
+                readToolCalls += 1;
+                if (
+                  value != null &&
+                  typeof value === "object" &&
+                  !Array.isArray(value) &&
+                  typeof value.text === "string"
+                ) {
+                  contentCharsRead += value.text.length;
+                }
                 if (
                   value != null &&
                   typeof value === "object" &&
@@ -3448,6 +3460,7 @@ export class AiSdkAgentGateway {
                     },
                   );
                 }
+                readToolCalls += 1;
                 return value;
               } catch (error) {
                 if (error instanceof AgentGatewayError) {
@@ -3501,9 +3514,41 @@ export class AiSdkAgentGateway {
                 }
                 const parsed =
                   ReadProjectCommentsArgumentsSchema.parse(toolInput);
-                return consumeModelInput(
+                const value = consumeModelInput(
                   await readProjectComments(parsed, { request, signal }),
                 );
+                readToolCalls += 1;
+                if (
+                  value != null &&
+                  typeof value === "object" &&
+                  !Array.isArray(value) &&
+                  Array.isArray(value.threads)
+                ) {
+                  for (const thread of value.threads) {
+                    if (
+                      thread != null &&
+                      typeof thread === "object" &&
+                      !Array.isArray(thread)
+                    ) {
+                      if (typeof thread.quotedText === "string") {
+                        contentCharsRead += thread.quotedText.length;
+                      }
+                      if (Array.isArray(thread.messages)) {
+                        for (const message of thread.messages) {
+                          if (
+                            message != null &&
+                            typeof message === "object" &&
+                            !Array.isArray(message) &&
+                            typeof message.content === "string"
+                          ) {
+                            contentCharsRead += message.content.length;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                return value;
               } catch (error) {
                 if (error instanceof AgentGatewayError) {
                   const localError = localGatewayError(error);
@@ -3809,6 +3854,7 @@ export class AiSdkAgentGateway {
           continue;
         }
         if (part.type === "text-delta") {
+          hasAssistantText ||= part.text.trim().length > 0;
           if (part.text.length > 0) {
             yield parseEvent({
               type: "text.delta",
@@ -3950,6 +3996,32 @@ export class AiSdkAgentGateway {
           },
         );
       }
+      if (
+        !selectionTransform &&
+        !hasAssistantText &&
+        reportedArtifactCount === 0
+      ) {
+        if (contentCharsRead === 0 && reportedSubjectCount === 0) {
+          throw gatewayError(
+            "The model never read any manuscript text. Choose a connection with a larger context or narrow the review scope.",
+            {
+              code: "AI_REVIEW_NO_CONTENT_READ",
+              category: "configuration",
+              retryable: false,
+            },
+          );
+        }
+        throw gatewayError(
+          readToolCallCount > readToolCallLimit
+            ? "The model ended without answering. The model spent its allowance re-reading the project."
+            : "The model ended without answering.",
+          {
+            code: "AI_REVIEW_EMPTY_RESULT",
+            category: "provider",
+            retryable: true,
+          },
+        );
+      }
 
       const usage = await result.usage;
       throwIfSdkSignalAborted(signal);
@@ -3995,6 +4067,8 @@ export class AiSdkAgentGateway {
         toolCallCounts,
         reportFindingRejectionCounts,
         pendingValidatedArtifactCount: reportedArtifacts.size,
+        contentCharsRead,
+        readToolCalls,
       });
       yield completedEvent;
     } catch (error) {

@@ -96,6 +96,8 @@ function safeReportFindingRejections(rejectionCounts) {
  *   toolCallCounts: ReadonlyMap<string, number>,
  *   reportFindingRejectionCounts: ReadonlyMap<string, number>,
  *   pendingValidatedArtifactCount: number,
+ *   contentCharsRead: number,
+ *   readToolCalls: number,
  * }} record
  */
 export function recordAiReviewerCompletion(record) {
@@ -111,6 +113,15 @@ export function recordAiReviewerCompletion(record) {
         record.reportFindingRejectionCounts,
       ),
       pendingValidatedArtifactCount: record.pendingValidatedArtifactCount,
+      contentCharsRead:
+        Number.isSafeInteger(record.contentCharsRead) &&
+        record.contentCharsRead >= 0
+          ? record.contentCharsRead
+          : 0,
+      readToolCalls:
+        Number.isSafeInteger(record.readToolCalls) && record.readToolCalls >= 0
+          ? record.readToolCalls
+          : 0,
     },
     AI_REVIEWER_COMPLETION_LOG_MESSAGE,
   );

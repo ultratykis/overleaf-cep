@@ -719,6 +719,8 @@ function agentErrorGuidance(
           });
     case "configuration:AI_MODEL_CONTEXT_UNKNOWN":
       return t("ai_reviewer_error_guidance_model_context_unknown");
+    case "configuration:AI_REVIEW_NO_CONTENT_READ":
+      return t("ai_reviewer_error_guidance_no_content_read");
     // Waiting fixes a busy model but never fixes a withdrawn one, so the two
     // are told apart by the action they call for rather than by their text.
     case "rate-limit:AI_PROVIDER_MODEL_BUSY":
@@ -732,6 +734,8 @@ function agentErrorGuidance(
       return t("ai_reviewer_error_guidance_stream");
     case "provider:AI_PROVIDER_ERROR":
       return t("ai_reviewer_error_guidance_provider");
+    case "provider:AI_REVIEW_EMPTY_RESULT":
+      return t("ai_reviewer_error_guidance_empty_result");
     case "rate-limit:AI_PROVIDER_RATE_LIMITED":
       return t("ai_reviewer_error_guidance_rate_limit");
     case "rate-limit:AI_REVIEWER_CONCURRENCY_LIMITED":

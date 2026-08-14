@@ -59,6 +59,15 @@ function finish(reason = "stop") {
   };
 }
 
+function answer(text = "Figure reviewed.") {
+  return streamResult([
+    { type: "text-start", id: "figure-answer" },
+    { type: "text-delta", id: "figure-answer", delta: text },
+    { type: "text-end", id: "figure-answer" },
+    finish(),
+  ]);
+}
+
 function modelFor(results) {
   let index = 0;
   return new MockLanguageModelV3({
@@ -143,8 +152,8 @@ describe("AI reviewer: on-demand project figures", function () {
   });
 
   it("declares the tool only when image support and a reader are active", async function () {
-    const enabledModel = modelFor([streamResult([finish()])]);
-    const disabledModel = modelFor([streamResult([finish()])]);
+    const enabledModel = modelFor([answer()]);
+    const disabledModel = modelFor([answer()]);
 
     await collect(
       gateway(enabledModel, {
@@ -183,7 +192,7 @@ describe("AI reviewer: on-demand project figures", function () {
         },
         finish("tool-calls"),
       ]),
-      streamResult([finish()]),
+      answer(),
     ]);
     const readProjectFigure = vi.fn(async () => figure);
 
@@ -194,7 +203,11 @@ describe("AI reviewer: on-demand project figures", function () {
       }).stream(request),
     );
 
-    expect(events.map(({ type }) => type)).toEqual(["started", "completed"]);
+    expect(events.map(({ type }) => type)).toEqual([
+      "started",
+      "text.delta",
+      "completed",
+    ]);
     expect(readProjectFigure).toHaveBeenCalledExactlyOnceWith(
       { path: figure.path },
       { request, signal: undefined },
@@ -252,7 +265,7 @@ describe("AI reviewer: on-demand project figures", function () {
           },
           finish("tool-calls"),
         ]),
-        streamResult([finish()]),
+        answer(),
       ]);
 
       await collect(
@@ -339,7 +352,7 @@ describe("AI reviewer: on-demand project figures", function () {
         },
         finish("tool-calls"),
       ]),
-      streamResult([finish()]),
+      answer(),
     ]);
     const readProjectFigure = vi.fn(async ({ path }) =>
       path === figure.path ? figure : secondFigure,
@@ -518,7 +531,7 @@ describe("AI reviewer: on-demand project figures", function () {
         },
         finish("tool-calls"),
       ]),
-      streamResult([finish()]),
+      answer(),
     ]);
     const readProjectFigure = vi.fn(async () => {
       throw new AgentGatewayError("Figure is too large.", {
@@ -535,7 +548,11 @@ describe("AI reviewer: on-demand project figures", function () {
           readProjectFigure,
         }).stream(request),
       ),
-    ).toMatchObject([{ type: "started" }, { type: "completed" }]);
+    ).toMatchObject([
+      { type: "started" },
+      { type: "text.delta" },
+      { type: "completed" },
+    ]);
     expect(JSON.stringify(model.doStreamCalls[1].prompt)).toContain(
       "Figure is too large.",
     );
