@@ -11,8 +11,11 @@ export type InlineCompletionAvailability = {
 
 export type InlineCompletionState = InlineCompletionAvailability & {
   enabled: boolean;
+  pausedUntil: number | null;
 };
 
+let enabled = false;
+let pausedUntil: number | null = null;
 let availability: InlineCompletionAvailability = {
   hasLocalConnection: false,
   selectedConnectionClassification: null,
@@ -33,19 +36,26 @@ export function inlineCompletionGate({
   return selectedConnectionClassification === "local" ? "active" : "remote";
 }
 
-export function isInlineCompletionEnabled() {
+export function adoptLegacyInlineCompletionEnabled(
+  persisted: boolean | undefined,
+): boolean | undefined {
   try {
-    return (
+    const adopted =
+      persisted === undefined &&
       globalThis.localStorage?.getItem(INLINE_COMPLETION_STORAGE_KEY) === "true"
-    );
+        ? true
+        : persisted;
+    globalThis.localStorage?.removeItem(INLINE_COMPLETION_STORAGE_KEY);
+    return adopted;
   } catch {
-    return false;
+    return persisted;
   }
 }
 
 export function getInlineCompletionState(): InlineCompletionState {
   return {
-    enabled: isInlineCompletionEnabled(),
+    enabled,
+    pausedUntil,
     ...availability,
   };
 }
@@ -56,16 +66,15 @@ function dispatchStateChange() {
   }
 }
 
-export function setInlineCompletionEnabled(enabled: boolean) {
-  try {
-    // ponytail: local-only preference for now; move to server-side persistence when settings sync is needed.
-    globalThis.localStorage?.setItem(
-      INLINE_COMPLETION_STORAGE_KEY,
-      String(enabled),
-    );
-  } catch {
-    // An unavailable storage backend leaves the safe default off.
-  }
+export function setInlineCompletionEnabled(nextEnabled: boolean) {
+  // The panel owns persistence; this shared state only connects it to the
+  // editor extension in the current page.
+  enabled = nextEnabled;
+  dispatchStateChange();
+}
+
+export function publishInlineCompletionPause(nextPausedUntil: number | null) {
+  pausedUntil = nextPausedUntil;
   dispatchStateChange();
 }
 

@@ -13,6 +13,7 @@ import getMeta from "@/utils/meta";
 import {
   getInlineCompletionState,
   inlineCompletionGate,
+  publishInlineCompletionPause,
   subscribeToInlineCompletionState,
 } from "../services/inline-completion-state";
 
@@ -181,6 +182,7 @@ async function requestCompletion(
 
 class InlineCompletionPlugin {
   private debounceTimer: number | null = null;
+  private pauseTimer: number | null = null;
   private requestController: AbortController | null = null;
   private requestSequence = 0;
   private consecutiveFailures = 0;
@@ -232,6 +234,8 @@ class InlineCompletionPlugin {
       this.compositionStart,
     );
     this.view.dom.removeEventListener("compositionend", this.compositionEnd);
+    if (this.pauseTimer != null) window.clearTimeout(this.pauseTimer);
+    if (this.pausedUntil > 0) publishInlineCompletionPause(null);
     this.cancel();
   }
 
@@ -304,9 +308,15 @@ class InlineCompletionPlugin {
     if (result.status === "failure") {
       this.consecutiveFailures += 1;
       if (this.consecutiveFailures >= FAILURE_LIMIT) {
-        // ponytail: in-memory damping, no UI surfacing yet
         this.pausedUntil = Date.now() + FAILURE_PAUSE_MS;
         this.consecutiveFailures = 0;
+        publishInlineCompletionPause(this.pausedUntil);
+        if (this.pauseTimer != null) window.clearTimeout(this.pauseTimer);
+        this.pauseTimer = window.setTimeout(() => {
+          this.pauseTimer = null;
+          this.pausedUntil = 0;
+          publishInlineCompletionPause(null);
+        }, FAILURE_PAUSE_MS);
       }
       return;
     }

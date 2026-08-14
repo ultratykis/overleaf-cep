@@ -465,6 +465,30 @@ describe("AI reviewer: runtime contracts", function () {
     expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
   });
 
+  it("keeps pre-completion workspaces byte-identical without defaults", function () {
+    const stored = { runs: [], discussions: [] };
+
+    const parsed = AiReviewerWorkspaceSchema.parse(stored);
+
+    expect(JSON.stringify(parsed)).toBe(JSON.stringify(stored));
+    expect(parsed).not.toHaveProperty("inlineCompletionEnabled");
+    expect(parsed).not.toHaveProperty("completionModel");
+  });
+
+  it("accepts optional persisted inline-completion settings", function () {
+    const stored = {
+      runs: [],
+      discussions: [],
+      inlineCompletionEnabled: false,
+      completionModel: {
+        connectionId: "connection-completion-0001",
+        model: "completion-model-v1",
+      },
+    };
+
+    expect(AiReviewerWorkspaceSchema.parse(stored)).toEqual(stored);
+  });
+
   it("accepts posted ordinary findings and suggestions in a workspace", function () {
     const stored = workspace();
     stored.runs[0].findings[0].status = "posted";

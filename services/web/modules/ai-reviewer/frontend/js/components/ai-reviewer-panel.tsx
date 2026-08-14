@@ -147,9 +147,12 @@ import {
   type AiProviderModelFailure,
 } from "../services/ai-provider-configuration";
 import {
-  isInlineCompletionEnabled,
+  adoptLegacyInlineCompletionEnabled,
+  getInlineCompletionState,
+  inlineCompletionGate,
   publishInlineCompletionAvailability,
   setInlineCompletionEnabled,
+  subscribeToInlineCompletionState,
 } from "../services/inline-completion-state";
 import { AiReviewerModeInstructionsModal } from "./ai-reviewer-mode-instructions-modal";
 import { AiReviewerTooltipIconButton } from "./ai-reviewer-tooltip-icon-button";
@@ -1276,6 +1279,8 @@ function persistedWorkspaceFromState(
   workspace: { runs: SelectionWorkspaceState[] },
   discussions: Discussion[],
   selectedModel: WorkspaceModelSelection | null,
+  inlineCompletionEnabled: boolean | undefined,
+  completionModel: WorkspaceModelSelection | null,
 ): AiReviewerWorkspace | null {
   if (discussions.some((discussion) => discussion.status === "streaming")) {
     return null;
@@ -1289,6 +1294,10 @@ function persistedWorkspaceFromState(
     // Omitting rather than nulling an absent choice keeps a workspace written
     // before this field existed byte-identical through a load and a save.
     ...(selectedModel == null ? {} : { selectedModel }),
+    ...(inlineCompletionEnabled === undefined
+      ? {}
+      : { inlineCompletionEnabled }),
+    ...(completionModel == null ? {} : { completionModel }),
   };
 }
 
@@ -1677,6 +1686,8 @@ export function AiReviewerPanelView({
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const selectedModelRef = useRef<WorkspaceModelSelection | null>(null);
+  const completionModelRef = useRef<WorkspaceModelSelection | null>(null);
+  const inlineCompletionEnabledRef = useRef<boolean | undefined>(undefined);
   const [connections, setConnections] = useState<AiProviderConnection[]>([]);
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   const [providerCatalogRequest, setProviderCatalogRequest] = useState({
@@ -1701,6 +1712,7 @@ export function AiReviewerPanelView({
   >(null);
   const [models, setModels] = useState<AiProviderModel[]>([]);
   const [modelQuery, setModelQuery] = useState("");
+  const [completionModelQuery, setCompletionModelQuery] = useState("");
   const [narrowPanel, setNarrowPanel] = useState(false);
   const handlePanelResize = useCallback((element: Element) => {
     setNarrowPanel(
@@ -1725,9 +1737,13 @@ export function AiReviewerPanelView({
   const modelCatalogProjectId = useRef<string | null>(null);
   const [selectedModel, setSelectedModel] =
     useState<WorkspaceModelSelection | null>(null);
-  const [inlineCompletionEnabled, setInlineCompletionEnabledState] = useState(
-    isInlineCompletionEnabled,
-  );
+  const [completionModel, setCompletionModel] =
+    useState<WorkspaceModelSelection | null>(null);
+  const [inlineCompletionEnabled, setInlineCompletionEnabledState] = useState<
+    boolean | undefined
+  >(undefined);
+  const [inlineCompletionPausedUntil, setInlineCompletionPausedUntil] =
+    useState<number | null>(() => getInlineCompletionState().pausedUntil);
   const connectedModels = useMemo(() => {
     if (!connectionsLoaded) return models;
     const connectionIds = new Set(
@@ -1743,6 +1759,15 @@ export function AiReviewerPanelView({
     [connections, connectionsLoaded, selectedModel],
   );
   selectedModelRef.current = resolvedSelectedModel;
+  const resolvedCompletionModel = useMemo(
+    () =>
+      connectionsLoaded
+        ? resolveWorkspaceModelSelection(completionModel, connections)
+        : completionModel,
+    [completionModel, connections, connectionsLoaded],
+  );
+  completionModelRef.current = resolvedCompletionModel;
+  inlineCompletionEnabledRef.current = inlineCompletionEnabled;
   const refreshProviderCatalog = useCallback(() => {
     setProviderCatalogRequest((request) => ({
       revision: request.revision + 1,
@@ -1952,6 +1977,16 @@ export function AiReviewerPanelView({
   }, [connectionsLoaded, resolvedSelectedModel, selectedModel]);
 
   useEffect(() => {
+    if (
+      connectionsLoaded &&
+      completionModel != null &&
+      resolvedCompletionModel == null
+    ) {
+      setCompletionModel(null);
+    }
+  }, [completionModel, connectionsLoaded, resolvedCompletionModel]);
+
+  useEffect(() => {
     modeInstructionGeneration.current += 1;
     const generation = modeInstructionGeneration.current;
     activeModeInstructionOperation.current?.abort(
@@ -2027,24 +2062,48 @@ export function AiReviewerPanelView({
       ) ?? null,
     [connectedModels, resolvedSelectedModel],
   );
+  const completionRunModel = useMemo(
+    () =>
+      connectedModels.find(
+        (model) =>
+          resolvedCompletionModel != null &&
+          model.connectionId === resolvedCompletionModel.connectionId &&
+          model.id === resolvedCompletionModel.model,
+      ) ?? null,
+    [connectedModels, resolvedCompletionModel],
+  );
+  const effectiveCompletionModel =
+    resolvedCompletionModel ?? resolvedSelectedModel;
   const hasLocalConnection = connections.some(
     (connection) => connection.classification === "local",
   );
   const noLocalConnection =
     connectionsLoaded && !connectionCatalogError && !hasLocalConnection;
-  const selectedConnection = connections.find(
-    (connection) => connection.id === resolvedSelectedModel?.connectionId,
+  const completionConnection = connections.find(
+    (connection) => connection.id === effectiveCompletionModel?.connectionId,
   );
 
   useEffect(() => {
     publishInlineCompletionAvailability({
       hasLocalConnection,
       selectedConnectionClassification:
-        selectedConnection?.classification ?? null,
-      selectedConnectionId: resolvedSelectedModel?.connectionId ?? null,
-      selectedModel: resolvedSelectedModel?.model ?? null,
+        completionConnection?.classification ?? null,
+      selectedConnectionId: effectiveCompletionModel?.connectionId ?? null,
+      selectedModel: effectiveCompletionModel?.model ?? null,
     });
-  }, [hasLocalConnection, resolvedSelectedModel, selectedConnection]);
+  }, [completionConnection, effectiveCompletionModel, hasLocalConnection]);
+
+  useEffect(() => {
+    setInlineCompletionEnabled(inlineCompletionEnabled ?? false);
+  }, [inlineCompletionEnabled]);
+
+  useEffect(
+    () =>
+      subscribeToInlineCompletionState(() => {
+        setInlineCompletionPausedUntil(getInlineCompletionState().pausedUntil);
+      }),
+    [],
+  );
   const duplicateModelNames = useMemo(() => {
     const counts = new Map<string, number>();
     for (const model of connectedModels) {
@@ -2066,6 +2125,15 @@ export function AiReviewerPanelView({
       ),
     );
   }, [connectedModels, modelQuery]);
+  const filteredCompletionModels = useMemo(() => {
+    const query = completionModelQuery.trim().toLocaleLowerCase();
+    if (query === "") return connectedModels;
+    return connectedModels.filter((model) =>
+      [model.displayName, model.id, model.connectionLabel].some((value) =>
+        value.toLocaleLowerCase().includes(query),
+      ),
+    );
+  }, [completionModelQuery, connectedModels]);
   const updateDiscussions = useCallback(
     (update: (current: Discussion[]) => Discussion[]) => {
       setDiscussions((current) => {
@@ -2152,6 +2220,8 @@ export function AiReviewerPanelView({
     setPersistenceMutationPending(false);
     setPersistenceSaveFailed(false);
     setPersistenceConflict(false);
+    setCompletionModel(null);
+    setInlineCompletionEnabledState(undefined);
 
     if (workspacePersistence == null) {
       setPersistenceReady(true);
@@ -2210,6 +2280,12 @@ export function AiReviewerPanelView({
             0,
           );
           setSelectedModel(storedWorkspace.selectedModel ?? null);
+          setCompletionModel(storedWorkspace.completionModel ?? null);
+          setInlineCompletionEnabledState(
+            adoptLegacyInlineCompletionEnabled(
+              storedWorkspace.inlineCompletionEnabled,
+            ),
+          );
           lastQueuedWorkspace.current = JSON.stringify(storedWorkspace);
           persistenceRevision.current = storedSnapshot.revision;
           persistenceSaveFailedRef.current = false;
@@ -2268,6 +2344,8 @@ export function AiReviewerPanelView({
       workspace,
       discussions,
       resolvedSelectedModel,
+      inlineCompletionEnabled,
+      resolvedCompletionModel,
     );
     if (storedWorkspace == null) {
       return;
@@ -2325,9 +2403,11 @@ export function AiReviewerPanelView({
   }, [
     discussions,
     enqueuePersistenceOperation,
+    inlineCompletionEnabled,
     persistenceMutationPending,
     persistenceReady,
     projectId,
+    resolvedCompletionModel,
     resolvedSelectedModel,
     t,
     workspace,
@@ -4509,6 +4589,8 @@ export function AiReviewerPanelView({
           workspaceRef.current,
           remainingDiscussions,
           selectedModelRef.current,
+          inlineCompletionEnabledRef.current,
+          completionModelRef.current,
         );
         const mergeResult =
           beforeDeletion == null || currentAfterDeletion == null
@@ -4548,6 +4630,8 @@ export function AiReviewerPanelView({
           workspaceRef.current,
           remainingDiscussions,
           selectedModelRef.current,
+          inlineCompletionEnabledRef.current,
+          completionModelRef.current,
         );
         const prunedWorkspace =
           storedWorkspace == null
@@ -4637,6 +4721,8 @@ export function AiReviewerPanelView({
         workspaceRef.current,
         discussionsRef.current,
         selectedModelRef.current,
+        inlineCompletionEnabledRef.current,
+        completionModelRef.current,
       );
       if (beforeDeletion == null) {
         return;
@@ -6309,6 +6395,20 @@ export function AiReviewerPanelView({
             t,
           ),
         });
+  const completionModelLabel =
+    resolvedCompletionModel == null
+      ? t("ai_reviewer_inline_completion_use_review_model")
+      : (completionRunModel?.displayName ?? resolvedCompletionModel.model);
+  const completionModelDescription = t(
+    "ai_reviewer_inline_completion_selected_model",
+    { model: completionModelLabel },
+  );
+  const completionGate = inlineCompletionGate({
+    enabled: inlineCompletionEnabled ?? false,
+    hasLocalConnection,
+    selectedConnectionClassification:
+      completionConnection?.classification ?? null,
+  });
   const selectedModeLabel = reviewModeLabel(selectedMode, t);
   const selectedModeDescription = t("ai_reviewer_selected_mode", {
     mode: selectedModeLabel,
@@ -6497,23 +6597,66 @@ export function AiReviewerPanelView({
             <div className="dropdown-item">
               <OLFormCheckbox
                 id="ai-reviewer-inline-completion"
-                checked={inlineCompletionEnabled}
+                checked={inlineCompletionEnabled ?? false}
                 disabled={noLocalConnection}
                 label={t("ai_reviewer_inline_completion")}
                 onChange={(event) => {
                   const enabled = event.currentTarget.checked;
                   setInlineCompletionEnabled(enabled);
-                  setInlineCompletionEnabledState(isInlineCompletionEnabled());
+                  setInlineCompletionEnabledState(enabled);
                 }}
               />
-              {noLocalConnection ? (
+              {connectedModels.length > 0 && (
+                <div>
+                  <div className="form-text">
+                    {t("ai_reviewer_inline_completion_model")}
+                  </div>
+                  <Dropdown align="start">
+                    <DropdownToggle
+                      bsPrefix="ai-reviewer-panel-model-chip"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={completionModelDescription}
+                    >
+                      {completionModelLabel}
+                    </DropdownToggle>
+                    <AiReviewerPortaledMenu className="ai-reviewer-panel-model-menu">
+                      <OLDropdownMenuItem
+                        as="button"
+                        active={resolvedCompletionModel == null}
+                        onClick={() => {
+                          setCompletionModel(null);
+                          setCompletionModelQuery("");
+                        }}
+                      >
+                        {t("ai_reviewer_inline_completion_use_review_model")}
+                      </OLDropdownMenuItem>
+                      <AiReviewerModelMenuContents
+                        duplicateModelNames={duplicateModelNames}
+                        filteredModels={filteredCompletionModels}
+                        modelQuery={completionModelQuery}
+                        runModel={completionRunModel}
+                        searchId="ai-reviewer-completion-model-search"
+                        setModelQuery={setCompletionModelQuery}
+                        setSelectedModel={setCompletionModel}
+                        t={t}
+                      />
+                    </AiReviewerPortaledMenu>
+                  </Dropdown>
+                </div>
+              )}
+              {completionGate === "no-local" ? (
                 <p className="form-text mb-0" role="status">
                   {t("ai_reviewer_inline_completion_requires_local")}
                 </p>
-              ) : inlineCompletionEnabled &&
-                selectedConnection?.classification === "remote" ? (
+              ) : completionGate === "remote" ? (
                 <p className="form-text mb-0" role="status">
                   {t("ai_reviewer_inline_completion_paused_remote")}
+                </p>
+              ) : completionGate === "active" &&
+                inlineCompletionPausedUntil != null ? (
+                <p className="form-text mb-0" role="status">
+                  {t("ai_reviewer_inline_completion_paused_failures")}
                 </p>
               ) : null}
             </div>

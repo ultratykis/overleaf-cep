@@ -371,10 +371,14 @@ describe("AI reviewer workspace persistence", function () {
     );
   });
 
-  it("keeps the selected model through every workspace rewrite", async function () {
+  it("keeps model and inline-completion settings through every workspace rewrite", async function () {
     const selectedModel = {
       connectionId: "connection-workspace-0001",
       model: "deterministic-v1",
+    };
+    const completionModel = {
+      connectionId: "connection-workspace-0002",
+      model: "completion-v1",
     };
     const discussion = openWorkspaceDiscussion({ createdOrder: 2 });
     const input = {
@@ -389,6 +393,8 @@ describe("AI reviewer workspace persistence", function () {
       ],
       discussions: [discussion],
       selectedModel,
+      inlineCompletionEnabled: true,
+      completionModel,
     };
     const { model, records } = inMemoryModel();
     const store = createAiReviewerWorkspaceStore({ model });
@@ -401,17 +407,30 @@ describe("AI reviewer workspace persistence", function () {
     // both rebuild the workspace, and the selection must survive both.
     expect(await store.load(userId, projectId)).toEqual({
       revision: 2,
-      workspace: { runs: [], discussions: [discussion], selectedModel },
+      workspace: {
+        runs: [],
+        discussions: [discussion],
+        selectedModel,
+        inlineCompletionEnabled: true,
+        completionModel,
+      },
     });
     expect(
       await store.deleteDiscussion(userId, projectId, discussion.id, 2),
     ).toEqual({
       revision: 3,
-      workspace: { ...emptyWorkspace(), selectedModel },
+      workspace: {
+        ...emptyWorkspace(),
+        selectedModel,
+        inlineCompletionEnabled: true,
+        completionModel,
+      },
     });
     expect(records.get(recordKey(userId, projectId)).workspace).toEqual({
       ...emptyWorkspace(),
       selectedModel,
+      inlineCompletionEnabled: true,
+      completionModel,
     });
   });
 
@@ -514,7 +533,7 @@ describe("AI reviewer workspace persistence", function () {
     expect(model.find).toHaveBeenCalledOnce();
   });
 
-  it("loads a workspace stored before the selected model existed", async function () {
+  it("loads a workspace stored before model and completion settings existed", async function () {
     const input = {
       runs: [],
       discussions: [openWorkspaceDiscussion()],
@@ -526,6 +545,8 @@ describe("AI reviewer workspace persistence", function () {
     const loaded = await store.load(userId, projectId);
 
     expect(loaded.workspace.selectedModel ?? null).toBeNull();
+    expect(loaded.workspace.inlineCompletionEnabled).toBeUndefined();
+    expect(loaded.workspace.completionModel).toBeUndefined();
     // A record without the field must survive untouched, so no migration is
     // needed for workspaces stored before the selection was added.
     expect(loaded.workspace).toEqual(input);

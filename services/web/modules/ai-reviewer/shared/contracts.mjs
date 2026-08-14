@@ -442,6 +442,12 @@ export const AiReviewerWorkspaceSchema = z
     // through a load and save, so no migration is needed; readers treat a
     // missing value the same as null.
     selectedModel: WorkspaceModelSelectionSchema.nullable().optional(),
+    // Older workspaces have no inline-completion preference or dedicated
+    // destination. Keep both absent instead of defaulting them so a load and
+    // save stays byte-identical without a migration; readers supply the
+    // disabled and review-model fallbacks.
+    inlineCompletionEnabled: z.boolean().optional(),
+    completionModel: WorkspaceModelSelectionSchema.nullable().optional(),
   })
   .strict()
   .superRefine((workspace, context) => {
