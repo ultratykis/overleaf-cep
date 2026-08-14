@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 
 // Installed in the web container for image rendering.
 // eslint-disable-next-line import/no-extraneous-dependencies
-import { createCanvas } from "@napi-rs/canvas";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { simulateReadableStream } from "ai";
 // eslint-disable-next-line import/no-unresolved
 import { MockLanguageModelV3 } from "ai/test";
@@ -109,6 +109,51 @@ async function captureError(work) {
     return error;
   }
   throw new Error("Expected the operation to reject.");
+}
+
+function solidPagePdf(colors) {
+  const pageObjectIds = colors.map((_, index) => 3 + index * 2);
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Count ${colors.length} /Kids [${pageObjectIds
+      .map((id) => `${id} 0 R`)
+      .join(" ")}] >>`,
+  ];
+  for (const [index, [red, green, blue]] of colors.entries()) {
+    const content = `${red} ${green} ${blue} rg 0 0 72 72 re f`;
+    const contentObjectId = 4 + index * 2;
+    objects.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << >> /Contents ${contentObjectId} 0 R >>`,
+      `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`,
+    );
+  }
+
+  let body = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(body));
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(body);
+  body += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  body += offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("");
+  body += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(body);
+}
+
+async function centerPixel(png) {
+  const image = await loadImage(png);
+  const canvas = createCanvas(1, 1);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0, 1, 1);
+  return {
+    width: image.width,
+    height: image.height,
+    rgba: Array.from(context.getImageData(0, 0, 1, 1).data),
+  };
 }
 
 describe("AI reviewer: on-demand project figures", function () {
@@ -496,24 +541,158 @@ describe("AI reviewer: on-demand project figures", function () {
     ).toMatchObject({ code: "AI_PROJECT_FIGURE_TOO_LARGE" });
   });
 
-  it("returns figures at the 5 MB limit byte-identically", async function () {
-    const input = Buffer.alloc(PROJECT_FIGURE_MAX_BYTES, 0x5a);
+  it.each([
+    ["figures/result.PNG", "image/png"],
+    ["figures/result.JpEg", "image/jpeg"],
+  ])(
+    "returns %s at the 5 MB limit byte-identically",
+    async function (path, mediaType) {
+      const input = Buffer.alloc(PROJECT_FIGURE_MAX_BYTES, 0x5a);
+      const reader = createProjectFigureReader({
+        getAllFiles: vi.fn(async () => ({
+          [`/${path}`]: { hash: "figure-hash" },
+        })),
+        requestBlobWithProjectId: vi.fn(async () => ({
+          stream: Readable.from([input]),
+          contentLength: input.length,
+        })),
+        downscaleFigure: vi.fn(() => {
+          throw new Error("The unchanged path must not convert.");
+        }),
+      });
+
+      const result = await reader(request.projectId, { path });
+      expect(result.mediaType).toBe(mediaType);
+      expect(result.bytes).toBe(input.length);
+      expect(Buffer.from(result.data, "base64").equals(input)).toBe(true);
+    },
+  );
+
+  it("rasterises a one-page PDF at 144 DPI as image/png", async function () {
+    const path = "figures/result.PDF";
+    const input = solidPagePdf([[1, 0, 0]]);
     const reader = createProjectFigureReader({
       getAllFiles: vi.fn(async () => ({
-        "/figures/result.PNG": { hash: "figure-hash" },
+        [`/${path}`]: { hash: "pdf-hash" },
       })),
       requestBlobWithProjectId: vi.fn(async () => ({
         stream: Readable.from([input]),
         contentLength: input.length,
       })),
-      downscaleFigure: vi.fn(() => {
-        throw new Error("The unchanged path must not convert.");
-      }),
     });
 
-    const result = await reader(request.projectId, { path: figure.path });
-    expect(result.bytes).toBe(input.length);
-    expect(Buffer.from(result.data, "base64").equals(input)).toBe(true);
+    const result = await reader(request.projectId, { path });
+    const png = Buffer.from(result.data, "base64");
+    expect(result).toMatchObject({ path, mediaType: "image/png" });
+    expect(result.bytes).toBe(png.length);
+    expect(await centerPixel(png)).toEqual({
+      width: 144,
+      height: 144,
+      rgba: [255, 0, 0, 255],
+    });
+    expect(JSON.stringify(projectFigureModelOutput(result))).not.toContain(
+      "application/pdf",
+    );
+  });
+
+  it("renders only the first page of a multi-page PDF", async function () {
+    const path = "figures/multi-page.pdf";
+    const input = solidPagePdf([
+      [1, 0, 0],
+      [0, 0, 1],
+    ]);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        [`/${path}`]: { hash: "pdf-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+    });
+
+    const result = await reader(request.projectId, { path });
+    expect(await centerPixel(Buffer.from(result.data, "base64"))).toMatchObject(
+      { rgba: [255, 0, 0, 255] },
+    );
+  });
+
+  it("downscales a PDF raster above 5 MB through the existing path", async function () {
+    const path = "figures/result.pdf";
+    const smallPng = createCanvas(10, 10).toBuffer("image/png");
+    const largePng = Buffer.concat([
+      smallPng,
+      Buffer.alloc(PROJECT_FIGURE_MAX_BYTES),
+    ]);
+    const downscaledPng = createCanvas(5, 5).toBuffer("image/png");
+    const renderPdf = vi.fn(async () => largePng);
+    const downscaleFigure = vi.fn(async () => downscaledPng);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        [`/${path}`]: { hash: "pdf-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([solidPagePdf([[1, 0, 0]])]),
+      })),
+      renderPdf,
+      downscaleFigure,
+    });
+
+    const result = await reader(request.projectId, { path });
+    expect(renderPdf).toHaveBeenCalledOnce();
+    expect(downscaleFigure).toHaveBeenCalledOnce();
+    expect(downscaleFigure.mock.calls[0][1]).toMatchObject({
+      mediaType: "image/png",
+      maxBytes: PROJECT_FIGURE_MAX_BYTES,
+    });
+    expect(result.mediaType).toBe("image/png");
+    expect(Buffer.from(result.data, "base64").equals(downscaledPng)).toBe(true);
+  });
+
+  it("refuses an unparseable PDF with a bounded conversion error", async function () {
+    const path = "figures/broken.pdf";
+    const input = Buffer.from("not a PDF");
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        [`/${path}`]: { hash: "pdf-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+    });
+
+    expect(
+      await captureError(reader(request.projectId, { path })),
+    ).toMatchObject({
+      code: "AI_PROJECT_FIGURE_CONVERSION_FAILED",
+      category: "configuration",
+      retryable: false,
+    });
+  });
+
+  it("bounds a stalled PDF render with the conversion timeout", async function () {
+    const path = "figures/stalled.pdf";
+    const input = solidPagePdf([[1, 0, 0]]);
+    const reader = createProjectFigureReader({
+      getAllFiles: vi.fn(async () => ({
+        [`/${path}`]: { hash: "pdf-hash" },
+      })),
+      requestBlobWithProjectId: vi.fn(async () => ({
+        stream: Readable.from([input]),
+        contentLength: input.length,
+      })),
+      renderPdf: vi.fn(async () => await new Promise(() => {})),
+      downscaleTimeoutMilliseconds: 10,
+    });
+
+    expect(
+      await captureError(reader(request.projectId, { path })),
+    ).toMatchObject({
+      code: "AI_PROJECT_FIGURE_CONVERSION_TIMEOUT",
+      category: "configuration",
+      retryable: false,
+    });
   });
 
   it("downscales a figure above 5 MB with the installed canvas", async function () {

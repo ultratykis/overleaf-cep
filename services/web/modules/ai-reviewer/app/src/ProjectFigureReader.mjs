@@ -28,12 +28,14 @@ function figureError(message, code) {
 
 function mediaTypeForPath(path) {
   const lowerPath = path.toLowerCase();
-  if (lowerPath.endsWith(".png")) return "image/png";
+  if (lowerPath.endsWith(".png") || lowerPath.endsWith(".pdf")) {
+    return "image/png";
+  }
   if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg")) {
     return "image/jpeg";
   }
   throw figureError(
-    "The requested project figure must be a PNG or JPEG file.",
+    "The requested project figure must be a PNG, JPEG, or PDF file.",
     "AI_PROJECT_FIGURE_TYPE_UNSUPPORTED",
   );
 }
@@ -123,19 +125,18 @@ function imageDimensions(data, mediaType) {
 }
 
 /**
+ * @param {URL} workerUrl
  * @param {Buffer} data
- * @param {{ mediaType: string, maxBytes: number, signal: AbortSignal }} options
+ * @param {Record<string, unknown>} workerData
+ * @param {AbortSignal} signal
  */
-function downscaleFigureWithCanvas(data, { mediaType, maxBytes, signal }) {
+function runFigureWorker(workerUrl, data, workerData, signal) {
   return new Promise((resolve, reject) => {
     const transferred = Uint8Array.from(data);
-    const worker = new Worker(
-      new URL("./ProjectFigureDownscaleWorker.mjs", import.meta.url),
-      {
-        workerData: { data: transferred.buffer, mediaType, maxBytes },
-        transferList: [transferred.buffer],
-      },
-    );
+    const worker = new Worker(workerUrl, {
+      workerData: { ...workerData, data: transferred.buffer },
+      transferList: [transferred.buffer],
+    });
     let settled = false;
     const finish = (work) => {
       if (settled) return;
@@ -161,30 +162,38 @@ function downscaleFigureWithCanvas(data, { mediaType, maxBytes, signal }) {
   });
 }
 
+function downscaleFigureWithCanvas(data, { mediaType, maxBytes, signal }) {
+  return runFigureWorker(
+    new URL("./ProjectFigureDownscaleWorker.mjs", import.meta.url),
+    data,
+    { mediaType, maxBytes },
+    signal,
+  );
+}
+
+function renderPdfWithCanvas(data, { maxPixels, signal }) {
+  return runFigureWorker(
+    new URL("./ProjectFigurePdfRenderWorker.mjs", import.meta.url),
+    data,
+    { maxPixels },
+    signal,
+  );
+}
+
 /**
  * @param {Buffer} data
- * @param {string} mediaType
  * @param {AbortSignal | undefined} signal
- * @param {(data: Buffer, options: { mediaType: string, maxBytes: number, signal: AbortSignal }) => unknown | Promise<unknown>} downscaleFigure
+ * @param {(data: Buffer, options: any) => unknown | Promise<unknown>} convertFigure
+ * @param {Record<string, unknown>} options
  * @param {number} timeoutMilliseconds
  */
-async function downscaleFigureData(
+async function convertFigureData(
   data,
-  mediaType,
   signal,
-  downscaleFigure,
+  convertFigure,
+  options,
   timeoutMilliseconds,
 ) {
-  const dimensions = imageDimensions(data, mediaType);
-  if (
-    dimensions == null ||
-    dimensions.width <= 0 ||
-    dimensions.height <= 0 ||
-    dimensions.width * dimensions.height > PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS
-  ) {
-    throw figureConversionFailed();
-  }
-
   const timeoutController = new AbortController();
   const timeout = setTimeout(
     () => timeoutController.abort(),
@@ -202,9 +211,8 @@ async function downscaleFigureData(
   try {
     const output = await Promise.race([
       Promise.resolve(
-        downscaleFigure(data, {
-          mediaType,
-          maxBytes: PROJECT_FIGURE_MAX_BYTES,
+        convertFigure(data, {
+          ...options,
           signal: workSignal,
         }),
       ),
@@ -228,6 +236,71 @@ async function downscaleFigureData(
 }
 
 /**
+ * @param {Buffer} data
+ * @param {string} mediaType
+ * @param {AbortSignal | undefined} signal
+ * @param {(data: Buffer, options: { mediaType: string, maxBytes: number, signal: AbortSignal }) => unknown | Promise<unknown>} downscaleFigure
+ * @param {number} timeoutMilliseconds
+ */
+async function downscaleFigureData(
+  data,
+  mediaType,
+  signal,
+  downscaleFigure,
+  timeoutMilliseconds,
+) {
+  if (data.length > PROJECT_FIGURE_DOWNSCALE_MAX_INPUT_BYTES) {
+    throw figureTooLarge();
+  }
+  const dimensions = imageDimensions(data, mediaType);
+  if (
+    dimensions == null ||
+    dimensions.width <= 0 ||
+    dimensions.height <= 0 ||
+    dimensions.width * dimensions.height > PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS
+  ) {
+    throw figureConversionFailed();
+  }
+
+  return await convertFigureData(
+    data,
+    signal,
+    downscaleFigure,
+    {
+      mediaType,
+      maxBytes: PROJECT_FIGURE_MAX_BYTES,
+    },
+    timeoutMilliseconds,
+  );
+}
+
+/**
+ * @param {Buffer} data
+ * @param {AbortSignal | undefined} signal
+ * @param {(data: Buffer, options: { maxPixels: number, signal: AbortSignal }) => unknown | Promise<unknown>} renderPdf
+ * @param {number} timeoutMilliseconds
+ */
+async function renderPdfData(data, signal, renderPdf, timeoutMilliseconds) {
+  const output = await convertFigureData(
+    data,
+    signal,
+    renderPdf,
+    { maxPixels: PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS },
+    timeoutMilliseconds,
+  );
+  const dimensions = imageDimensions(output, "image/png");
+  if (
+    dimensions == null ||
+    dimensions.width <= 0 ||
+    dimensions.height <= 0 ||
+    dimensions.width * dimensions.height > PROJECT_FIGURE_DOWNSCALE_MAX_PIXELS
+  ) {
+    throw figureConversionFailed();
+  }
+  return output;
+}
+
+/**
  * @param {{
  *   getAllFiles: (projectId: string) => unknown | Promise<unknown>,
  *   requestBlobWithProjectId: (
@@ -236,6 +309,7 @@ async function downscaleFigureData(
  *     method: "GET",
  *   ) => unknown | Promise<unknown>,
  *   downscaleFigure?: (data: Buffer, options: { mediaType: string, maxBytes: number, signal: AbortSignal }) => unknown | Promise<unknown>,
+ *   renderPdf?: (data: Buffer, options: { maxPixels: number, signal: AbortSignal }) => unknown | Promise<unknown>,
  *   downscaleTimeoutMilliseconds?: number,
  * }} dependencies
  */
@@ -243,12 +317,14 @@ export function createProjectFigureReader({
   getAllFiles,
   requestBlobWithProjectId,
   downscaleFigure = downscaleFigureWithCanvas,
+  renderPdf = renderPdfWithCanvas,
   downscaleTimeoutMilliseconds = PROJECT_FIGURE_DOWNSCALE_TIMEOUT_MILLISECONDS,
 }) {
   if (
     typeof getAllFiles !== "function" ||
     typeof requestBlobWithProjectId !== "function" ||
     typeof downscaleFigure !== "function" ||
+    typeof renderPdf !== "function" ||
     !Number.isSafeInteger(downscaleTimeoutMilliseconds) ||
     downscaleTimeoutMilliseconds <= 0
   ) {
@@ -266,6 +342,7 @@ export function createProjectFigureReader({
     }
     const { path } = parsed.data;
     const mediaType = mediaTypeForPath(path);
+    const isPdf = path.toLowerCase().endsWith(".pdf");
 
     let files;
     try {
@@ -335,11 +412,19 @@ export function createProjectFigureReader({
     }
 
     const original = Buffer.concat(chunks, bytes);
+    const raster = isPdf
+      ? await renderPdfData(
+          original,
+          signal,
+          renderPdf,
+          downscaleTimeoutMilliseconds,
+        )
+      : original;
     const data =
-      bytes <= PROJECT_FIGURE_MAX_BYTES
-        ? original
+      raster.length <= PROJECT_FIGURE_MAX_BYTES
+        ? raster
         : await downscaleFigureData(
-            original,
+            raster,
             mediaType,
             signal,
             downscaleFigure,
