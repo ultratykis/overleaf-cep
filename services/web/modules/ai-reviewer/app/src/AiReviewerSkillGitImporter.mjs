@@ -5,10 +5,8 @@ import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-import {
-  createGuardedOpenAiCompatibleFetch,
-  createPinnedOpenAiCompatibleDispatcher,
-} from "./OllamaOpenAiTransport.mjs";
+import { createGuardedOpenAiCompatibleFetch } from "./OllamaOpenAiTransport.mjs";
+import { createOutboundProxyDispatcher } from "./OutboundProxyDispatcher.mjs";
 import {
   OpenAiCompatibleEndpointPolicyError,
   parseOpenAiCompatibleBaseUrl,
@@ -567,7 +565,7 @@ function endpointPolicyFailure(error) {
  * @param {{
  *   fetchImpl: typeof fetch,
  *   lookupAll: typeof dnsLookup,
- *   dispatcherFactory: typeof createPinnedOpenAiCompatibleDispatcher,
+ *   dispatcherFactory: typeof createOutboundProxyDispatcher,
  * }} dependencies
  * @param {ReturnType<typeof parseAiReviewerSkillGitSource>} source
  * @param {string} baseUrl
@@ -1820,14 +1818,14 @@ function confirmation(input) {
  * @param {{
  *   fetchImpl?: typeof fetch,
  *   lookupAll?: typeof dnsLookup,
- *   dispatcherFactory?: typeof createPinnedOpenAiCompatibleDispatcher,
+ *   dispatcherFactory?: typeof createOutboundProxyDispatcher,
  *   timeoutSignal?: (milliseconds: number) => AbortSignal,
  * }} [dependencies]
  */
 export function createAiReviewerSkillGitImporter({
   fetchImpl = globalThis.fetch,
   lookupAll = dnsLookup,
-  dispatcherFactory = createPinnedOpenAiCompatibleDispatcher,
+  dispatcherFactory = createOutboundProxyDispatcher,
   timeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
 } = {}) {
   if (typeof fetchImpl !== "function") {
