@@ -315,6 +315,122 @@ describe("AI reviewer: AI SDK v6 adapter", function () {
     expect(readProjectFile).toHaveBeenCalledTimes(3);
   });
 
+  it("returns exhausted reads as data and answers after the measured comments-and-files sequence", async function () {
+    const refusal = {
+      readAllowanceExhausted: true,
+      message:
+        "The read allowance is used up. Answer now using only what you already read.",
+    };
+    const commentQuote = "Synthetic quoted comment.";
+    const commentMessage = "Synthetic comment message.";
+    const fileTexts = ["First synthetic file.", "Second synthetic file."];
+    const readStep = (toolName, input, toolCallId) =>
+      streamResult([
+        {
+          type: "tool-call",
+          toolCallId,
+          toolName,
+          input: JSON.stringify(input),
+        },
+        finish("tool-calls"),
+      ]);
+    const { model, consumed } = strictStreamModel([
+      readStep("read_project_comments", {}, "comments-success"),
+      readStep("read_project_file", { path: "main.tex" }, "file-success-1"),
+      readStep(
+        "read_project_file",
+        { path: "chapter.tex" },
+        "file-success-2",
+      ),
+      readStep("read_project_comments", {}, "comments-refused"),
+      readStep(
+        "read_project_figure",
+        { path: "figure.png" },
+        "figure-refused",
+      ),
+      readStep("read_project_file", { path: "appendix.tex" }, "file-refused"),
+      streamResult([
+        { type: "text-start", id: "answer-after-refusals" },
+        {
+          type: "text-delta",
+          id: "answer-after-refusals",
+          delta: "Answered from the material already read.",
+        },
+        { type: "text-end", id: "answer-after-refusals" },
+        finish("stop"),
+      ]),
+    ]);
+    const readProjectComments = vi.fn(async () => ({
+      threads: [
+        {
+          quotedText: commentQuote,
+          messages: [{ content: commentMessage }],
+        },
+      ],
+    }));
+    let fileIndex = 0;
+    const readProjectFile = vi.fn(async ({ path }) => ({
+      path,
+      text: fileTexts[fileIndex++],
+    }));
+    const readProjectFigure = vi.fn(async () => ({
+      path: "figure.png",
+      mediaType: "image/png",
+      bytes: 4,
+      data: "AQIDBA==",
+    }));
+    const info = vi.spyOn(logger, "info").mockImplementation(() => {});
+
+    try {
+      const events = await collect(
+        createGateway(model, {
+          readProjectComments,
+          readProjectFile,
+          readProjectFigure,
+          supportsImages: true,
+        }).stream(request()),
+      );
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "text.delta",
+          delta: "Answered from the material already read.",
+        }),
+      );
+      expect(events.at(-1)).toMatchObject({ type: "completed" });
+      expect(consumed()).toBe(7);
+      expect(readProjectComments).toHaveBeenCalledTimes(1);
+      expect(readProjectFile).toHaveBeenCalledTimes(2);
+      expect(readProjectFigure).not.toHaveBeenCalled();
+      for (const callIndex of [4, 5, 6]) {
+        const toolMessage = JSON.stringify(
+          model.doStreamCalls[callIndex].prompt.at(-1),
+        );
+        expect(toolMessage).toContain('"type":"tool-result"');
+        expect(toolMessage).toContain(JSON.stringify(refusal));
+        expect(toolMessage).not.toContain('"type":"tool-error"');
+      }
+      expect(info).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          toolCallCounts: {
+            read_project_comments: 2,
+            read_project_file: 3,
+            read_project_figure: 1,
+          },
+          contentCharsRead:
+            commentQuote.length +
+            commentMessage.length +
+            fileTexts[0].length +
+            fileTexts[1].length,
+          readToolCalls: 3,
+        }),
+        AI_REVIEWER_COMPLETION_LOG_MESSAGE,
+      );
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("keeps findings when an extra subject is rejected", async function () {
     const duplicateSubjectStep = streamResult([
       {

@@ -3787,7 +3787,7 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(String(error)).not.toContain("PROVIDER_MODEL_GETTER_ABORT_PRIVATE");
   });
 
-  it("returns a fourth project read as a tool error without ending the run", async function () {
+  it("returns a fourth project read as a refusal result without ending the run", async function () {
     const { model, consumed } = strictStreamModel([
       toolStep(
         { path: "main.tex", range: { from: 0, to: 4 } },
@@ -3822,9 +3822,12 @@ describe("AI reviewer: AI SDK v6 adapter hardening", function () {
     expect(readProjectFile).toHaveBeenCalledTimes(3);
     expect(consumed()).toBe(5);
     expect(model.doStreamCalls).toHaveLength(5);
-    expect(JSON.stringify(model.doStreamCalls[4].prompt)).toContain(
-      "The AI provider exceeded the read-tool call limit.",
+    const prompt = JSON.stringify(model.doStreamCalls[4].prompt);
+    expect(prompt).toContain('"type":"tool-result"');
+    expect(prompt).toContain(
+      '"readAllowanceExhausted":true,"message":"The read allowance is used up. Answer now using only what you already read."',
     );
+    expect(prompt).not.toContain('"type":"tool-error"');
   });
 
   it("stops after the structured second step without another model call", async function () {

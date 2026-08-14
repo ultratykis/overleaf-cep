@@ -469,6 +469,76 @@ describe("AI reviewer: one agent path for review and conversation", function () 
     );
   });
 
+  it("offers only reporting tools on the final step", async function () {
+    const readSteps = Array.from({ length: 7 }, (_, index) =>
+      toolStep([
+        toolChunk(
+          "read_project_file",
+          { path: "main.tex", range: { from: 0, to: 22 } },
+          `read-before-final-${index}`,
+        ),
+      ]),
+    );
+    const { model } = strictStreamModel([
+      ...readSteps,
+      textStep("Answered on the reserved final step."),
+    ]);
+
+    const events = await collect(
+      createGateway(model, {
+        skills: [
+          {
+            name: "Synthetic review skill",
+            description: "Synthetic bounded reference.",
+            body: "Synthetic body.",
+            referenceFiles: {},
+          },
+        ],
+        readProjectComments: async () => ({ threads: [] }),
+        readProjectFigure: async () => ({
+          path: "figure.png",
+          mediaType: "image/png",
+          bytes: 4,
+          data: "AQIDBA==",
+        }),
+        searchZotero: async () => [],
+        supportsImages: true,
+      }).stream(documentRequest({ skill: "referee-review" })),
+    );
+
+    const initialTools = model.doStreamCalls[0].tools.map(({ name }) => name);
+    const finalTools = model.doStreamCalls[7].tools.map(({ name }) => name);
+    expect(initialTools).toHaveLength(8);
+    expect(initialTools).toEqual(
+      expect.arrayContaining([
+        "read_project_file",
+        "read_project_comments",
+        "read_project_figure",
+        "read_skill",
+        "search_zotero",
+        "report_subject",
+        "report_finding",
+        "propose_suggestion",
+      ]),
+    );
+    expect(finalTools.toSorted()).toEqual(
+      ["report_subject", "report_finding", "propose_suggestion"].toSorted(),
+    );
+    expect(model.doStreamCalls[0].prompt[0].content).not.toContain(
+      "This is the last step.",
+    );
+    expect(model.doStreamCalls[7].prompt[0].content).toContain(
+      "This is the last step. Answer now using only what you already have.",
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "text.delta",
+        delta: "Answered on the reserved final step.",
+      }),
+    );
+    expect(events.at(-1)).toMatchObject({ type: "completed" });
+  });
+
   it("searches Zotero while answering a conversation turn", async function () {
     const searchZotero = vi.fn(async () => [
       { itemKey: "ITEM1", title: "Synthetic result" },
@@ -576,6 +646,9 @@ describe("AI reviewer: one agent path for review and conversation", function () 
       );
       expect(sentSystemInstruction(model)).not.toContain(
         "Call report_subject exactly once",
+      );
+      expect(sentSystemInstruction(model)).not.toContain(
+        "This is the last step.",
       );
     },
   );

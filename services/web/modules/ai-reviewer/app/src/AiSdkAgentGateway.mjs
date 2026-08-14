@@ -531,6 +531,13 @@ const READ_PROJECT_FIGURE_INSTRUCTION =
   "Use read_project_figure only when a project figure is needed to answer the request.";
 const READ_PROJECT_COMMENTS_INSTRUCTION =
   "Use read_project_comments when the request is about the comments already on the manuscript; it returns each unresolved thread with its quoted text and location. Read the surrounding text with read_project_file before proposing how to address a comment, and call it again with a docPath or threadId when a comment refers to another part of the project.";
+const READ_ALLOWANCE_EXHAUSTED_RESULT = Object.freeze({
+  readAllowanceExhausted: true,
+  message:
+    "The read allowance is used up. Answer now using only what you already read.",
+});
+const FINAL_STEP_INSTRUCTION =
+  "This is the last step. Answer now using only what you already have.";
 
 const FINDING_INSTRUCTION = [
   "When report_finding is available, put every issue worth tracking in that tool instead of only describing it in prose.",
@@ -872,6 +879,13 @@ const LOCAL_GATEWAY_ERRORS = new WeakSet();
 // step budget is no longer the tool budget. The per-tool call limits below stay
 // the real bound on how much work one request can cause.
 const MAX_AGENT_STEPS = 8;
+const FINAL_STEP_DISABLED_TOOL_NAMES = new Set([
+  AI_REVIEWER_TOOL_NAMES.readProjectFile,
+  AI_REVIEWER_TOOL_NAMES.readProjectFigure,
+  AI_REVIEWER_TOOL_NAMES.readProjectComments,
+  AI_REVIEWER_TOOL_NAMES.readSkill,
+  AI_REVIEWER_TOOL_NAMES.searchZotero,
+]);
 const MAX_REPORTED_ARTIFACTS = 100;
 // The SDK throws the provider's own error when this is zero and only wraps it
 // in a RetryError above zero, so the RetryError classification was removed as
@@ -3300,6 +3314,12 @@ export class AiSdkAgentGateway {
       const hiddenProviderTools = new Set(
         suggestionAllowed ? [] : ["propose_suggestion"],
       );
+      const activeTools = hiddenProviderTools.has("propose_suggestion")
+        ? [...providerActiveTools, "propose_suggestion"]
+        : providerActiveTools;
+      const finalStepActiveTools = activeTools.filter(
+        (toolName) => !FINAL_STEP_DISABLED_TOOL_NAMES.has(toolName),
+      );
       const requestModel = withoutProviderWarnings(
         createSdkRequestModel(this.model, signal),
         hiddenProviderTools,
@@ -3323,9 +3343,14 @@ export class AiSdkAgentGateway {
           () => selectionTransform && reportedArtifactCount > 0,
           () => terminalToolPolicyError != null || terminalToolExecutionFailed,
         ],
-        activeTools: hiddenProviderTools.has("propose_suggestion")
-          ? [...providerActiveTools, "propose_suggestion"]
-          : providerActiveTools,
+        activeTools,
+        prepareStep: ({ stepNumber }) =>
+          !selectionTransform && stepNumber === MAX_AGENT_STEPS - 1
+            ? {
+                activeTools: finalStepActiveTools,
+                instructions: `${instructions}\n\n${FINAL_STEP_INSTRUCTION}`,
+              }
+            : {},
         ...(selectionTransform
           ? {
               toolChoice: {
@@ -3348,14 +3373,7 @@ export class AiSdkAgentGateway {
                 }
                 readToolCallCount += 1;
                 if (readToolCallCount > readToolCallLimit) {
-                  throw gatewayError(
-                    "The AI provider exceeded the read-tool call limit.",
-                    {
-                      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
-                      category: "schema",
-                      retryable: false,
-                    },
-                  );
+                  return consumeModelInput(READ_ALLOWANCE_EXHAUSTED_RESULT);
                 }
                 const parsed = ReadProjectFileArgumentsSchema.parse(toolInput);
                 const value = consumeModelInput(
@@ -3436,14 +3454,7 @@ export class AiSdkAgentGateway {
                 }
                 readToolCallCount += 1;
                 if (readToolCallCount > readToolCallLimit) {
-                  throw gatewayError(
-                    "The AI provider exceeded the read-tool call limit.",
-                    {
-                      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
-                      category: "schema",
-                      retryable: false,
-                    },
-                  );
+                  return consumeModelInput(READ_ALLOWANCE_EXHAUSTED_RESULT);
                 }
                 const parsed =
                   ReadProjectFigureArgumentsSchema.parse(toolInput);
@@ -3472,7 +3483,13 @@ export class AiSdkAgentGateway {
                 throw error;
               }
             },
-            toModelOutput: ({ output }) => projectFigureModelOutput(output),
+            toModelOutput: ({ output }) =>
+              output != null &&
+              typeof output === "object" &&
+              !Array.isArray(output) &&
+              output.readAllowanceExhausted === true
+                ? { type: "json", value: output }
+                : projectFigureModelOutput(output),
           }),
           [AI_REVIEWER_TOOL_NAMES.readProjectComments]: tool({
             description:
@@ -3503,14 +3520,7 @@ export class AiSdkAgentGateway {
                 }
                 readToolCallCount += 1;
                 if (readToolCallCount > readToolCallLimit) {
-                  throw gatewayError(
-                    "The AI provider exceeded the read-tool call limit.",
-                    {
-                      code: "AI_TOOL_CALL_LIMIT_EXCEEDED",
-                      category: "schema",
-                      retryable: false,
-                    },
-                  );
+                  return consumeModelInput(READ_ALLOWANCE_EXHAUSTED_RESULT);
                 }
                 const parsed =
                   ReadProjectCommentsArgumentsSchema.parse(toolInput);
