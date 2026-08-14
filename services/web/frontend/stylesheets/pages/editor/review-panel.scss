@@ -121,12 +121,17 @@ $rp-type-blue: #6b7797;
   justify-content: space-between;
   margin-bottom: var(--spacing-01);
 
+  .review-panel-entry-header-left {
+    min-width: 0;
+  }
+
   .review-panel-entry-user {
     color: var(--review-panel-color);
     font-size: 110%;
     max-width: 150px;
     white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .review-panel-entry-time {
@@ -135,6 +140,7 @@ $rp-type-blue: #6b7797;
 
   .review-panel-entry-actions {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     gap: var(--spacing-03);
 

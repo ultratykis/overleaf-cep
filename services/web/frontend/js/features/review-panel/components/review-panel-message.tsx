@@ -83,7 +83,7 @@ export const ReviewPanelMessage: FC<{
   return (
     <div className="review-panel-comment">
       <div className="review-panel-entry-header">
-        <div>
+        <div className="review-panel-entry-header-left">
           <ReviewPanelEntryUser user={message.user} />
           <div className="review-panel-entry-time">
             <FormatTimeBasedOnYear date={message.timestamp} />
