@@ -329,6 +329,8 @@ describe("AI reviewer comment-posting panel", function () {
     expect(
       postEditorComment.calledOnceWithExactly({
         projectId,
+        runId: requestId,
+        artifactId: "finding-comment-posting",
         documentId,
         from: 6,
         to: 10,
@@ -390,6 +392,8 @@ describe("AI reviewer comment-posting panel", function () {
     expect(
       postEditorComment.calledOnceWithExactly({
         projectId,
+        runId: requestId,
+        artifactId: "suggestion-comment-posting",
         documentId,
         from: 6,
         to: 10,
@@ -578,7 +582,7 @@ describe("AI reviewer comment-posting panel", function () {
     expect(postEditorComment.called).to.equal(false);
   });
 
-  it("warns against retrying when the posting response is unconfirmed", async function () {
+  it("allows a safe retry when the posting response is unconfirmed", async function () {
     const { postEditorComment } = await renderCompletedPanel({
       postingError: Object.assign(new TypeError("response unavailable"), {
         code: "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
@@ -599,7 +603,7 @@ describe("AI reviewer comment-posting panel", function () {
     );
 
     expect((await within(findings).findByRole("alert")).textContent).to.equal(
-      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+      "The post may not have been confirmed. Retrying is safe.",
     );
     expect(postEditorComment.calledOnce).to.equal(true);
   });
@@ -655,7 +659,7 @@ describe("AI reviewer comment-posting panel", function () {
       code: "AI_REVIEWER_COMMENT_POST_FAILED",
     });
     expect(commentPostingErrorMessage(uncertainResult, t)).to.equal(
-      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+      "The post may not have been confirmed. Retrying is safe.",
     );
     expect(commentPostingErrorMessage(failedResult, t)).to.equal(
       "The comment could not be posted.",

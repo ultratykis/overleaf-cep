@@ -18,6 +18,12 @@ function assertIdentifier(value: string, name: string) {
   }
 }
 
+function assertBoundedIdentifier(value: string, name: string) {
+  if (value.length === 0 || value.length > 200) {
+    throw new TypeError(`${name} must contain between 1 and 200 characters`);
+  }
+}
+
 function entryForProject(projectId: string) {
   let entry = projectProvenance.get(projectId);
   if (entry == null) {
@@ -44,6 +50,35 @@ function provenancePath(projectId: string) {
 function commentProvenancePath(projectId: string, commentId: string) {
   assertIdentifier(commentId, "commentId");
   return `${provenancePath(projectId)}/${commentId}`;
+}
+
+function keyedProvenancePath(
+  projectId: string,
+  runId: string,
+  artifactId: string,
+) {
+  assertBoundedIdentifier(runId, "runId");
+  assertBoundedIdentifier(artifactId, "artifactId");
+  const query = new URLSearchParams({ runId, artifactId });
+  return `${provenancePath(projectId)}?${query}`;
+}
+
+function parseReservation(value: unknown) {
+  if (
+    typeof value !== "object" ||
+    value == null ||
+    !("commentId" in value) ||
+    typeof value.commentId !== "string" ||
+    !("confirmed" in value) ||
+    typeof value.confirmed !== "boolean"
+  ) {
+    throw new TypeError("Invalid AI reviewer comment provenance response");
+  }
+  assertIdentifier(value.commentId, "commentId");
+  return {
+    commentId: value.commentId,
+    confirmed: value.confirmed,
+  };
 }
 
 function parseCommentIds(value: unknown) {
@@ -80,10 +115,17 @@ export async function loadAiReviewerCommentProvenance(
 export async function reserveAiReviewerCommentProvenance(
   projectId: string,
   commentId: string,
+  runId: string,
+  artifactId: string,
   signal?: AbortSignal,
 ) {
+  assertBoundedIdentifier(runId, "runId");
+  assertBoundedIdentifier(artifactId, "artifactId");
   const response = await putJSON<unknown>(
-    commentProvenancePath(projectId, commentId),
+    `${commentProvenancePath(projectId, commentId)}?${new URLSearchParams({
+      runId,
+      artifactId,
+    })}`,
     {
       signal,
       swallowAbortError: false,
@@ -93,16 +135,45 @@ export async function reserveAiReviewerCommentProvenance(
     typeof response !== "object" ||
     response == null ||
     !("commentId" in response) ||
-    response.commentId !== commentId ||
+    typeof response.commentId !== "string" ||
     !("created" in response) ||
-    typeof response.created !== "boolean"
+    typeof response.created !== "boolean" ||
+    !("confirmed" in response) ||
+    typeof response.confirmed !== "boolean"
   ) {
     throw new TypeError("Invalid AI reviewer comment provenance response");
   }
+  assertIdentifier(response.commentId, "commentId");
   return {
-    commentId,
+    commentId: response.commentId,
     created: response.created,
+    confirmed: response.confirmed,
   };
+}
+
+export async function lookupAiReviewerCommentProvenance(
+  projectId: string,
+  runId: string,
+  artifactId: string,
+  signal?: AbortSignal,
+) {
+  const response = await getJSON<unknown>(
+    keyedProvenancePath(projectId, runId, artifactId),
+    {
+      signal,
+      swallowAbortError: false,
+    },
+  );
+  if (
+    typeof response !== "object" ||
+    response == null ||
+    !("reservation" in response)
+  ) {
+    throw new TypeError("Invalid AI reviewer comment provenance response");
+  }
+  return response.reservation == null
+    ? null
+    : parseReservation(response.reservation);
 }
 
 export async function releaseAiReviewerCommentProvenance(

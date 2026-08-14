@@ -12,6 +12,7 @@ import { FetchError } from "@/infrastructure/fetch-json";
 import AiAssistedCommentLabel from "../../frontend/js/components/ai-assisted-comment-label";
 import {
   loadAiReviewerCommentProvenance,
+  lookupAiReviewerCommentProvenance,
   recordAiReviewerCommentProvenance,
   releaseAiReviewerCommentProvenance,
   reserveAiReviewerCommentProvenance,
@@ -35,6 +36,8 @@ const projectId = "a".repeat(24);
 const otherProjectId = "b".repeat(24);
 const documentId = "c".repeat(24);
 const commentId = "d".repeat(24);
+const runId = "run-comment-posting";
+const artifactId = "artifact-comment-posting";
 const csrfToken = "synthetic-comment-csrf";
 
 let hadProjectId: boolean;
@@ -44,6 +47,8 @@ let previousCsrfToken: string | undefined;
 
 const input: PostAiReviewerCommentInput = {
   projectId,
+  runId,
+  artifactId,
   documentId,
   from: 6,
   to: 12,
@@ -128,7 +133,7 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     const context = liveContext();
     const reserveProvenance = sinon
       .stub()
-      .resolves({ commentId, created: true });
+      .resolves({ commentId, created: true, confirmed: false });
     const releaseProvenance = sinon.stub().resolves();
     const addComment = sinon.stub().resolves(commentId);
     const recordProvenance = sinon.stub();
@@ -136,6 +141,7 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       projectId,
       getContext: () => context,
       generateCommentId: () => commentId,
+      lookupProvenance: sinon.stub().resolves(null),
       reserveProvenance,
       releaseProvenance,
       addComment,
@@ -146,6 +152,8 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect(reserveProvenance).to.have.been.calledOnceWithExactly(
       projectId,
       commentId,
+      runId,
+      artifactId,
     );
     expect(addComment).to.have.been.calledOnce;
     expect(addComment.firstCall.args.slice(0, 4)).to.deep.equal([
@@ -162,12 +170,191 @@ describe("AI reviewer: ordinary comment host bridge", function () {
     expect(releaseProvenance).not.to.have.been.called;
   });
 
-  it("refuses a changed range after reservation and rolls back only a new reservation", async function () {
+  // An unconfirmed claim may already have a comment behind it. Releasing it
+  // would let the next attempt mint a second identifier and post the duplicate
+  // the claim exists to prevent (#141).
+  it("keeps an earlier attempt's claim when a retry finds the range stale", async function () {
+    const staleContext = liveContext("nothing here matches the reviewed text");
+    const releaseProvenance = sinon.stub().resolves();
+    const addComment = sinon.stub().resolves(commentId);
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => staleContext,
+      generateCommentId: () => commentId,
+      lookupProvenance: sinon
+        .stub()
+        .resolves({ commentId, confirmed: false }),
+      reserveProvenance: sinon
+        .stub()
+        .resolves({ commentId, created: false, confirmed: false }),
+      releaseProvenance,
+      addComment,
+      recordProvenance: sinon.stub(),
+    });
+
+    const error = await rejectedError(post(input));
+
+    expect(error).to.be.instanceOf(AiReviewerCommentPostingError);
+    expect((error as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_RANGE_STALE",
+    );
+    expect(releaseProvenance).not.to.have.been.called;
+    expect(addComment).not.to.have.been.called;
+  });
+
+  it("posts one keyed artifact once and returns its confirmed comment on retry", async function () {
+    let context = liveContext();
+    const lookupProvenance = sinon
+      .stub()
+      .onFirstCall()
+      .resolves(null)
+      .onSecondCall()
+      .resolves({ commentId, confirmed: true });
+    const generateCommentId = sinon.stub().returns(commentId);
+    const addComment = sinon.stub().resolves(commentId);
+    const recordProvenance = sinon.stub();
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId,
+      lookupProvenance,
+      reserveProvenance: sinon
+        .stub()
+        .resolves({ commentId, created: true, confirmed: false }),
+      releaseProvenance: sinon.stub().resolves(),
+      addComment,
+      recordProvenance,
+    });
+
+    expect(await post(input)).to.deep.equal({ commentId });
+    context = liveContext("alpha changed omega");
+    expect(await post(input)).to.deep.equal({ commentId });
+    expect(addComment).to.have.been.calledOnce;
+    expect(generateCommentId).to.have.been.calledOnce;
+    expect(recordProvenance).to.have.been.calledTwice;
+  });
+
+  it("keeps an uncertain claim and retries with the same comment identifier", async function () {
+    const context = liveContext();
+    const lookupProvenance = sinon
+      .stub()
+      .onFirstCall()
+      .resolves(null)
+      .onSecondCall()
+      .resolves({ commentId, confirmed: false });
+    const generateCommentId = sinon.stub().returns(commentId);
+    const addComment = sinon
+      .stub()
+      .onFirstCall()
+      .rejects(new TypeError("response lost"))
+      .onSecondCall()
+      .resolves(commentId);
+    const releaseProvenance = sinon.stub().resolves();
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId,
+      lookupProvenance,
+      reserveProvenance: sinon
+        .stub()
+        .resolves({ commentId, created: true, confirmed: false }),
+      releaseProvenance,
+      addComment,
+      recordProvenance: sinon.stub(),
+    });
+
+    const error = await rejectedError(post(input));
+    expect((error as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_UNCERTAIN",
+    );
+    expect(await post(input)).to.deep.equal({ commentId });
+    expect(generateCommentId).to.have.been.calledOnce;
+    expect(addComment.firstCall.args[3]).to.equal(commentId);
+    expect(addComment.secondCall.args[3]).to.equal(commentId);
+    expect(releaseProvenance).not.to.have.been.called;
+  });
+
+  it("releases a rejected claim so a later attempt can reserve a new identifier", async function () {
+    const nextCommentId = "e".repeat(24);
+    const context = liveContext();
+    const generatedIds = [commentId, nextCommentId];
+    const addComment = sinon
+      .stub()
+      .onFirstCall()
+      .rejects(
+        new FetchError(
+          "rejected",
+          "/synthetic-comment",
+          {},
+          new Response(null, { status: 400 }),
+        ),
+      )
+      .onSecondCall()
+      .resolves(nextCommentId);
+    const releaseProvenance = sinon.stub().resolves();
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId: () => generatedIds.shift()!,
+      lookupProvenance: sinon.stub().resolves(null),
+      reserveProvenance: async (_projectId, reservedCommentId) => ({
+        commentId: reservedCommentId,
+        created: true,
+        confirmed: false,
+      }),
+      releaseProvenance,
+      addComment,
+      recordProvenance: sinon.stub(),
+    });
+
+    const error = await rejectedError(post(input));
+    expect((error as AiReviewerCommentPostingError).code).to.equal(
+      "AI_REVIEWER_COMMENT_POST_FAILED",
+    );
+    expect(await post(input)).to.deep.equal({ commentId: nextCommentId });
+    expect(releaseProvenance).to.have.been.calledOnceWithExactly(
+      projectId,
+      commentId,
+    );
+  });
+
+  it("posts different artifacts in one run independently", async function () {
+    const otherCommentId = "e".repeat(24);
+    const generatedIds = [commentId, otherCommentId];
+    const context = liveContext();
+    const addComment = sinon
+      .stub()
+      .callsFake(async (_from, _text, _content, reservedCommentId) =>
+        String(reservedCommentId),
+      );
+    const post = createAiReviewerCommentPoster({
+      projectId,
+      getContext: () => context,
+      generateCommentId: () => generatedIds.shift()!,
+      lookupProvenance: sinon.stub().resolves(null),
+      reserveProvenance: async (_projectId, reservedCommentId) => ({
+        commentId: reservedCommentId,
+        created: true,
+        confirmed: false,
+      }),
+      releaseProvenance: sinon.stub().resolves(),
+      addComment,
+      recordProvenance: sinon.stub(),
+    });
+
+    expect(await post(input)).to.deep.equal({ commentId });
+    expect(
+      await post({ ...input, artifactId: "another-artifact" }),
+    ).to.deep.equal({ commentId: otherCommentId });
+    expect(addComment).to.have.been.calledTwice;
+  });
+
+  it("refuses a changed range after reservation and releases the keyed claim", async function () {
     for (const created of [true, false]) {
       let context = liveContext();
       const reserveProvenance = sinon.stub().callsFake(async () => {
         context = liveContext("alpha changed omega");
-        return { commentId, created };
+        return { commentId, created, confirmed: false };
       });
       const releaseProvenance = sinon.stub().resolves();
       const addComment = sinon.stub().resolves(commentId);
@@ -175,6 +362,7 @@ describe("AI reviewer: ordinary comment host bridge", function () {
         projectId,
         getContext: () => context,
         generateCommentId: () => commentId,
+        lookupProvenance: sinon.stub().resolves(null),
         reserveProvenance,
         releaseProvenance,
         addComment,
@@ -187,7 +375,17 @@ describe("AI reviewer: ordinary comment host bridge", function () {
         "AI_REVIEWER_COMMENT_RANGE_STALE",
       );
       expect(addComment).not.to.have.been.called;
-      expect(releaseProvenance.callCount).to.equal(created ? 1 : 0);
+      // Releasing is only safe for a claim this attempt created. A claim that
+      // already existed may have a comment behind it from an attempt that
+      // ended unconfirmed, so it is kept rather than freed for a second post.
+      if (created) {
+        expect(releaseProvenance).to.have.been.calledOnceWithExactly(
+          projectId,
+          commentId,
+        );
+      } else {
+        expect(releaseProvenance).not.to.have.been.called;
+      }
     }
   });
 
@@ -228,7 +426,10 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       projectId,
       getContext: () => context,
       generateCommentId: () => commentId,
-      reserveProvenance: sinon.stub().resolves({ commentId, created: true }),
+      lookupProvenance: sinon.stub().resolves(null),
+      reserveProvenance: sinon
+        .stub()
+        .resolves({ commentId, created: true, confirmed: false }),
       releaseProvenance,
       addComment,
       recordProvenance: sinon.stub(),
@@ -269,7 +470,10 @@ describe("AI reviewer: ordinary comment host bridge", function () {
         projectId,
         getContext: () => context,
         generateCommentId: () => commentId,
-        reserveProvenance: sinon.stub().resolves({ commentId, created: true }),
+        lookupProvenance: sinon.stub().resolves(null),
+        reserveProvenance: sinon
+          .stub()
+          .resolves({ commentId, created: true, confirmed: false }),
         releaseProvenance,
         addComment: sinon.stub().rejects(error),
         recordProvenance: sinon.stub(),
@@ -293,9 +497,11 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       projectId,
       getContext: () => context,
       generateCommentId: () => generatedCommentIds.shift()!,
+      lookupProvenance: sinon.stub().resolves(null),
       reserveProvenance: async (_projectId, reservedCommentId) => ({
         commentId: reservedCommentId,
         created: true,
+        confirmed: false,
       }),
       releaseProvenance,
       addComment: async (_from, _text, _content, reservedCommentId) =>
@@ -343,9 +549,10 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       projectId,
       getContext: () => context,
       generateCommentId: () => commentId,
+      lookupProvenance: sinon.stub().resolves(null),
       reserveProvenance: sinon.stub().callsFake(async () => {
         context = liveContext("alpha changed omega");
-        return { commentId, created: true };
+        return { commentId, created: true, confirmed: false };
       }),
       releaseProvenance: sinon.stub().rejects(new Error("rollback failed")),
       addComment: sinon.stub(),
@@ -359,13 +566,19 @@ describe("AI reviewer: ordinary comment host bridge", function () {
   });
 
   it("uses bodyless project-scoped provenance requests and keeps identifiers only", async function () {
+    const keyedPath = `/project/${projectId}/ai-reviewer/comment-provenance?runId=${runId}&artifactId=${artifactId}`;
+    const keyedCommentPath = `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}?runId=${runId}&artifactId=${artifactId}`;
     fetchMock.get(`/project/${projectId}/ai-reviewer/comment-provenance`, {
       commentIds: [commentId],
     });
-    fetchMock.put(
-      `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}`,
-      { commentId, created: true },
-    );
+    fetchMock.get(keyedPath, {
+      reservation: { commentId, confirmed: false },
+    });
+    fetchMock.put(keyedCommentPath, {
+      commentId,
+      created: true,
+      confirmed: false,
+    });
     fetchMock.delete(
       `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}`,
       { status: 204 },
@@ -375,22 +588,30 @@ describe("AI reviewer: ordinary comment host bridge", function () {
       commentId,
     ]);
     expect(
-      await reserveAiReviewerCommentProvenance(projectId, commentId),
-    ).to.deep.equal({ commentId, created: true });
+      await lookupAiReviewerCommentProvenance(projectId, runId, artifactId),
+    ).to.deep.equal({ commentId, confirmed: false });
+    expect(
+      await reserveAiReviewerCommentProvenance(
+        projectId,
+        commentId,
+        runId,
+        artifactId,
+      ),
+    ).to.deep.equal({ commentId, created: true, confirmed: false });
     await releaseAiReviewerCommentProvenance(projectId, commentId);
 
     const collectionCalls = fetchMock.callHistory.calls(
       `/project/${projectId}/ai-reviewer/comment-provenance`,
     );
-    const reserveCalls = fetchMock.callHistory.calls(
-      `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}`,
-      { method: "PUT" },
-    );
+    const reserveCalls = fetchMock.callHistory.calls(keyedCommentPath, {
+      method: "PUT",
+    });
     const releaseCalls = fetchMock.callHistory.calls(
       `/project/${projectId}/ai-reviewer/comment-provenance/${commentId}`,
       { method: "DELETE" },
     );
     expect(collectionCalls).to.have.length(1);
+    expect(fetchMock.callHistory.calls(keyedPath)).to.have.length(1);
     expect(reserveCalls).to.have.length(1);
     expect(releaseCalls).to.have.length(1);
     expect(reserveCalls[0].options.body).to.equal(undefined);

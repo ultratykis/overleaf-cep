@@ -3,10 +3,6 @@
 import { AiReviewerCommentProvenance as AiReviewerCommentProvenanceModel } from "../models/AiReviewerCommentProvenance.mjs";
 import ChatApiHandler from "../../../../app/src/Features/Chat/ChatApiHandler.mjs";
 
-AiReviewerCommentProvenanceModel.schema.add({
-  uncertain: { type: Boolean, required: true, default: false },
-});
-
 export class AiReviewerCommentProvenanceValidationError extends Error {
   constructor() {
     super("The AI-assisted comment provenance identifier is invalid.");
@@ -35,6 +31,22 @@ function objectId(input) {
   }
 }
 
+/** @param {unknown} input */
+function boundedIdentifier(input) {
+  try {
+    const value = /** @type {any} */ (input)?.toString?.();
+    if (typeof value !== "string" || value.length === 0 || value.length > 200) {
+      throw new AiReviewerCommentProvenanceValidationError();
+    }
+    return value;
+  } catch (error) {
+    if (error instanceof AiReviewerCommentProvenanceValidationError) {
+      throw error;
+    }
+    throw new AiReviewerCommentProvenanceValidationError();
+  }
+}
+
 /**
  * @param {{
  *   model?: typeof AiReviewerCommentProvenanceModel,
@@ -46,6 +58,50 @@ export function createAiReviewerCommentProvenanceStore({
   getThreadState = ChatApiHandler.promises.getThreadState,
 } = {}) {
   return {
+    /**
+     * @param {unknown} projectIdInput
+     * @param {unknown} runIdInput
+     * @param {unknown} artifactIdInput
+     */
+    async lookup(projectIdInput, runIdInput, artifactIdInput) {
+      const projectId = objectId(projectIdInput);
+      const runId = boundedIdentifier(runIdInput);
+      const artifactId = boundedIdentifier(artifactIdInput);
+      const record = await model
+        .findOne({ projectId, runId, artifactId })
+        .lean()
+        .exec();
+      if (record == null) {
+        return null;
+      }
+
+      const commentId = objectId(record._id);
+      if (record.uncertain !== true) {
+        return { commentId, confirmed: true };
+      }
+
+      let state;
+      try {
+        ({ state } = await getThreadState(
+          projectId,
+          commentId,
+          new AbortController().signal,
+        ));
+      } catch {
+        return { commentId, confirmed: false };
+      }
+      if (state === "current" || state === "resolved") {
+        await model
+          .updateOne(
+            { _id: commentId, projectId, runId, artifactId },
+            { $set: { uncertain: false } },
+          )
+          .exec();
+        return { commentId, confirmed: true };
+      }
+      return { commentId, confirmed: false };
+    },
+
     /** @param {unknown} projectIdInput */
     async list(projectIdInput) {
       const projectId = objectId(projectIdInput);
@@ -92,30 +148,51 @@ export function createAiReviewerCommentProvenanceStore({
     /**
      * @param {unknown} projectIdInput
      * @param {unknown} commentIdInput
+     * @param {unknown} runIdInput
+     * @param {unknown} artifactIdInput
      */
-    async mark(projectIdInput, commentIdInput) {
+    async mark(projectIdInput, commentIdInput, runIdInput, artifactIdInput) {
       const projectId = objectId(projectIdInput);
       const commentId = objectId(commentIdInput);
-      const result = await model
-        .updateOne(
-          { _id: commentId, projectId },
-          {
-            $setOnInsert: {
-              _id: commentId,
-              projectId,
-              uncertain: true,
+      const runId = boundedIdentifier(runIdInput);
+      const artifactId = boundedIdentifier(artifactIdInput);
+      let result;
+      try {
+        result = await model
+          .updateOne(
+            { projectId, runId, artifactId },
+            {
+              $setOnInsert: {
+                _id: commentId,
+                projectId,
+                runId,
+                artifactId,
+                uncertain: true,
+              },
             },
-          },
-          {
-            runValidators: true,
-            setDefaultsOnInsert: true,
-            upsert: true,
-          },
-        )
+            {
+              runValidators: true,
+              setDefaultsOnInsert: true,
+              upsert: true,
+            },
+          )
+          .exec();
+      } catch (error) {
+        if (/** @type {any} */ (error)?.code !== 11000) {
+          throw error;
+        }
+      }
+      const record = await model
+        .findOne({ projectId, runId, artifactId })
+        .lean()
         .exec();
+      if (record == null) {
+        throw new Error("The AI-assisted comment reservation was not found.");
+      }
       return {
-        commentId,
-        created: result.upsertedCount === 1 || result.upsertedId != null,
+        commentId: objectId(record._id),
+        created: result?.upsertedCount === 1 || result?.upsertedId != null,
+        confirmed: record.uncertain !== true,
       };
     },
 

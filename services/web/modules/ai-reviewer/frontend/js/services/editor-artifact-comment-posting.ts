@@ -23,6 +23,8 @@ export type PostableAiReviewerArtifact = OrdinaryFinding | UnresolvedSuggestion;
 
 export type PostEditorComment = (input: {
   projectId: string;
+  runId: string;
+  artifactId: string;
   documentId: string;
   from: number;
   to: number;
@@ -341,6 +343,8 @@ export async function postAiReviewerArtifactComment({
       status: "posted",
       ...(await postComment({
         ...anchor,
+        runId: prepared.request.requestId,
+        artifactId: prepared.artifact.id,
         content,
       })),
     };

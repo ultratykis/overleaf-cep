@@ -197,7 +197,7 @@
   "ai_reviewer_comment_body": "Comment body",
   "ai_reviewer_comment_document_unavailable": "Comment was not posted because the referenced document is unavailable in the editor.",
   "ai_reviewer_comment_post_failed": "The comment could not be posted.",
-  "ai_reviewer_comment_post_uncertain": "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+  "ai_reviewer_comment_post_uncertain": "The post may not have been confirmed. Retrying is safe.",
   "ai_reviewer_comment_range_stale": "Comment was not posted because the manuscript changed and the artifact range no longer matches.",
   "ai_reviewer_account_settings_description": "Connections and skills are shared across all of your projects.",
   "ai_reviewer_connection_add": "Add connection",

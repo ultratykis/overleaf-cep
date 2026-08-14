@@ -45,6 +45,14 @@ export function createAiReviewerCommentProvenanceController({
    */
   async function getCommentProvenance(request, response) {
     try {
+      if (request.query?.runId != null || request.query?.artifactId != null) {
+        const reservation = await provenanceStore.lookup(
+          request.params.project_id,
+          request.query?.runId,
+          request.query?.artifactId,
+        );
+        return response.json({ reservation });
+      }
       const commentIds = await provenanceStore.list(request.params.project_id);
       return response.json({ commentIds });
     } catch (error) {
@@ -61,6 +69,8 @@ export function createAiReviewerCommentProvenanceController({
       const result = await provenanceStore.mark(
         request.params.project_id,
         request.params.comment_id,
+        request.query?.runId,
+        request.query?.artifactId,
       );
       return response.json(result);
     } catch (error) {

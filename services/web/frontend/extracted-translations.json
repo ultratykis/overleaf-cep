@@ -166,7 +166,7 @@
   "ai_reviewer_comment_body": "",
   "ai_reviewer_comment_document_unavailable": "",
   "ai_reviewer_comment_post_failed": "",
-  "ai_reviewer_comment_post_uncertain": "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+  "ai_reviewer_comment_post_uncertain": "The post may not have been confirmed. Retrying is safe.",
   "ai_reviewer_comment_range_stale": "",
   "ai_reviewer_account_settings_description": "",
   "ai_reviewer_connection_add": "",

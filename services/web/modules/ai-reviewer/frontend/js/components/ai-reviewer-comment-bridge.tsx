@@ -9,6 +9,7 @@ import type { ThreadId } from "../../../../../types/review-panel/review-panel";
 import { useEditorSelectionSessionContext } from "../hooks/use-editor-selection-session-context";
 import {
   loadAiReviewerCommentProvenance,
+  lookupAiReviewerCommentProvenance,
   mergeAiReviewerCommentProvenance,
   recordAiReviewerCommentProvenance,
   releaseAiReviewerCommentProvenance,
@@ -75,6 +76,7 @@ function EnabledAiReviewerCommentBridge({
         projectId,
         getContext,
         generateCommentId: () => RangesTracker.generateId(),
+        lookupProvenance: lookupAiReviewerCommentProvenance,
         reserveProvenance: reserveAiReviewerCommentProvenance,
         releaseProvenance: releaseAiReviewerCommentProvenance,
         addComment: async (from, text, content, commentId, validateRange) => {

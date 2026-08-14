@@ -11,6 +11,9 @@ const projectId = "669e48d55ee80e3a12940711";
 const otherProjectId = "669e48d55ee80e3a12940712";
 const commentId = "669e48d55ee80e3a12940721";
 const otherCommentId = "669e48d55ee80e3a12940722";
+const runId = "run-141";
+const artifactId = "artifact-141";
+const otherArtifactId = "artifact-142";
 
 function clone(value) {
   return value == null ? value : structuredClone(value);
@@ -35,15 +38,19 @@ function inMemoryModel() {
         ),
       ),
     ),
+    findOne: vi.fn((filter) =>
+      fakeQuery(() =>
+        [...records.values()].find((record) =>
+          Object.entries(filter).every(([key, value]) => record[key] === value),
+        ),
+      ),
+    ),
     updateOne: vi.fn((filter, update, options = {}) =>
       fakeQuery(() => {
-        const current = records.get(filter._id);
+        const current = [...records.values()].find((record) =>
+          Object.entries(filter).every(([key, value]) => record[key] === value),
+        );
         if (current != null) {
-          if (current.projectId !== filter.projectId) {
-            const error = new Error("duplicate comment identifier");
-            error.code = 11000;
-            throw error;
-          }
           if (update.$set != null) {
             Object.assign(current, clone(update.$set));
           }
@@ -55,6 +62,20 @@ function inMemoryModel() {
             upsertedId: null,
           };
         }
+        if (update.$setOnInsert != null) {
+          const duplicate = [...records.values()].some(
+            (record) =>
+              record._id === update.$setOnInsert._id ||
+              (record.projectId === update.$setOnInsert.projectId &&
+                record.runId === update.$setOnInsert.runId &&
+                record.artifactId === update.$setOnInsert.artifactId),
+          );
+          if (duplicate) {
+            const error = new Error("duplicate provenance key");
+            error.code = 11000;
+            throw error;
+          }
+        }
         if (!options.upsert) {
           return {
             acknowledged: true,
@@ -64,13 +85,13 @@ function inMemoryModel() {
             upsertedId: null,
           };
         }
-        records.set(filter._id, clone(update.$setOnInsert));
+        records.set(update.$setOnInsert._id, clone(update.$setOnInsert));
         return {
           acknowledged: true,
           matchedCount: 0,
           modifiedCount: 0,
           upsertedCount: 1,
-          upsertedId: filter._id,
+          upsertedId: update.$setOnInsert._id,
         };
       }),
     ),
@@ -134,9 +155,9 @@ async function captureError(promise) {
 }
 
 describe("AI reviewer comment provenance model and store", function () {
-  it("stores only the project and comment identifiers", function () {
+  it("stores only the keyed identifiers and confirmation state", function () {
     expect(Object.keys(AiReviewerCommentProvenanceSchema.paths).sort()).toEqual(
-      ["_id", "projectId", "uncertain"],
+      ["_id", "artifactId", "projectId", "runId", "uncertain"],
     );
     expect(AiReviewerCommentProvenanceSchema.options).toEqual(
       expect.objectContaining({
@@ -146,6 +167,16 @@ describe("AI reviewer comment provenance model and store", function () {
         versionKey: false,
       }),
     );
+    expect(AiReviewerCommentProvenanceSchema.indexes()).toContainEqual([
+      { projectId: 1, runId: 1, artifactId: 1 },
+      expect.objectContaining({
+        unique: true,
+        partialFilterExpression: {
+          runId: { $exists: true },
+          artifactId: { $exists: true },
+        },
+      }),
+    ]);
   });
 
   it("marks idempotently, lists by project, rolls back by id, and deletes by project", async function () {
@@ -157,17 +188,31 @@ describe("AI reviewer comment provenance model and store", function () {
     });
 
     expect(
-      await store.mark(projectId.toUpperCase(), commentId.toUpperCase()),
+      await store.mark(
+        projectId.toUpperCase(),
+        commentId.toUpperCase(),
+        runId,
+        artifactId,
+      ),
     ).toEqual({
       commentId,
       created: true,
+      confirmed: false,
     });
-    expect(await store.mark(projectId, commentId)).toEqual({
+    expect(
+      await store.mark(projectId, otherCommentId, runId, artifactId),
+    ).toEqual({
       commentId,
       created: false,
+      confirmed: false,
     });
-    await store.mark(projectId, otherCommentId);
-    await store.mark(otherProjectId, "669e48d55ee80e3a12940723");
+    await store.mark(projectId, otherCommentId, runId, otherArtifactId);
+    await store.mark(
+      otherProjectId,
+      "669e48d55ee80e3a12940723",
+      runId,
+      artifactId,
+    );
 
     expect(await store.list(projectId)).toEqual([commentId, otherCommentId]);
     expect(await store.list(otherProjectId)).toEqual([
@@ -175,14 +220,22 @@ describe("AI reviewer comment provenance model and store", function () {
     ]);
     expect([...records.values()]).toEqual(
       expect.arrayContaining([
-        { _id: commentId, projectId, uncertain: false },
-        { _id: otherCommentId, projectId, uncertain: false },
+        { _id: commentId, projectId, runId, artifactId, uncertain: false },
+        {
+          _id: otherCommentId,
+          projectId,
+          runId,
+          artifactId: otherArtifactId,
+          uncertain: false,
+        },
       ]),
     );
     for (const record of records.values()) {
       expect(Object.keys(record).sort()).toEqual([
         "_id",
+        "artifactId",
         "projectId",
+        "runId",
         "uncertain",
       ]);
     }
@@ -213,13 +266,15 @@ describe("AI reviewer comment provenance model and store", function () {
       getThreadState,
     });
 
-    await store.mark(projectId, commentId);
-    await store.mark(projectId, otherCommentId);
+    await store.mark(projectId, commentId, runId, artifactId);
+    await store.mark(projectId, otherCommentId, runId, otherArtifactId);
 
     expect(await store.list(projectId)).toEqual([commentId]);
     expect(records.get(commentId)).toEqual({
       _id: commentId,
       projectId,
+      runId,
+      artifactId,
       uncertain: false,
     });
     expect(records.has(otherCommentId)).toBe(false);
@@ -236,14 +291,39 @@ describe("AI reviewer comment provenance model and store", function () {
       getThreadState,
     });
 
-    await store.mark(projectId, commentId);
+    await store.mark(projectId, commentId, runId, artifactId);
 
     expect(await store.list(projectId)).toEqual([commentId]);
     expect(records.get(commentId)).toEqual({
       _id: commentId,
       projectId,
+      runId,
+      artifactId,
       uncertain: true,
     });
+  });
+
+  it("looks up one keyed claim and confirms it only from an existing thread", async function () {
+    const { model } = inMemoryModel();
+    const getThreadState = vi
+      .fn()
+      .mockResolvedValueOnce({ state: "absent" })
+      .mockResolvedValueOnce({ state: "current" });
+    const store = createAiReviewerCommentProvenanceStore({
+      model,
+      getThreadState,
+    });
+
+    await store.mark(projectId, commentId, runId, artifactId);
+    expect(await store.lookup(projectId, runId, artifactId)).toEqual({
+      commentId,
+      confirmed: false,
+    });
+    expect(await store.lookup(projectId, runId, artifactId)).toEqual({
+      commentId,
+      confirmed: true,
+    });
+    expect(await store.lookup(projectId, runId, otherArtifactId)).toBeNull();
   });
 
   it("rejects identifiers outside the existing ThreadId shape before storage", async function () {
@@ -257,13 +337,30 @@ describe("AI reviewer comment provenance model and store", function () {
       await captureError(store.list("project-not-an-object-id")),
     ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
     expect(
-      await captureError(store.mark(projectId, "comment-not-an-object-id")),
+      await captureError(
+        store.mark(projectId, "comment-not-an-object-id", runId, artifactId),
+      ),
     ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
     expect(
       await captureError(store.unmark(projectId, "comment-not-an-object-id")),
     ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
+    for (const malformed of ["", "x".repeat(201)]) {
+      expect(
+        await captureError(store.lookup(projectId, malformed, artifactId)),
+      ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
+      expect(
+        await captureError(store.lookup(projectId, runId, malformed)),
+      ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
+      expect(
+        await captureError(
+          store.mark(projectId, commentId, malformed, artifactId),
+        ),
+      ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
+      expect(
+        await captureError(store.mark(projectId, commentId, runId, malformed)),
+      ).toBeInstanceOf(AiReviewerCommentProvenanceValidationError);
+    }
     expect(model.find).not.toHaveBeenCalled();
-    expect(model.updateOne).not.toHaveBeenCalled();
     expect(model.deleteOne).not.toHaveBeenCalled();
   });
 });
@@ -289,6 +386,7 @@ describe("AI reviewer comment provenance controller", function () {
           project_id: projectId,
           comment_id: commentId,
         },
+        query: { runId, artifactId },
         body: {
           content: "PRIVATE_MANUSCRIPT_SENTINEL",
           modelOutput: "PRIVATE_MODEL_OUTPUT_SENTINEL",
@@ -304,10 +402,14 @@ describe("AI reviewer comment provenance controller", function () {
       listResponse,
     );
 
-    expect(markResponse.body).toEqual({ commentId, created: true });
+    expect(markResponse.body).toEqual({
+      commentId,
+      created: true,
+      confirmed: false,
+    });
     expect(listResponse.body).toEqual({ commentIds: [commentId] });
     expect([...records.values()]).toEqual([
-      { _id: commentId, projectId, uncertain: false },
+      { _id: commentId, projectId, runId, artifactId, uncertain: false },
     ]);
 
     await controller.deleteCommentProvenance(
@@ -323,6 +425,35 @@ describe("AI reviewer comment provenance controller", function () {
     expect(deleteResponse.statusCode).toBe(204);
     expect(deleteResponse.ended).toBe(true);
     expect(records.size).toBe(0);
+  });
+
+  it("looks up a reservation through the existing provenance collection route", async function () {
+    const provenanceStore = {
+      lookup: vi.fn(async () => ({ commentId, confirmed: false })),
+      list: vi.fn(),
+    };
+    const controller = createAiReviewerCommentProvenanceController({
+      provenanceStore,
+    });
+    const response = fakeResponse();
+
+    await controller.getCommentProvenance(
+      {
+        params: { project_id: projectId },
+        query: { runId, artifactId },
+      },
+      response,
+    );
+
+    expect(response.body).toEqual({
+      reservation: { commentId, confirmed: false },
+    });
+    expect(provenanceStore.lookup).toHaveBeenCalledWith(
+      projectId,
+      runId,
+      artifactId,
+    );
+    expect(provenanceStore.list).not.toHaveBeenCalled();
   });
 
   it("returns bounded validation and internal errors without private data", async function () {

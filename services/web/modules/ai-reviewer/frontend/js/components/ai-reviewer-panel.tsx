@@ -804,7 +804,7 @@ export function commentPostingErrorMessage(
   ) {
     return t(
       "ai_reviewer_comment_post_uncertain",
-      "We couldn't confirm whether the comment was posted. Reload the page to check before trying again, because retrying now may post a duplicate.",
+      "The post may not have been confirmed. Retrying is safe.",
     );
   }
   if (result.status === "conflict") {

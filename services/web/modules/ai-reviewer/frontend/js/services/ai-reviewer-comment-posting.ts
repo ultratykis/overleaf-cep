@@ -5,6 +5,8 @@ const mongoIdentifierPattern = /^[0-9a-f]{24}$/;
 
 export type PostAiReviewerCommentInput = {
   projectId: string;
+  runId: string;
+  artifactId: string;
   documentId: string;
   from: number;
   to: number;
@@ -42,10 +44,17 @@ export type CreateAiReviewerCommentPosterOptions = {
   projectId: string;
   getContext: () => EditorSelectionSessionContext;
   generateCommentId: () => string;
+  lookupProvenance: (
+    projectId: string,
+    runId: string,
+    artifactId: string,
+  ) => Promise<{ commentId: string; confirmed: boolean } | null>;
   reserveProvenance: (
     projectId: string,
     commentId: string,
-  ) => Promise<{ commentId: string; created: boolean }>;
+    runId: string,
+    artifactId: string,
+  ) => Promise<{ commentId: string; created: boolean; confirmed: boolean }>;
   releaseProvenance: (projectId: string, commentId: string) => Promise<void>;
   addComment: (
     from: number,
@@ -97,6 +106,12 @@ function validateInput(input: PostAiReviewerCommentInput) {
   if (
     !mongoIdentifierPattern.test(input.projectId) ||
     !mongoIdentifierPattern.test(input.documentId) ||
+    typeof input.runId !== "string" ||
+    input.runId.length === 0 ||
+    input.runId.length > 200 ||
+    typeof input.artifactId !== "string" ||
+    input.artifactId.length === 0 ||
+    input.artifactId.length > 200 ||
     !Number.isSafeInteger(input.from) ||
     !Number.isSafeInteger(input.to) ||
     input.from < 0 ||
@@ -152,6 +167,7 @@ export function createAiReviewerCommentPoster({
   projectId,
   getContext,
   generateCommentId,
+  lookupProvenance,
   reserveProvenance,
   releaseProvenance,
   addComment,
@@ -166,48 +182,104 @@ export function createAiReviewerCommentPoster({
       );
     }
 
+    let reservation: {
+      commentId: string;
+      created: boolean;
+      confirmed: boolean;
+    } | null;
+    try {
+      const existing = await lookupProvenance(
+        projectId,
+        input.runId,
+        input.artifactId,
+      );
+      reservation = existing == null ? null : { ...existing, created: false };
+    } catch {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted provenance could not be read.",
+      );
+    }
+    if (
+      reservation != null &&
+      !mongoIdentifierPattern.test(reservation.commentId)
+    ) {
+      throw postingError(
+        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+        "AI-assisted provenance returned an invalid comment identifier.",
+      );
+    }
+    if (reservation?.confirmed === true) {
+      recordProvenance(projectId, reservation.commentId);
+      return { commentId: reservation.commentId };
+    }
+
     const initialAnchor = readLiveAnchor(input, getContext);
     if (initialAnchor == null) {
+      // Any claim reaching here belongs to an earlier attempt, so it stays:
+      // that attempt may have posted without confirming, and dropping the
+      // claim would let a later attempt post the duplicate again.
       throw postingError(
         "AI_REVIEWER_COMMENT_RANGE_STALE",
         "The document range no longer matches the reviewed text.",
       );
     }
 
-    let commentId: string;
-    try {
-      commentId = generateCommentId();
-    } catch {
-      throw postingError(
-        "AI_REVIEWER_COMMENT_POST_FAILED",
-        "The comment identifier could not be created.",
-      );
-    }
-    if (!mongoIdentifierPattern.test(commentId)) {
-      throw postingError(
-        "AI_REVIEWER_COMMENT_POST_FAILED",
-        "The comment identifier is invalid.",
-      );
-    }
+    if (reservation == null) {
+      let generatedCommentId: string;
+      try {
+        generatedCommentId = generateCommentId();
+      } catch {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_POST_FAILED",
+          "The comment identifier could not be created.",
+        );
+      }
+      if (!mongoIdentifierPattern.test(generatedCommentId)) {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_POST_FAILED",
+          "The comment identifier is invalid.",
+        );
+      }
 
-    let reservation: { commentId: string; created: boolean };
-    try {
-      reservation = await reserveProvenance(projectId, commentId);
-    } catch {
-      throw postingError(
-        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
-        "AI-assisted provenance could not be reserved.",
-      );
+      try {
+        reservation = await reserveProvenance(
+          projectId,
+          generatedCommentId,
+          input.runId,
+          input.artifactId,
+        );
+      } catch {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+          "AI-assisted provenance could not be reserved.",
+        );
+      }
+      if (
+        !mongoIdentifierPattern.test(reservation.commentId) ||
+        (reservation.created && reservation.commentId !== generatedCommentId)
+      ) {
+        throw postingError(
+          "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
+          "AI-assisted provenance returned the wrong comment identifier.",
+        );
+      }
+      if (reservation.confirmed) {
+        recordProvenance(projectId, reservation.commentId);
+        return { commentId: reservation.commentId };
+      }
     }
-    if (reservation.commentId !== commentId) {
-      throw postingError(
-        "AI_REVIEWER_COMMENT_PROVENANCE_FAILED",
-        "AI-assisted provenance returned the wrong comment identifier.",
-      );
-    }
+    const commentId = reservation.commentId;
+    const claimedHere = reservation.created;
 
     const rollbackReservation = async () => {
-      if (!reservation.created) {
+      // Only release a claim this attempt created. A claim carried over from
+      // an earlier attempt may already have a comment behind it, because that
+      // attempt ended without confirmation. Releasing it would let the next
+      // attempt mint a second identifier and post the duplicate this claim
+      // exists to prevent. Keeping it costs nothing: the claim pins the
+      // identifier, it never blocks posting.
+      if (!claimedHere) {
         return;
       }
       try {

@@ -228,6 +228,8 @@ describe("AI reviewer: artifact comment posting", function () {
     });
     expect(fixture.postComment).to.have.been.calledOnceWithExactly({
       projectId,
+      runId: "request-0001",
+      artifactId: "finding-0001",
       documentId,
       from: range.from,
       to: range.to,
@@ -254,6 +256,8 @@ describe("AI reviewer: artifact comment posting", function () {
     });
     expect(fixture.postComment).to.have.been.calledOnceWithExactly({
       projectId,
+      runId: "request-0001",
+      artifactId: "suggestion-0001",
       documentId,
       from: range.from,
       to: range.to,
@@ -279,6 +283,8 @@ describe("AI reviewer: artifact comment posting", function () {
       });
       expect(fixture.postComment).to.have.been.calledOnceWithExactly({
         projectId,
+        runId: "request-0001",
+        artifactId: "suggestion-0001",
         documentId,
         from: range.from,
         to: range.to,
